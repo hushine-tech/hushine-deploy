@@ -14,12 +14,18 @@ TIMESCALE_DB_PATTERN="${E2E_TIMESCALE_DB_PATTERN:-binance_{year}}"
 # ── 端口配置（独立端口，避免冲突）──────────────────────────────────────────────
 ACCT_HTTP=18080
 ACCT_GRPC=18051
+CP_HTTP=18082
+CP_GRPC=18054
 STRAT_GRPC=18053
 HANDLER_HTTP=18090
 JWT_SECRET="e2e-secret-key-do-not-use-in-prod"
 RUN_ID="$(date +%s)-$$"
 LOGIN_USER="e2e-user-${RUN_ID}"
 LOGIN_PASS="e2e-pass-${RUN_ID}"
+API="http://127.0.0.1:${HANDLER_HTTP}"
+CP_CONFIG="/tmp/e2e-control-panel-${RUN_ID}.yaml"
+RUNTIME_ID=""
+TOKEN=""
 
 # ── 颜色 ──────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
@@ -32,10 +38,14 @@ PIDS=()
 
 cleanup() {
     info "Cleaning up..."
+    if [ -n "${RUNTIME_ID:-}" ] && [ -n "${TOKEN:-}" ]; then
+        curl -s -X DELETE "${API}/api/runtimes/${RUNTIME_ID}" -H "Authorization: Bearer ${TOKEN}" >/dev/null 2>&1 || true
+    fi
     for pid in "${PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
+    rm -f "${CP_CONFIG}"
     info "Done."
 }
 trap cleanup EXIT
@@ -53,6 +63,7 @@ pass "Test data seeded"
 # ══════════════════════════════════════════════════════════════════════════════
 info "Step 1: Building services"
 cd "$ROOT/account-service" && go build -o "$ROOT/.e2e-build/account-service" ./cmd/account-service 2>&1
+cd "$ROOT/control-panel-service" && go build -o "$ROOT/.e2e-build/control-panel-service" ./cmd/control-panel-service 2>&1
 cd "$ROOT/gateway/quant-handler" && go build -o "$ROOT/.e2e-build/quant-handler" ./cmd/quant-handler 2>&1
 pass "All Go services built"
 
@@ -72,6 +83,71 @@ GRPC_ADDR=":${ACCT_GRPC}" \
 PIDS+=($!)
 echo "  account-service  PID=$! → HTTP:${ACCT_HTTP} gRPC:${ACCT_GRPC} (account.v1 + order.v1)"
 
+# control-panel-service
+cat > "${CP_CONFIG}" <<EOF
+server:
+  http_addr: ":${CP_HTTP}"
+  grpc_addr: ":${CP_GRPC}"
+
+database:
+  host: "${DB_HOST}"
+  port: 5432
+  user: "postgres"
+  password: "postgres"
+  dbname: "control_panel"
+  sslmode: "disable"
+
+market_data:
+  host: "${DB_HOST}"
+  port: 5432
+  user: "postgres"
+  password: "postgres"
+  database: "${TIMESCALE_DB_PATTERN}"
+  sslmode: "disable"
+
+dependencies:
+  account_service_grpc: "127.0.0.1:${ACCT_GRPC}"
+  order_service_grpc: "127.0.0.1:${ACCT_GRPC}"
+  legacy_strategy_service_grpc: "127.0.0.1:${STRAT_GRPC}"
+
+provisioning:
+  backend: "docker"
+  image: "hushine/strategy-runtime:executor-dev"
+  advertise_host: "127.0.0.1"
+  port_range_base: 50100
+  port_range_size: 200
+  registration_timeout_seconds: 30
+  docker:
+    network_mode: "bridge"
+    control_panel_dial_addr: "host.docker.internal:${CP_GRPC}"
+    label_prefix: "hushine.runtime"
+    runtime_user_grpc_port: 50053
+
+notification:
+  enabled: false
+  kafka:
+    brokers: ["${DB_HOST}:19092"]
+    topic: "notification.events"
+    client_id: "control-panel-service-e2e"
+
+log:
+  output_dir: "./logs"
+  local_file:
+    enabled: true
+  kafka:
+    enabled: false
+  tracing:
+    enabled: false
+EOF
+
+cd "$ROOT/control-panel-service"
+ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
+ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
+STRATEGY_SERVICE_GRPC_ADDR="127.0.0.1:${STRAT_GRPC}" \
+"$ROOT/.e2e-build/control-panel-service" -config "${CP_CONFIG}" > /tmp/e2e-control-panel.log 2>&1 &
+PIDS+=($!)
+echo "  control-panel    PID=$! → HTTP:${CP_HTTP} gRPC:${CP_GRPC}"
+
 # strategy-service
 cd "$ROOT/strategy-service"
 PYTHONPATH="$ROOT/strategy-service:$ROOT/strategy-service/strategy-library" \
@@ -88,6 +164,8 @@ echo "  strategy-service PID=$! → gRPC:${STRAT_GRPC}"
 cd "$ROOT/gateway/quant-handler"
 ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 STRATEGY_SERVICE_GRPC_ADDR="127.0.0.1:${STRAT_GRPC}" \
+CONTROL_PANEL_SERVICE_GRPC_ADDR="127.0.0.1:${CP_GRPC}" \
+FEATURES_CONTROL_PANEL_ROUTE_RESOLUTION=1 \
 QUANT_HANDLER_JWT_SECRET="${JWT_SECRET}" \
 HTTP_ADDR=":${HANDLER_HTTP}" \
 HANDLER_CORS_ORIGINS="http://localhost:5173" \
@@ -97,15 +175,15 @@ echo "  quant-handler    PID=$! → HTTP:${HANDLER_HTTP}"
 
 # ── Wait for services ────────────────────────────────────────────────────────
 info "Waiting for services to be ready..."
-API="http://127.0.0.1:${HANDLER_HTTP}"
 # Wait for HTTP healthz first
 for i in $(seq 1 30); do
-    if curl -s "${API}/healthz" > /dev/null 2>&1; then
+    if curl -s "${API}/healthz" > /dev/null 2>&1 && curl -s "http://127.0.0.1:${CP_HTTP}/readyz" > /dev/null 2>&1; then
         break
     fi
     if [ "$i" -eq 30 ]; then
         fail "Services did not start within 30s"
         echo "--- account-service log ---"; tail -20 /tmp/e2e-account.log 2>/dev/null
+        echo "--- control-panel log ---"; tail -20 /tmp/e2e-control-panel.log 2>/dev/null
         echo "--- strategy-service log ---"; tail -20 /tmp/e2e-strategy.log 2>/dev/null
         echo "--- quant-handler log ---";   tail -20 /tmp/e2e-handler.log 2>/dev/null
         exit 1
@@ -225,19 +303,40 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 7: Run backtest
+# Step 7: Ensure hosted runtime + run backtest
 # ══════════════════════════════════════════════════════════════════════════════
-info "Step 7: Run backtest (200 bars, 1m interval, TESTUSDT)"
+info "Step 7: Ensure hosted runtime"
+bash "$ROOT/strategy-service/scripts/build_strategy_runtime.sh" dev >/tmp/e2e-runtime-image.log 2>&1
+cd "$ROOT/control-panel-service"
+RUNTIME_RESP=$(go run scripts/smoke_ensure_runtime.go \
+    -addr "127.0.0.1:${CP_GRPC}" \
+    -user "${USER_ID}" \
+    -profile small \
+    -validate true 2>&1)
+echo "$RUNTIME_RESP"
+RUNTIME_ID=$(echo "$RUNTIME_RESP" | awk -F'= ' '/runtime_id/{gsub(/[[:space:]]/, "", $2); print $2; exit}')
+if [ -z "$RUNTIME_ID" ]; then
+    fail "EnsureHostedRuntime did not return runtime_id"
+    echo "--- control-panel log ---"
+    tail -40 /tmp/e2e-control-panel.log
+    echo "--- runtime image log ---"
+    tail -40 /tmp/e2e-runtime-image.log
+    exit 1
+fi
+pass "Hosted runtime active: ${RUNTIME_ID}"
+
+info "Step 8: Run backtest (200 bars, 1m interval, TESTUSDT)"
 # start_time_ms = 2025-01-01T00:00:00Z = 1735689600000
 # end_time_ms   = 2025-01-01T03:20:00Z = 1735701600000
 RUN_RESP=$(curl -s -X POST "${API}/api/accounts/${ACCOUNT_ID}/run-strategy" \
     -H "$AUTH" -H 'Content-Type: application/json' \
-    -d '{
-  "strategy_path": "",
-  "interval": "1m",
-  "start_time_ms": 1735689600000,
-  "end_time_ms": 1735701600000
-}')
+    -d "{
+  \"strategy_path\": \"\",
+  \"interval\": \"1m\",
+  \"start_time_ms\": 1735689600000,
+  \"end_time_ms\": 1735701600000,
+  \"runtime_id\": \"${RUNTIME_ID}\"
+}")
 SESSION_ID=$(echo "$RUN_RESP" | jq -r '.session_id')
 if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
     fail "Run backtest failed: $RUN_RESP"
@@ -248,15 +347,15 @@ fi
 pass "Backtest started: session=${SESSION_ID}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 8: Poll status
+# Step 9: Poll status
 # ══════════════════════════════════════════════════════════════════════════════
-info "Step 8: Polling backtest status..."
+info "Step 9: Polling backtest status..."
 for i in $(seq 1 30); do
     STATUS_RESP=$(curl -s "${API}/api/strategy-sessions/${SESSION_ID}" -H "$AUTH" 2>/dev/null || echo '{"status":"error"}')
     STATUS=$(echo "$STATUS_RESP" | jq -r '.status')
     BARS=$(echo "$STATUS_RESP" | jq -r '.bars_processed')
 
-    if [ "$STATUS" = "completed" ]; then
+    if [ "$STATUS" = "completed" ] || [ "$STATUS" = "finished" ]; then
         pass "Backtest completed: bars_processed=${BARS}"
         break
     elif [ "$STATUS" = "failed" ]; then
@@ -270,15 +369,15 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-if [ "$STATUS" != "completed" ]; then
+if [ "$STATUS" != "completed" ] && [ "$STATUS" != "finished" ]; then
     fail "Backtest did not complete within 60s"
     exit 1
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 9: Verify results
+# Step 10: Verify results
 # ══════════════════════════════════════════════════════════════════════════════
-info "Step 9: Verifying results"
+info "Step 10: Verifying results"
 
 # 9a. bars_processed == 200
 if [ "$BARS" = "200" ]; then
@@ -412,7 +511,11 @@ else
 
     [ "$SESSION_ACCOUNT_ID" = "$ACCOUNT_ID" ] && pass "strategy_sessions account_id matches ${ACCOUNT_ID}" || fail "strategy_sessions account_id=${SESSION_ACCOUNT_ID}, expected ${ACCOUNT_ID}"
     [ "$SESSION_STRATEGY_ID" = "$STRATEGY_ID" ] && pass "strategy_sessions strategy_id matches ${STRATEGY_ID}" || fail "strategy_sessions strategy_id=${SESSION_STRATEGY_ID}, expected ${STRATEGY_ID}"
-    [ "$SESSION_STATUS" = "completed" ] && pass "strategy_sessions status=completed" || fail "strategy_sessions status=${SESSION_STATUS}, expected completed"
+    if [ "$SESSION_STATUS" = "completed" ] || [ "$SESSION_STATUS" = "finished" ]; then
+        pass "strategy_sessions status=${SESSION_STATUS}"
+    else
+        fail "strategy_sessions status=${SESSION_STATUS}, expected completed/finished"
+    fi
     [ "$SESSION_BARS" = "$BARS" ] && pass "strategy_sessions bars_processed=${BARS}" || fail "strategy_sessions bars_processed=${SESSION_BARS}, expected ${BARS}"
 fi
 
