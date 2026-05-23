@@ -18,6 +18,15 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Service repositories cloned beside this deployment repo
+account-service/
+control-panel-service/
+gateway/
+scraper/
+strategy-service/
+strategy-library/
+golang-lib/
+
 # IDE / agent local state
 .idea/
 .cursor/
