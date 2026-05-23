@@ -1,0 +1,26 @@
+# Local secrets/config
+.env
+.env.*
+!.env.example
+*.local
+config.local.yaml
+
+# Runtime artifacts
+logs/
+*.log
+*.pid
+.run.pid
+bin/
+dist/
+build/
+.pytest_cache/
+__pycache__/
+*.pyc
+.DS_Store
+
+# IDE / agent local state
+.idea/
+.cursor/
+.claude/
+.opencode/
+.agents/
