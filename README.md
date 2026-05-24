@@ -48,7 +48,7 @@ hushine/
 
 | Directory | GitHub repo | Language | Port(s) |
 |---|---|---|---|
-| `core-service` | `hushine-tech/core-service` | Go | HTTP `:8080`, gRPC `:50051`; serves `account.v1` and `order.v1` |
+| `core-service` | `hushine-tech/core-service` | Go | HTTP `:18080` when started by `restart.sh`, gRPC `:50051`; serves `account.v1` and `order.v1` |
 | `control-panel-service` | `hushine-tech/control-panel-service` | Go | gRPC `:50054`, HTTP `:8082` |
 | `gateway/quant-handler` | `hushine-tech/quant-handler` | Go | HTTP `:8090` |
 | `gateway/quant-frontend` | `hushine-tech/quant-frontend` | React | `:5173` |
@@ -120,6 +120,7 @@ make clean
 
 - Schema inventory: [db/README.md](db/README.md)
 - Production deploy checklist: [docs/production-deploy-checklist.md](docs/production-deploy-checklist.md)
+- Chrome DevTools UI smoke runbook: [docs/chrome-devtools-smoke-test.md](docs/chrome-devtools-smoke-test.md)
 - Local Docker infra: [deploy/local/docker-compose.yml](deploy/local/docker-compose.yml)
 - Tracing verification: `bash scripts/verify_tracing.sh`
 - Full local flow smoke: `bash scripts/e2e_full_flow.sh`

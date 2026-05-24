@@ -94,19 +94,23 @@ make start
 ```bash
 lsof -nP \
   -iTCP:50051 -iTCP:50053 -iTCP:50054 \
-  -iTCP:8090 -iTCP:5173 -iTCP:8080 -iTCP:8082 \
+  -iTCP:8090 -iTCP:5173 -iTCP:18080 -iTCP:8082 \
   -sTCP:LISTEN
 ```
 
 预期：
 
-- `core-service`: `:50051`, `:8080`
+- `core-service`: `:50051`，`restart.sh` 启动时为 `:18080`
 - `control-panel-service`: `:50054`, `:8082`
 - `strategy-service`: `:50053`
 - `quant-handler`: `:8090`
 - `quant-frontend`: `:5173`
 
 ## 6. 核心 Smoke
+
+UI 冒烟测试以 Chrome DevTools 真实页面操作为准。完整流程见
+[Chrome DevTools 冒烟测试流程](chrome-devtools-smoke-test.md)。下面命令行
+检查只作为前置探测和交叉验证，不能单独替代 UI smoke。
 
 ### 6.1 前端/API
 
@@ -211,7 +215,7 @@ make stop
 ```bash
 lsof -nP \
   -iTCP:50051 -iTCP:50053 -iTCP:50054 \
-  -iTCP:8090 -iTCP:5173 -iTCP:8080 -iTCP:8082 \
+  -iTCP:8090 -iTCP:5173 -iTCP:18080 -iTCP:8082 \
   -sTCP:LISTEN || true
 ```
 
