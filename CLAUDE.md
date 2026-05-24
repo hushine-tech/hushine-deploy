@@ -12,9 +12,9 @@ Language: Chinese is the working language for comments, docs, and commit message
 
 **Current: Stage 1 complete; `Phase C / C3` closed. The next main phase is product iteration around remote debug mode and strategy authoring.**
 
-- **Stage 1 (complete)** — End-to-end happy path: `quant-frontend` → `quant-handler` → `account-service` (`account.v1` + `order.v1`) → `strategy-service` → back. Backtests run, orders flow through the account-service order module, wallets update through the full chain.
+- **Stage 1 (complete)** — End-to-end happy path: `quant-frontend` → `quant-handler` → `core-service` (`account.v1` + `order.v1`) → `strategy-service` → back. Backtests run, orders flow through the core-service order module, wallets update through the full chain.
 - **Stage 2 (active)** — Wallet/account hardening for exchange-backed modes.
-  - `Phase A` (account-service exchange adapter): complete and archived.
+  - `Phase A` (core-service exchange adapter): complete and archived.
   - `Phase B1/B2/B3` (strategy-service): complete. Runtime split, strict canonical contract, backtest bootstrap, metadata-backed risk fields, futures open-order lifecycle, ledger events, isolated-wallet/break-even parity, spot locked lifecycle, unsupported Binance margin modes fail-closed.
   - `mode=0` and `mode=2` share `BinanceWalletRuntime`; `mode=1` remains intentionally fail-closed.
 - **Stage 2 priorities from here**, in recommended order:
@@ -42,7 +42,7 @@ Child repository OpenSpec folders were moved out of the code repositories and ar
 
 - `/Users/xdy/Workplace/hushine-doc-archive/2026-05-16-openspec-superpowers-115238`
 
-Do not recreate `openspec/` inside child code repositories such as `account-service`, `strategy-service`, `gateway/quant-handler`, or `gateway/quant-frontend` unless explicitly requested. Child repositories ignore `/openspec/`.
+Do not recreate `openspec/` inside child code repositories such as `core-service`, `strategy-service`, `gateway/quant-handler`, or `gateway/quant-frontend` unless explicitly requested. Child repositories ignore `/openspec/`.
 
 ### Runtime identity and routing state
 
@@ -69,7 +69,7 @@ Manual hosted+self-hosted smoke was partially exercised during local testing but
 
 ### Local stack status and fixes
 
-`restart.sh` is the current local startup entrypoint. It starts account-service, control-panel-service, strategy-service, scraper, quant-handler, and quant-frontend against third-party dependencies on `192.168.88.10`. `order.v1` is served by account-service; `restart.sh` only cleans legacy `50052` listeners and does not start an independent order-service.
+`restart.sh` is the current local startup entrypoint. It starts core-service, control-panel-service, strategy-service, scraper, quant-handler, and quant-frontend against third-party dependencies on `192.168.88.10`. `order.v1` is served by core-service; `restart.sh` only cleans legacy `50052` listeners and does not start an independent order-service.
 
 Important fixes already applied:
 
@@ -101,7 +101,7 @@ Phase D (runtime control plane / 用户隔离 / 容器化调试). Each phase = o
 | Phase | Topic | OpenSpec change | Status |
 |---|---|---|---|
 | **D1** | Hosted-only runtime control plane | `phase-d1-runtime-control-plane` | Complete (41/41) |
-| **D2** | Market data control-plane migration out of `account-service` | `phase-d2-marketdata-control-plane` | **Code-side complete (52/53, 2026-05-06)** — sections 1-9 + 10.1-10.6 done; 10.7 operator manual smoke pending |
+| **D2** | Market data control-plane migration out of `core-service` | `phase-d2-marketdata-control-plane` | **Code-side complete (52/53, 2026-05-06)** — sections 1-9 + 10.1-10.6 done; 10.7 operator manual smoke pending |
 | **D3** | Self-hosted runtime ingress (RuntimeChannel + credentials + control-plane proxy) | `phase-d3-self-hosted-runtime` | **Code/docs complete except manual smoke (34/36, 2026-05-11)** — remaining: UI-downloaded credential + self-hosted mode=0 backtest, and remote/NAT-bound Docker runtime smoke |
 | **D4** | IDE breakpoint debugging | not yet specced | depends on D3 |
 
@@ -129,14 +129,14 @@ Smoke helpers:
 - **D1 is hosted-only**; self-hosted moved to D3 because direct-dial fails for NAT-bound deployments.
 - **handler→runtime is direct-dial**; control-panel only resolves routes, not in the data path. D3 changes this for self-hosted via reverse-tunnel proxy.
 - **handler↔control-panel trusts internal network** (no service-level token in D1; D3's mTLS replaces the trust boundary anyway).
-- `users.plan_code` lives in `account` DB; control-panel reads via `account-service.GetUser` RPC.
+- `users.plan_code` lives in `account` DB; control-panel reads via `core-service.GetUser` RPC.
 - Hosted default runtime is **lazy** — created on first strategy run, not eagerly at user creation.
 - Runtime auth in D1 = gRPC metadata tokens only (`registration_token`, `caller_token`). mTLS deferred to D3+.
 - Runtime plans are config-file-driven (`runtime_plans:` in `control-panel-service/config.yaml`); debug default `pro`. Plan/platform limits use `0=forbid, -1=unlimited, >0=real cap`.
 
 ### D2 progress (code-side complete 2026-05-06, 46/53)
 
-Migrates the **market-data control plane** (4 tables + 10 RPCs) out of `account-service` into `control-panel-service`. Hard-cut migration; 3 callers (scraper, quant-handler, strategy-service) flip in the same PR.
+Migrates the **market-data control plane** (4 tables + 10 RPCs) out of `core-service` into `control-panel-service`. Hard-cut migration; 3 callers (scraper, quant-handler, strategy-service) flip in the same PR.
 
 **Done (sections 1–9, 46 tasks):**
 - Schema: migrations `0003-0006_*.sql` in `control-panel-service/internal/storage/migrations/`. Cross-DB FK to `account.users(id)` dropped — documented as known orphan-on-delete behavior change (S1 review fix); revisit when a real user-deletion path lands.
@@ -144,10 +144,10 @@ Migrates the **market-data control plane** (4 tables + 10 RPCs) out of `account-
 - Package reorg: `internal/service/` → `internal/runtime/`; new `internal/marketdata/` subdomain (service + repository + `activeLeaseCount` helper that documents the swallow). Single shared `*sql.DB` pool via `repository.TimescaleRepository.DB()`. 22 unit tests cover all 10 RPCs.
 - `cmd/control-panel-service/main.go` registers both runtime + marketdata services on `:50054`.
 - Migration tool `scripts/migrate_market_data/main.go` — idempotent per-row INSERT + `ON CONFLICT DO NOTHING`, row-count parity check, automatic `setval()` resync of all 3 BIGSERIAL sequences (M1 review fix), `pg_dump` warning + 5s pause.
-- Scraper repointed: `accountv1.AccountServiceClient` → `mdv1.MarketDataControlPlaneServiceClient`; config `account_service_grpc` → `market_data_control_panel_grpc`; default `127.0.0.1:50051` → `127.0.0.1:50054`. `go.mod` replace flipped from account-service to control-panel-service.
+- Scraper repointed: `accountv1.AccountServiceClient` → `mdv1.MarketDataControlPlaneServiceClient`; config `account_service_grpc` → `market_data_control_panel_grpc`; default `127.0.0.1:50051` → `127.0.0.1:50054`. `go.mod` replace flipped from core-service to control-panel-service.
 - quant-handler repointed: `s.accounts.X` → `s.marketData.X`; `handleMarketData` returns 503 if `s.marketData == nil`. Test fake renamed `fakeAccountsClient` → `fakeMarketDataClient` (S3 review fix).
 - strategy-service split: new `marketdata_client.py` with the 3 RPCs strategy-service actually calls (`GetMarketDataStreamStatus`, `CreateOrRenewMarketDataLease`, `ReleaseMarketDataLease`); `account_client.py` slimmed; `grpc_server.py` rewired with new constructor param `market_data_control_panel_addr` and a `MarketDataClient` per `RunStrategy`/`PreviewRunStrategy` invocation; `config.py` adds `dependencies.market_data_control_panel_grpc` with auto-fallback to `control_panel_service_grpc`. 3 tests updated (`monkeypatch.setattr(grpc_server, "MarketDataClient", FakeMarketDataClient)`).
-- account-service cleanup: migration `0012_drop_market_data_control_plane.sql` (CASCADE drop on all 4 tables); 10 RPCs + 5 message types removed from `account_service.proto`; `grpc_market_data.go` / `market_data_control_plane.go` / `market_data_history.go` deleted; `Repository` interface block trimmed; ~22 stub methods removed from `grpc_account_meta_test.go` and `tests/repository_test.go`; marketdata domain types removed from `internal/domain/model.go`. Historical migrations `0009`/`0010` deleted.
+- core-service cleanup: migration `0012_drop_market_data_control_plane.sql` (CASCADE drop on all 4 tables); 10 RPCs + 5 message types removed from `account_service.proto`; `grpc_market_data.go` / `market_data_control_plane.go` / `market_data_history.go` deleted; `Repository` interface block trimmed; ~22 stub methods removed from `grpc_account_meta_test.go` and `tests/repository_test.go`; marketdata domain types removed from `internal/domain/model.go`. Historical migrations `0009`/`0010` deleted.
 - Docs: `db/README.md` table-ownership move; control-panel `README.md` extended with the 7-step D2 cutover sequence (`pg_dump` → migrate-script → flip callers → drop source); this snapshot + `progress/phase-d-runtime-control-plane.md` updated.
 
 **Remaining (section 10, 7 tasks):**
@@ -185,7 +185,7 @@ C7 (phishing scenario polish) and C8 (per-session attestation re-entry note) int
 ```
 quant-frontend (React :5173)
     → quant-handler (Go BFF :8090, JWT auth)
-        → account-service (gRPC :50051, HTTP :8080)
+        → core-service (gRPC :50051, HTTP :8080)
             → account.v1 (account/session/wallet APIs)
             → order.v1 (order placement/query APIs)
             → TimescaleDB (account DB)
@@ -200,7 +200,7 @@ quant-frontend (React :5173)
 
 control-panel-service (Go gRPC :50054, HTTP :8082) — Phase D1
     → TimescaleDB (control_panel DB)
-    → account-service (gRPC, GetUser → users.plan_code)
+    → core-service (gRPC, GetUser → users.plan_code)
     → docker daemon (DockerProvisioner via os/exec)
     Owns runtime registry / route resolution / per-user plan/quota /
     hosted runtime provisioning / caller_token issuance & validation.
@@ -213,8 +213,8 @@ scraper (Go)
 
 strategy-service / strategy-runtime (Python gRPC :50053)
     → TimescaleDB (backtest reads)
-    → account-service (gRPC, wallet sync)
-    → account-service/order.v1 (gRPC, place/cancel/query orders)
+    → core-service (gRPC, wallet sync)
+    → core-service/order.v1 (gRPC, place/cancel/query orders)
     → control-panel-service (gRPC, RegisterRuntime + Heartbeat +
        ValidateCallerToken, when RUNTIME_REGISTER_WITH_CONTROL_PANEL=1)
     → [Stage 2] Kafka live data via LiveDataLoop (consumer/session path not production-proven)
@@ -222,9 +222,9 @@ strategy-service / strategy-runtime (Python gRPC :50053)
     self-registers, heartbeats, runs CallerTokenInterceptor at server
     level; bound to one user_id at registration.
 
-account-service/internal/order
+core-service/internal/order
     → TimescaleDB (order history / fills)
-    → account-service repository via in-process adapter
+    → core-service repository via in-process adapter
     → [Stage 2] Binance / testnet REST for real order placement
 ```
 
@@ -246,11 +246,11 @@ make test        # run tests in all services
 Each service Makefile has: `build`, `dev`, `start`, `stop`, `test`, `clean`.
 
 ```bash
-cd account-service
+cd core-service
 make proto              # → gen/accountv1/
 make ensure-db          # create TimescaleDB schema
 make test-integration   # requires TimescaleDB
-make dev                # go run ./cmd/account-service -config ./config.yaml
+make dev                # go run ./cmd/core-service -config ./config.yaml
 ```
 
 ```bash
@@ -314,13 +314,13 @@ Every table and its owning service is listed in `db/README.md`. New migrations:
 - **1 (live)**: Binance API authoritative → strategy wallet ignored. **Currently fail-closed.**
 - **2 (testnet)**: Same as live but uses `testnet.binancefuture.com`.
 
-Routing: `account-service/internal/exchange/router.go` and `account-service/internal/service/grpc.go`.
+Routing: `core-service/internal/exchange/router.go` and `core-service/internal/service/grpc.go`.
 
 ### Strategy Execution Flow
 4 steps per market data tick (`strategy-service/strategy_service/strategy/base.py`):
 1. `wallet.on_market_data(symbol, symbol_type, price)` — update mark prices.
 2. `user_strategy.on_market_data(data, wallet)` — returns `OrderDecision` or None.
-3. `place_order(decision, mark_price)` — routed to `account-service/order.v1` via gRPC. Stage 1 fill model is idealized (no slippage, instant fill at mark price); real Binance / testnet execution lands in Stage 2.
+3. `place_order(decision, mark_price)` — routed to `core-service/order.v1` via gRPC. Stage 1 fill model is idealized (no slippage, instant fill at mark price); real Binance / testnet execution lands in Stage 2.
 4. `wallet.on_order(symbol, symbol_type, order_response)` — settle position.
 
 ⚠️ Stage 1 caveat: rollback on order rejection / partial fill / network failure is not implemented yet.
@@ -362,7 +362,7 @@ W3C traceparent propagated via gRPC metadata across all backend services. Jaeger
 - Regression: `bash scripts/verify_tracing.sh`.
 
 ### gRPC Proto
-- `account-service/proto/account_service.proto` (package `account.v1`) — users / accounts / wallet / strategy sessions.
+- `core-service/proto/account_service.proto` (package `account.v1`) — users / accounts / wallet / strategy sessions.
 - `control-panel-service/proto/control_panel_service.proto` — D3 runtime control plane, routing, credentials, and RuntimeChannel proxy.
 - `control-panel-service/proto/marketdata_service.proto` (package `controlpanel.marketdata.v1`) — D2 market-data control plane.
 - Strategy-service generates Python stubs via `strategy-service/generate_proto.sh`.
@@ -371,15 +371,15 @@ W3C traceparent propagated via gRPC metadata across all backend services. Jaeger
 
 | Service | Variable | Default | Notes |
 |---------|----------|---------|-------|
-| account-service | `TIMESCALEDB_DSN` | `host=192.168.88.10 ...` | PostgreSQL DSN |
-| account-service | `MOCK_BINANCE` | unset | `1` for testing without Binance API |
-| account-service | `SYMBOL_CACHE_TTL` | `6h` | Go duration |
+| core-service | `TIMESCALEDB_DSN` | `host=192.168.88.10 ...` | PostgreSQL DSN |
+| core-service | `MOCK_BINANCE` | unset | `1` for testing without Binance API |
+| core-service | `SYMBOL_CACHE_TTL` | `6h` | Go duration |
 | control-panel-service | `TIMESCALEDB_DSN` | `host=192.168.88.10 ... dbname=control_panel` | DSN |
 | control-panel-service | `HTTP_ADDR` | `:8082` | health / readyz |
 | control-panel-service | `GRPC_ADDR` | `:50054` | gRPC |
-| control-panel-service | `ACCOUNT_SERVICE_GRPC_ADDR` | `127.0.0.1:50051` | for `GetUser` plan lookup |
+| control-panel-service | `CORE_SERVICE_GRPC_ADDR` / `ACCOUNT_SERVICE_GRPC_ADDR` | `127.0.0.1:50051` | for `GetUser` plan lookup |
 | control-panel-service | `RUNTIME_PLATFORM_DEFAULT_PLAN_CODE` | `pro` | overrides config default plan |
-| quant-handler | `ACCOUNT_SERVICE_GRPC_ADDR` | **required** | e.g. `127.0.0.1:50051` |
+| quant-handler | `CORE_SERVICE_GRPC_ADDR` / `ACCOUNT_SERVICE_GRPC_ADDR` | **required** | e.g. `127.0.0.1:50051`; old name remains compatible |
 | quant-handler | `QUANT_HANDLER_JWT_SECRET` | **required** | HMAC signing key |
 | quant-handler | `HTTP_ADDR` | `:8090` | |
 | quant-handler | `HANDLER_CORS_ORIGINS` | `http://localhost:5173` | |
@@ -395,7 +395,7 @@ W3C traceparent propagated via gRPC metadata across all backend services. Jaeger
 - **Order failure paths**: strategy-service handles only the happy path. Rejections, insufficient margin, rate limits, network timeouts, partial fills — none have rollback logic.
 - **Live wallet runtime**: `mode=1` is intentionally fail-closed (rollout guardrail).
 - **Exchange-backed end-to-end proof gap**: `mode=2` has run and produced reconciliation samples, but long-run operational confidence still requires repeated full sessions (testnet account fetch → strategy loop → order flow → post-fill reconciliation).
-- **Real Binance / testnet execution**: account-service's order module is partially wired for Binance futures REST. Spot execution missing, limit-order semantics incomplete, and long-run exchange-backed confidence still depends on repeated sessions.
+- **Real Binance / testnet execution**: core-service's order module is partially wired for Binance futures REST. Spot execution missing, limit-order semantics incomplete, and long-run exchange-backed confidence still depends on repeated sessions.
 - **Kafka market data pipeline**: `scraper` has Kafka publisher and live-delivery gating for canonical market-data topics, but the strategy-service live consumer/session path is not production-proven end-to-end.
 - **Session lifecycle**: backend `StopStrategy` and gateway `/api/strategy-sessions/:id/stop` exist; `close_positions=true` is still TODO; frontend account page does not expose stop yet.
 - **C3 follow-up observation**: real reconciliation samples across `checkpoint / event / sampled`, break-even advisory drift, funding-fee movement, threshold calibration.

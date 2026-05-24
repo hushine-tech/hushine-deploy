@@ -62,7 +62,7 @@ pass "Test data seeded"
 # Step 1: Build services
 # ══════════════════════════════════════════════════════════════════════════════
 info "Step 1: Building services"
-cd "$ROOT/account-service" && go build -o "$ROOT/.e2e-build/account-service" ./cmd/account-service 2>&1
+cd "$ROOT/core-service" && go build -o "$ROOT/.e2e-build/core-service" ./cmd/core-service 2>&1
 cd "$ROOT/control-panel-service" && go build -o "$ROOT/.e2e-build/control-panel-service" ./cmd/control-panel-service 2>&1
 cd "$ROOT/gateway/quant-handler" && go build -o "$ROOT/.e2e-build/quant-handler" ./cmd/quant-handler 2>&1
 pass "All Go services built"
@@ -72,16 +72,16 @@ pass "All Go services built"
 # ══════════════════════════════════════════════════════════════════════════════
 info "Step 2: Starting services"
 
-# account-service
-cd "$ROOT/account-service"
+# core-service
+cd "$ROOT/core-service"
 TIMESCALEDB_DSN="host=${DB_HOST} port=5432 user=postgres password=postgres dbname=${ACCOUNT_DB_NAME} sslmode=disable" \
 ORDER_TIMESCALEDB_DSN="host=${DB_HOST} port=5432 user=postgres password=postgres dbname=${ORDER_DB_NAME} sslmode=disable" \
 MOCK_BINANCE=1 \
 HTTP_ADDR=":${ACCT_HTTP}" \
 GRPC_ADDR=":${ACCT_GRPC}" \
-"$ROOT/.e2e-build/account-service" > /tmp/e2e-account.log 2>&1 &
+"$ROOT/.e2e-build/core-service" > /tmp/e2e-account.log 2>&1 &
 PIDS+=($!)
-echo "  account-service  PID=$! → HTTP:${ACCT_HTTP} gRPC:${ACCT_GRPC} (account.v1 + order.v1)"
+echo "  core-service  PID=$! → HTTP:${ACCT_HTTP} gRPC:${ACCT_GRPC} (account.v1 + order.v1)"
 
 # control-panel-service
 cat > "${CP_CONFIG}" <<EOF
@@ -141,6 +141,7 @@ log:
 EOF
 
 cd "$ROOT/control-panel-service"
+CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 STRATEGY_SERVICE_GRPC_ADDR="127.0.0.1:${STRAT_GRPC}" \
@@ -152,6 +153,7 @@ echo "  control-panel    PID=$! → HTTP:${CP_HTTP} gRPC:${CP_GRPC}"
 cd "$ROOT/strategy-service"
 PYTHONPATH="$ROOT/strategy-service:$ROOT/strategy-service/strategy-library" \
 GRPC_ADDR="0.0.0.0:${STRAT_GRPC}" \
+CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 TIMESCALE_HOST="${DB_HOST}" \
@@ -162,6 +164,7 @@ echo "  strategy-service PID=$! → gRPC:${STRAT_GRPC}"
 
 # quant-handler
 cd "$ROOT/gateway/quant-handler"
+CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 STRATEGY_SERVICE_GRPC_ADDR="127.0.0.1:${STRAT_GRPC}" \
 CONTROL_PANEL_SERVICE_GRPC_ADDR="127.0.0.1:${CP_GRPC}" \
@@ -182,7 +185,7 @@ for i in $(seq 1 30); do
     fi
     if [ "$i" -eq 30 ]; then
         fail "Services did not start within 30s"
-        echo "--- account-service log ---"; tail -20 /tmp/e2e-account.log 2>/dev/null
+        echo "--- core-service log ---"; tail -20 /tmp/e2e-account.log 2>/dev/null
         echo "--- control-panel log ---"; tail -20 /tmp/e2e-control-panel.log 2>/dev/null
         echo "--- strategy-service log ---"; tail -20 /tmp/e2e-strategy.log 2>/dev/null
         echo "--- quant-handler log ---";   tail -20 /tmp/e2e-handler.log 2>/dev/null
@@ -190,8 +193,8 @@ for i in $(seq 1 30); do
     fi
     sleep 1
 done
-# Wait for gRPC backend (account-service) to be reachable through handler
-# Probe via quant-handler → account-service gRPC path using signup/login
+# Wait for gRPC backend (core-service) to be reachable through handler
+# Probe via quant-handler → core-service gRPC path using signup/login
 sleep 1
 for i in $(seq 1 15); do
     SIGNUP_RESP=$(curl -s -X POST "${API}/api/auth/signup" \
@@ -207,7 +210,7 @@ for i in $(seq 1 15); do
         break
     fi
     if [ "$i" -eq 15 ]; then
-        fail "account-service gRPC not ready within 15s: $PROBE"
+        fail "core-service gRPC not ready within 15s: $PROBE"
         exit 1
     fi
     sleep 1

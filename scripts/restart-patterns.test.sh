@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 required_patterns=(
-  './bin/account-service -config'
+  './bin/core-service -config'
   './bin/control-panel-service -config'
   './bin/quant-handler -config'
   'run_grpc_server.py -config'
@@ -14,7 +14,7 @@ required_patterns=(
 required_literals=(
   'kill_listening_ports'
   'app_ports=('
-  '50051:account-service'
+  '50051:core-service'
   '50053:strategy-service'
   '50054:control-panel-service'
   '8090:quant-handler'

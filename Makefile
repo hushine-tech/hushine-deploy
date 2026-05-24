@@ -1,5 +1,5 @@
 # Deployment Makefile for Hushine multi-repository source trees.
-# Clone hushine-tech/core-service into ./account-service; current service
+# Clone hushine-tech/core-service into ./core-service; current service
 # scripts still use that local directory/name.
 #
 #   make ensure-dbs — create all databases + apply migrations (idempotent, run first on fresh deploy)
@@ -9,7 +9,7 @@
 #   make stop       — stop background services started via 'make start'
 #   make clean      — remove binaries and PID files
 
-SERVICES := account-service control-panel-service strategy-service gateway/quant-handler gateway/quant-frontend scraper
+SERVICES := core-service control-panel-service strategy-service gateway/quant-handler gateway/quant-frontend scraper
 LOCAL_COMPOSE := docker compose -f deploy/local/docker-compose.yml
 DEV_NO_PROXY_HOSTS ?= 127.0.0.1,localhost,::1,192.168.88.10,host.docker.internal
 DEV_NO_PROXY := NO_PROXY=$(DEV_NO_PROXY_HOSTS),$${NO_PROXY} no_proxy=$(DEV_NO_PROXY_HOSTS),$${no_proxy}
@@ -61,7 +61,7 @@ audit:
 dev:
 	@echo "Starting all services in dev mode (Ctrl+C to stop)..."
 	@trap 'echo "Stopping..."; kill 0 2>/dev/null; exit 0' INT TERM EXIT; \
-	$(DEV_NO_PROXY) $(MAKE) -C account-service dev & \
+	$(DEV_NO_PROXY) $(MAKE) -C core-service dev & \
 	sleep 2; \
 	$(DEV_NO_PROXY) $(MAKE) -C control-panel-service dev & \
 	$(DEV_NO_PROXY) $(MAKE) -C strategy-service dev & \
@@ -73,7 +73,7 @@ dev:
 	wait
 
 start:
-	@$(DEV_NO_PROXY) $(MAKE) -C account-service start
+	@$(DEV_NO_PROXY) $(MAKE) -C core-service start
 	@sleep 2
 	@$(DEV_NO_PROXY) $(MAKE) -C control-panel-service start
 	@$(DEV_NO_PROXY) $(MAKE) -C strategy-service start
@@ -116,7 +116,7 @@ local-ensure-dbs:
 local-dev: local-bootstrap
 	@echo "Starting all services against local Docker infra (Ctrl+C to stop)..."
 	@trap 'echo "Stopping..."; kill 0 2>/dev/null; exit 0' INT TERM EXIT; \
-	$(LOCAL_NO_PROXY) $(MAKE) -C account-service CONFIG=./config.local.yaml dev & \
+	$(LOCAL_NO_PROXY) $(MAKE) -C core-service CONFIG=./config.local.yaml dev & \
 	sleep 2; \
 	$(LOCAL_NO_PROXY) $(MAKE) -C control-panel-service CONFIG=./config.local.yaml dev & \
 	$(LOCAL_NO_PROXY) $(MAKE) -C strategy-service CONFIG=./config.local.yaml dev & \
@@ -128,7 +128,7 @@ local-dev: local-bootstrap
 	wait
 
 local-start: local-bootstrap
-	@$(LOCAL_NO_PROXY) $(MAKE) -C account-service CONFIG=./config.local.yaml start
+	@$(LOCAL_NO_PROXY) $(MAKE) -C core-service CONFIG=./config.local.yaml start
 	@sleep 2
 	@$(LOCAL_NO_PROXY) $(MAKE) -C control-panel-service CONFIG=./config.local.yaml start
 	@$(LOCAL_NO_PROXY) $(MAKE) -C strategy-service CONFIG=./config.local.yaml start

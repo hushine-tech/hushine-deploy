@@ -25,7 +25,7 @@ export CONTROL_PANEL_SERVICE_GRPC_ADDR="${CONTROL_PANEL_SERVICE_GRPC_ADDR:-${CON
 export MARKET_DATA_CONTROL_PANEL_GRPC_ADDR="${MARKET_DATA_CONTROL_PANEL_GRPC_ADDR:-${CONTROL_PANEL_ADDR}}"
 export NOTIFICATION_KAFKA_BROKERS="${NOTIFICATION_KAFKA_BROKERS:-${DEP_HOST}:19092}"
 export NOTIFICATION_KAFKA_TOPIC="${NOTIFICATION_KAFKA_TOPIC:-notification.events}"
-export NOTIFICATION_KAFKA_GROUP_ID="${NOTIFICATION_KAFKA_GROUP_ID:-account-service-notification}"
+export NOTIFICATION_KAFKA_GROUP_ID="${NOTIFICATION_KAFKA_GROUP_ID:-core-service-notification}"
 
 check_port() {
   local host="$1"
@@ -100,8 +100,8 @@ echo "→ 停止现有服务..."
 make local-stop
 
 app_ports=(
-  "50051:account-service"
-  "18080:account-service-http"
+  "50051:core-service"
+  "18080:core-service-http"
   "50053:strategy-service"
   "50054:control-panel-service"
   "8082:control-panel-service-http"
@@ -109,7 +109,7 @@ app_ports=(
   "5173:quant-frontend"
 )
 
-# 历史遗留：order.v1 已并入 account-service，但开发机上可能还残留旧独立
+# 历史遗留：order.v1 已并入 core-service，但开发机上可能还残留旧独立
 # order-service 进程。这里仅清理，不再启动它。
 legacy_ports=(
   "50052:legacy-order-service"
@@ -117,9 +117,9 @@ legacy_ports=(
 
 # 兜底：仅清理仓库自己的残留进程，避免误杀同机其它服务（如 GitLab / Kafka / DB）。
 cleanup_patterns=(
-  "${REPO_ROOT}/account-service/bin/account-service" \
-  './bin/account-service -config' \
-  'go run ./cmd/account-service -config' \
+  "${REPO_ROOT}/core-service/bin/core-service" \
+  './bin/core-service -config' \
+  'go run ./cmd/core-service -config' \
   "${REPO_ROOT}/control-panel-service/bin/control-panel-service" \
   './bin/control-panel-service -config' \
   'go run ./cmd/control-panel-service -config' \
@@ -155,7 +155,7 @@ echo "→ 应用数据库迁移..."
 make ensure-dbs
 
 echo "→ 启动应用服务...（远端 runtime 用户默认 ${REMOTE_RUNTIME_USER}@${DEP_HOST}）"
-make -C account-service start CONFIG=./config.local.yaml
+make -C core-service start CONFIG=./config.local.yaml
 sleep 2
 make -C control-panel-service start CONFIG=./config.local.yaml
 make -C strategy-service start CONFIG=./config.local.yaml
@@ -171,7 +171,7 @@ done
 
 echo ""
 echo "日志文件："
-echo "  account-service/logs/account-service.out"
+echo "  core-service/logs/core-service.out"
 echo "  control-panel-service/logs/control-panel-service.out"
 echo "  strategy-service/logs/strategy-service.out"
 echo "  scraper/logs/scraper.out"
@@ -186,4 +186,4 @@ echo "  Self-hosted remote: CREDENTIAL_FILE=/path/to/runtime.cred REMOTE_HOST=${
 echo ""
 echo "Notification Management："
 echo "  Kafka topic: ${NOTIFICATION_KAFKA_TOPIC} via ${NOTIFICATION_KAFKA_BROKERS}"
-echo "  Telegram 发送/绑定需要在启动 account-service 前设置 TELEGRAM_BOT_TOKEN 和 TELEGRAM_BOT_USERNAME。"
+echo "  Telegram 发送/绑定需要在启动 core-service 前设置 TELEGRAM_BOT_TOKEN 和 TELEGRAM_BOT_USERNAME。"

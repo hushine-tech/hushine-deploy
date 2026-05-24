@@ -31,8 +31,9 @@ export LOG_TRACING_ENDPOINT="${LOG_TRACING_ENDPOINT:-http://127.0.0.1:4318}"
 export NO_PROXY="${NO_PROXY:-127.0.0.1,localhost,::1}"
 export no_proxy="${no_proxy:-127.0.0.1,localhost,::1}"
 
-export ACCOUNT_SERVICE_GRPC_ADDR="${ACCOUNT_SERVICE_GRPC_ADDR:-127.0.0.1:50051}"
-# Compatibility var: order.v1 is served by account-service on :50051.
+export CORE_SERVICE_GRPC_ADDR="${CORE_SERVICE_GRPC_ADDR:-127.0.0.1:50051}"
+export ACCOUNT_SERVICE_GRPC_ADDR="${ACCOUNT_SERVICE_GRPC_ADDR:-${CORE_SERVICE_GRPC_ADDR}}"
+# Compatibility var: order.v1 is served by core-service on :50051.
 export ORDER_SERVICE_GRPC_ADDR="${ORDER_SERVICE_GRPC_ADDR:-127.0.0.1:50051}"
 export STRATEGY_SERVICE_GRPC_ADDR="${STRATEGY_SERVICE_GRPC_ADDR:-127.0.0.1:50053}"
 export HANDLER_CORS_ORIGINS="${HANDLER_CORS_ORIGINS:-http://localhost:5173}"

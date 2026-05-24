@@ -40,7 +40,7 @@ USER_ID=<account.users.id> make smoke-hosted-runtime
 ```
 
 自定义 runtime 只走 RuntimeChannel，不需要也不应该拿到
-account-service / order.v1 / Kafka / 数据库地址：
+core-service / order.v1 / Kafka / 数据库地址：
 
 ```bash
 CREDENTIAL_FILE=$HOME/.hushine/runtime.cred \
@@ -68,7 +68,7 @@ make local-bootstrap
 ```bash
 make local-bootstrap
 
-cd account-service
+cd core-service
 make dev CONFIG=./config.local.yaml
 
 cd ../strategy-service

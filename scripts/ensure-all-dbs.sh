@@ -15,12 +15,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "→ account-service (database: account)"
-make -C "$ROOT_DIR/account-service" ensure-db
+echo "→ core-service (database: account)"
+make -C "$ROOT_DIR/core-service" ensure-db
 
 echo ""
-echo "→ account-service order module (database: order)"
-make -C "$ROOT_DIR/account-service" ensure-order-db
+echo "→ core-service order module (database: order)"
+make -C "$ROOT_DIR/core-service" ensure-order-db
 
 echo ""
 echo "→ control-panel-service (database: control_panel)"

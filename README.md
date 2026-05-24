@@ -4,10 +4,7 @@ Deployment, database, smoke-test, and operator documentation for the Hushine
 multi-repository system.
 
 This repository does not contain service source code. Clone it beside the
-service repositories and keep the directory names below. The `core-service`
-repository is checked out as `account-service` because current scripts and
-runtime configs still use that service directory/name while the Go module and
-GitHub repository have moved to `core-service`.
+service repositories and keep the directory names below.
 
 ## Repository Layout
 
@@ -16,7 +13,7 @@ mkdir hushine
 cd hushine
 
 git clone git@github.com:hushine-tech/hushine-deploy.git .
-git clone git@github.com:hushine-tech/core-service.git account-service
+git clone git@github.com:hushine-tech/core-service.git core-service
 git clone git@github.com:hushine-tech/control-panel-service.git control-panel-service
 git clone git@github.com:hushine-tech/quant-handler.git gateway/quant-handler
 git clone git@github.com:hushine-tech/quant-frontend.git gateway/quant-frontend
@@ -36,7 +33,7 @@ hushine/
   docs/
   db/
   scripts/
-  account-service/          # GitHub: hushine-tech/core-service
+  core-service/          # GitHub: hushine-tech/core-service
   control-panel-service/
   gateway/
     quant-handler/
@@ -51,7 +48,7 @@ hushine/
 
 | Directory | GitHub repo | Language | Port(s) |
 |---|---|---|---|
-| `account-service` | `hushine-tech/core-service` | Go | HTTP `:8080`, gRPC `:50051`; serves `account.v1` and `order.v1` |
+| `core-service` | `hushine-tech/core-service` | Go | HTTP `:8080`, gRPC `:50051`; serves `account.v1` and `order.v1` |
 | `control-panel-service` | `hushine-tech/control-panel-service` | Go | gRPC `:50054`, HTTP `:8082` |
 | `gateway/quant-handler` | `hushine-tech/quant-handler` | Go | HTTP `:8090` |
 | `gateway/quant-frontend` | `hushine-tech/quant-frontend` | React | `:5173` |
@@ -116,7 +113,7 @@ make clean
   environment variables; local configs are intentionally git-ignored by service
   repositories.
 - Log, Kafka, and tracing settings live under each service's `log:` section.
-- `order.v1` is served by `account-service`/`core-service` on gRPC `:50051`;
+- `order.v1` is served by `core-service` on gRPC `:50051`;
   there is no independent order-service in the deployment.
 
 ## Databases And Infra

@@ -34,7 +34,7 @@ terminal 状态，新建会返回冲突错误，提示先结束旧 runtime。
    ```
 
 self-hosted runtime 只连 control-panel RuntimeChannel。不要给用户容器配置
-account-service、account-service 承载的 order.v1、Kafka 或数据库地址。
+core-service、core-service 承载的 order.v1、Kafka 或数据库地址。
 
 ## runtime 失败后的 session 恢复
 

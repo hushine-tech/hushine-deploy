@@ -6,7 +6,7 @@
 
 目的：
 
-- 统一 `account-service -> strategy-service -> runtime wallet` 的接口分层
+- 统一 `core-service -> strategy-service -> runtime wallet` 的接口分层
 - 明确 canonical 字段、legacy 兼容边界、以及各字段的使用场景
 - 作为 `Phase B` 收尾后的接口与行为基线文档
 
@@ -15,7 +15,7 @@
 | 规则 | 说明 | 使用场景 |
 | --- | --- | --- |
 | 严格 canonical ingress | `strategy-service` 接口层只消费 canonical 字段，不在入口层做 alias fallback。 | `GetOnlineAccountInfo` 返回的钱包快照进入 `strategy-service` 时。 |
-| 兼容只放在 wire / archive 边界 | 旧字段/旧结构只允许保留在 proto mirror、provider raw 或历史脚本中；主代码不再经过 `LegacyWalletAdapter`。 | `account-service` raw → canonical、历史脚本 / 审计。 |
+| 兼容只放在 wire / archive 边界 | 旧字段/旧结构只允许保留在 proto mirror、provider raw 或历史脚本中；主代码不再经过 `LegacyWalletAdapter`。 | `core-service` raw → canonical、历史脚本 / 审计。 |
 | `mode` 是唯一运行时选择键 | `0 -> BinanceWalletRuntime`，`2 -> BinanceWalletRuntime`，`1 -> fail-closed`。 | `RunStrategy` / HTTP backtest 启动前选择钱包实现。 |
 | 运行时接口围绕行为定义 | 统一暴露余额读取、价格更新、订单事件处理、快照导出，不直接暴露 provider raw schema。 | 策略运行、订单回写、状态同步。 |
 | oracle/computed 边界显式化 | 尚未本地等价重算的字段保留 exchange/oracle 值，不允许用 legacy 近似值冒充 Binance 对齐结果。 | `mode=2` testnet 验证阶段。 |
@@ -25,7 +25,7 @@
 
 | 层级 | 主要类型 | 生产者 | 消费者 | 作用 | 兼容规则 |
 | --- | --- | --- | --- | --- | --- |
-| 跨服务 proto contract | `AccountWalletState` / `FuturesWallet` / `FuturesPosition` / `SpotWallet` / `SpotAsset` | `account-service` | `strategy-service` | 服务间传输的钱包快照 | 对外可暂时保留旧字段，但 `strategy-service` 新入口只读 canonical 字段 |
+| 跨服务 proto contract | `AccountWalletState` / `FuturesWallet` / `FuturesPosition` / `SpotWallet` / `SpotAsset` | `core-service` | `strategy-service` | 服务间传输的钱包快照 | 对外可暂时保留旧字段，但 `strategy-service` 新入口只读 canonical 字段 |
 | strategy canonical state | `CanonicalAccountState` / `CanonicalFuturesState` / `CanonicalFuturesPositionState` / `CanonicalSpotState` | `wallet_adapter.py` | `wallet_factory.py` / runtime 实现 | Python 内部标准状态 | 不做 legacy fallback |
 | runtime protocol | `WalletRuntime` | `strategy-service` | `grpc_server.py` / `StrategyEngine` / `account_client.py` | 统一运行时能力接口 | 所有 runtime 都必须满足 |
 | mode=0 runtime | `BinanceWalletRuntime` | `wallet_factory.py` | 策略引擎 / 快照回写 | backtest 与 testnet 共用 Binance runtime | 不再走 legacy adapter |
@@ -60,13 +60,13 @@
 | `on_market_data(symbol, symbol_type, price)` | `None` | 处理行情更新 | 每个 tick 先更新 mark price，再让策略读 wallet |
 | `on_order(symbol, symbol_type, order_resp)` | `None` | 处理订单生命周期事件 | `NEW` / `PARTIALLY_FILLED` / `FILLED` / `CANCELED` / `EXPIRED` 下更新仓位、挂单占用与 spot/futures 锁定状态；非纯 `FILLED` 路径必须带显式 `order_id` |
 | `on_ledger_event(event)` | `None` | 处理非成交账本事件 | funding fee、transfer、deposit、withdrawal 等直接更新 runtime 余额 |
-| `to_canonical_state()` | `CanonicalAccountState` | 导出标准快照 | 回写 `account-service`、后续对账/审计 |
+| `to_canonical_state()` | `CanonicalAccountState` | 导出标准快照 | 回写 `core-service`、后续对账/审计 |
 
 ## 5. canonical 顶层账户字段
 
 | 字段 | 层级 | 含义 | 计算方法（当前实现 / 约定） | 主要消费者 | 使用场景 |
 | --- | --- | --- | --- | --- | --- |
-| `mode` | `CanonicalAccountState` | 账户模式 | 不计算；由 `account-service` 账户元数据直接给出。 | `wallet_factory` | 选择 runtime 实现 |
+| `mode` | `CanonicalAccountState` | 账户模式 | 不计算；由 `core-service` 账户元数据直接给出。 | `wallet_factory` | 选择 runtime 实现 |
 | `total_value` | 顶层 | 总资产价值 | ingress：应由上游直接给出 canonical 值。`BinanceWalletRuntime` 目标导出口径：`futures.margin_balance + spot.get_estimated_value()`；若 spot 缺价格则 fallback `spot_estimated_value` 或 `free + locked`。 | UI / 快照回写 | 账户总值展示、审计 |
 | `updated_at` | 顶层 | 快照时间 | 不计算；由上游快照时间直接透传。 | 审计 / 对账 | 时间点追踪 |
 | `spot_estimated_value` | 顶层 | 现货估值 | ingress：由上游直接给出。runtime 导出时优先 `spot.get_estimated_value()`，无价格时 fallback `free + locked`。 | `BinanceWalletRuntime` | 现货估值 fallback、总值计算 |
@@ -86,8 +86,8 @@
 | --- | --- | --- | --- | --- | --- |
 | `margin_mode` | `CanonicalFuturesState` | `cross` / `isolated` | 不计算；由上游或 runtime 上下文直接给出。 | runtime / strategy | 决定保证金计算分支 |
 | `position_mode` | 期货账户级 | `one_way` / `hedge` | 不计算；由上游或 runtime 上下文直接给出。 | runtime / strategy | 决定仓位 key 与方向解析 |
-| `multi_assets_mode` | 期货账户级 | Binance 多资产模式开关 | ingress：由 `account-service` 明确给出。当前 `mode=2` 若该字段为 `true` 则 fail-closed，不构建 parity runtime。 | `wallet_factory` | 支持边界判断 |
-| `portfolio_margin` | 期货账户级 | Binance 组合保证金模式开关 | ingress：由 `account-service` 明确给出。当前 `mode=2` 若该字段为 `true` 则 fail-closed，不构建 parity runtime。 | `wallet_factory` | 支持边界判断 |
+| `multi_assets_mode` | 期货账户级 | Binance 多资产模式开关 | ingress：由 `core-service` 明确给出。当前 `mode=2` 若该字段为 `true` 则 fail-closed，不构建 parity runtime。 | `wallet_factory` | 支持边界判断 |
+| `portfolio_margin` | 期货账户级 | Binance 组合保证金模式开关 | ingress：由 `core-service` 明确给出。当前 `mode=2` 若该字段为 `true` 则 fail-closed，不构建 parity runtime。 | `wallet_factory` | 支持边界判断 |
 | `initial_balance` | 期货账户级 | 账户初始余额 | 不计算；作为账户历史上下文直接透传。 | legacy / parity runtime | 初始化 cross 账户上下文 |
 | `deposit_sum` | 期货账户级 | 累计入金 | 不计算；作为账户历史上下文直接透传。 | legacy / parity runtime | 历史余额上下文 |
 | `withdrawal_sum` | 期货账户级 | 累计出金 | 不计算；作为账户历史上下文直接透传。 | legacy / parity runtime | 历史余额上下文 |
@@ -100,7 +100,7 @@
 | `total_maint_margin` | 期货账户级 | 维持保证金总和 | 当前实现：`sum(pos.maint_margin)`。若 `risk_metadata[]` 足够，则按 bracket 本地重算；缺 metadata 时回退到 exchange/oracle 值。 | parity runtime | 风险监控 / liquidation parity |
 | `total_cross_wallet_balance` | 期货账户级 | 全仓钱包余额 | ingress：上游直接给出。当前 `cross` 模式 runtime 刷新时会设为 `wallet_balance`。 | parity runtime | cross available balance 计算 |
 | `total_cross_un_pnl` | 期货账户级 | 全仓未实现盈亏 | ingress：上游直接给出。当前 `cross` 模式导出时等于 `get_unrealized_pnl()`。 | parity runtime | cross available balance / 对账 |
-| `risk_metadata[]` | 期货账户级 | 风险公式元数据 | ingress：由 `account-service` 从 `symbolConfig` / `exchangeInfo` / `leverageBracket` 抓取并透传。包含 precision、`tick_size`、`step_size`、brackets 等本地风险公式输入。 | parity runtime | `maint_margin` / `liquidation_price` 的 metadata-backed 计算 |
+| `risk_metadata[]` | 期货账户级 | 风险公式元数据 | ingress：由 `core-service` 从 `symbolConfig` / `exchangeInfo` / `leverageBracket` 抓取并透传。包含 precision、`tick_size`、`step_size`、brackets 等本地风险公式输入。 | parity runtime | `maint_margin` / `liquidation_price` 的 metadata-backed 计算 |
 
 补充规则：
 

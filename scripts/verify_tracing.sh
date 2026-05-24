@@ -5,17 +5,17 @@
 # confirm the resulting trace spans the expected set of services. Exits 0 on
 # success; non-zero + diagnostic output on failure.
 #
-# Defaults cover the minimum chain (quant-handler → account-service) via a
+# Defaults cover the minimum chain (quant-handler → core-service) via a
 # signup call. Set RUN_E2E=1 to cover the full chain including strategy-service
-# and account-service/order.v1 (requires a populated account + mounted strategy — see
+# and core-service/order.v1 (requires a populated account + mounted strategy — see
 # strategy-service/scripts/seed_test_strategies.py + bootstrap docs).
 #
 # Env vars:
 #   HANDLER_URL       default http://localhost:8090
 #   JAEGER_URL        default http://192.168.88.10:16686
-#   EXPECT_SERVICES   default "quant-handler,account-service"
+#   EXPECT_SERVICES   default "quant-handler,core-service"
 #                     (with RUN_E2E=1, set to
-#                      "quant-handler,account-service,strategy-service")
+#                      "quant-handler,core-service,strategy-service")
 #   RUN_E2E           0|1 — choose minimum vs full chain
 #   SLEEP_AFTER_FIRE  default 7 (seconds; OTLP BatchSpanProcessor flush interval)
 
@@ -23,7 +23,7 @@ set -euo pipefail
 
 HANDLER_URL="${HANDLER_URL:-http://localhost:8090}"
 JAEGER_URL="${JAEGER_URL:-http://192.168.88.10:16686}"
-EXPECT_SERVICES="${EXPECT_SERVICES:-quant-handler,account-service}"
+EXPECT_SERVICES="${EXPECT_SERVICES:-quant-handler,core-service}"
 RUN_E2E="${RUN_E2E:-0}"
 SLEEP_AFTER_FIRE="${SLEEP_AFTER_FIRE:-7}"
 

@@ -12,9 +12,9 @@ Language: Chinese is the working language for comments, docs, and commit message
 
 **Current: Stage 1 complete; `pre_C3` is complete; `Phase C / C3` is accepted as closed. The next main phase is product iteration around remote debug mode and strategy authoring.**
 
-- **Stage 1 (complete)** — End-to-end happy path is wired up. `quant-frontend` → `quant-handler` → `account-service` → `strategy-service` → `account-service/order.v1` → back. Backtests run, orders flow through the real order module, and wallets update through the full chain.
+- **Stage 1 (complete)** — End-to-end happy path is wired up. `quant-frontend` → `quant-handler` → `core-service` → `strategy-service` → `core-service/order.v1` → back. Backtests run, orders flow through the real order module, and wallets update through the full chain.
 - **Stage 2 (active)** — Wallet/account hardening for exchange-backed modes.
-  - `Phase A` is complete and archived in `account-service`: exchange-backed fetch routes by `account.mode`, uses per-account credentials, and returns Binance v3-backed canonical snapshots.
+  - `Phase A` is complete and archived in `core-service`: exchange-backed fetch routes by `account.mode`, uses per-account credentials, and returns Binance v3-backed canonical snapshots.
   - `Phase B1` / `B2` / `B3` are complete in `strategy-service`: runtime split, strict canonical contract, backtest bootstrap, metadata-backed risk fields, futures open-order lifecycle, ledger events, isolated-wallet/break-even parity, spot locked lifecycle, and unsupported Binance margin modes fail-closed.
   - Post-`B3` code review fixes are already landed: lifecycle events now require explicit `order_id`, futures open prechecks read `available_balance`, and spot sell prechecks read unlocked quantity (`qty - locked`).
 - **Stage 2 priorities from here**, in recommended order:
@@ -29,8 +29,8 @@ Language: Chinese is the working language for comments, docs, and commit message
 
 ## Wallet Refactor Snapshot (2026-04-20)
 
-- **`account-service` Phase A is complete and archived.**
-  - Archived change: `openspec/changes/archive/2026-04-16-account-service-exchange-adapter-phase-a/`
+- **`core-service` Phase A is complete and archived.**
+  - Archived change: `openspec/changes/archive/2026-04-16-core-service-exchange-adapter-phase-a/`
   - Exchange-backed fetch now routes by `account.mode`, uses per-account `api_key/api_secret`, and standardizes Binance futures snapshots from `/fapi/v3/account` + `/fapi/v3/balance` + `/fapi/v3/positionRisk`.
 - **`strategy-service` Phase B is complete through `B3`.**
   - Active changes:
@@ -38,7 +38,7 @@ Language: Chinese is the working language for comments, docs, and commit message
     - `openspec/changes/strategy-wallet-abstraction-phase-b2/`
     - `openspec/changes/strategy-wallet-abstraction-phase-b3/`
 - **What is landed now**
-  - Canonical wallet naming between `account-service -> strategy-service`
+  - Canonical wallet naming between `core-service -> strategy-service`
   - Runtime selection by `account.mode`: `0 -> BinanceWalletRuntime`, `2 -> BinanceWalletRuntime`, `1 -> fail-closed`. Phase C2b legacy harness removal (`future.py` / `account.py` / `BinanceParityWallet` alias / legacy CLI scripts / 5 legacy test-fixture entry points) is complete; all wallet construction now flows through `build_wallet_from_account → BinanceWalletRuntime`.
   - Strict canonical ingress: no `qty -> position_qty`, `margin_type -> margin_mode`, or `total_* -> canonical` fallback in `strategy-service`
   - Backtest bootstrap rules:
@@ -53,7 +53,7 @@ Language: Chinese is the working language for comments, docs, and commit message
     - futures open checks use `available_balance`
     - spot sell checks use unlocked quantity (`qty - locked`)
 - **Verification / runtime status as of 2026-04-20**
-  - `cd account-service && go test ./...` — passed
+  - `cd core-service && go test ./...` — passed
   - `cd strategy-service && PYTHONPATH=.:../strategy-library pytest tests/ -q` — passed (`89 passed`)
   - `mode=2` testnet session + reconciliation have been started for real; the project is no longer blocked at preflight-only or UI-only validation.
 - **Important remaining scope limit**
@@ -84,7 +84,7 @@ Language: Chinese is the working language for comments, docs, and commit message
      - strategy-side futures decisions use `LONG / SHORT`
      - Binance futures REST expects `BUY / SELL`
      - this produced `HTTP 400 {"code":-1117,"msg":"Invalid side."}` and left only a local `FAILED` audit row
-     - the code path has been fixed for one-way mode in the order module, but runtime verification still depends on restarting `account-service` and rerunning smoke
+     - the code path has been fixed for one-way mode in the order module, but runtime verification still depends on restarting `core-service` and rerunning smoke
   2. **Session stop is only half-designed**
      - backend `StopStrategy` exists
      - gateway exposes `/api/strategy-sessions/:id/stop`
@@ -118,8 +118,8 @@ Language: Chinese is the working language for comments, docs, and commit message
   - Account Detail displays futures position leverage
 - Verified locally:
   - `strategy-service`: `PYTHONPATH=.:../strategy-library pytest -q tests/test_wallet_runtime.py tests/test_order_client.py tests/test_strategy_engine.py`
-  - `account-service`: `go test ./internal/exchange ./internal/reconciliation`
-  - `account-service` order module: `go test ./internal/order/executor ./internal/order/service`
+  - `core-service`: `go test ./internal/exchange ./internal/reconciliation`
+  - `core-service` order module: `go test ./internal/order/executor ./internal/order/service`
   - `quant-handler`: `go test ./internal/app`
   - `quant-frontend`: `npm run build`
 - Follow-up observation:
@@ -146,17 +146,17 @@ Language: Chinese is the working language for comments, docs, and commit message
 ## Verification Snapshot (2026-04-16)
 
 - **Account flow: passed at service level**.
-  - `account-service` local test suite passed: `cd account-service && go test ./...`
+  - `core-service` local test suite passed: `cd core-service && go test ./...`
   - Existing integration coverage already proves the account happy path for **backtest + live(mock)** registration / wallet sync: create account → `GetOnlineAccountInfo` → `UpdateAccountWalletState`
-  - order module tests passed under the then-current service layout; after the runtime merge, use `cd account-service && go test ./internal/order/...`
+  - order module tests passed under the then-current service layout; after the runtime merge, use `cd core-service && go test ./internal/order/...`
   - `strategy-service` targeted gRPC / data-loop tests passed with explicit path ordering:
     `PYTHONPATH=/Users/xdy/Workplace/hushine/strategy-service:/Users/xdy/Workplace/hushine/strategy-library pytest -q tests/test_grpc_server.py tests/test_data_loop.py`
 - **Important scope limit**: this does **not** prove real Binance live/testnet end-to-end. It proves the current service-layer happy path and mock-backed account flow are runnable.
 - **Real live/testnet is still not considered runnable end-to-end**. Current known blockers:
-  1. ~~`account-service` exchange fetch uses process-level env credentials, while the order path places orders with per-account credentials from DB.~~ **Resolved by Phase A**: exchange-backed fetch now uses per-account credentials from the `accounts` row; `accounts.api_key` is constrained unique.
+  1. ~~`core-service` exchange fetch uses process-level env credentials, while the order path places orders with per-account credentials from DB.~~ **Resolved by Phase A**: exchange-backed fetch now uses per-account credentials from the `accounts` row; `accounts.api_key` is constrained unique.
   2. ~~`strategy-service` drops live futures runtime state when hydrating wallet from `GetOnlineAccountInfo`.~~ **Resolved for `mode=2` by Phase B1**: canonical hydration now restores `qty`, `entry_price`, `mark_price`, `wallet_balance`, and balance context into `BinanceParityWallet`. `mode=1` remains intentionally fail-closed.
   3. The order module live executor is futures-only (`/fapi/v1/order`, market order path). Spot live/testnet is not wired, and limit-order semantics are not implemented in the real executor path.
-  4. `scripts/e2e_full_flow.sh` is still a **mode=0 backtest** script and starts `account-service` with `MOCK_BINANCE=1`, so it is not evidence for real exchange readiness.
+  4. `scripts/e2e_full_flow.sh` is still a **mode=0 backtest** script and starts `core-service` with `MOCK_BINANCE=1`, so it is not evidence for real exchange readiness.
 
 ## Wallet Algorithm Assessment (2026-04-18)
 
@@ -189,7 +189,7 @@ Language: Chinese is the working language for comments, docs, and commit message
 ```
 quant-frontend (React :5173)
     → quant-handler (Go BFF :8090, JWT auth)
-        → account-service (gRPC :50051, HTTP :8080)
+        → core-service (gRPC :50051, HTTP :8080)
             → account.v1 (account/session/wallet APIs)
             → order.v1 (order placement/query APIs)
             → TimescaleDB (account DB)
@@ -204,8 +204,8 @@ scraper (Go)
 
 strategy-service (Python gRPC :50053)
     → TimescaleDB (backtest reads)
-    → account-service (gRPC, wallet sync)
-    → account-service/order.v1 (gRPC, place/cancel/query orders)
+    → core-service (gRPC, wallet sync)
+    → core-service/order.v1 (gRPC, place/cancel/query orders)
     → [Stage 2] Kafka live data via LiveDataLoop (consumer loop not wired)
 ```
 
@@ -227,7 +227,7 @@ make test        # run tests in all services
 
 ### Database schema inventory
 Every table and its owning service is listed in `db/README.md`. When adding a new migration:
-1. Put the `*.sql` in the owning module's migration directory (usually `internal/storage/migrations/`; the order module uses `account-service/internal/order/storage/migrations/`).
+1. Put the `*.sql` in the owning module's migration directory (usually `internal/storage/migrations/`; the order module uses `core-service/internal/order/storage/migrations/`).
 2. Update `db/README.md`'s table list so deploys stay reproducible.
 3. Re-run `make ensure-dbs` — idempotent, picks up the new migration automatically.
 
@@ -235,18 +235,18 @@ Every table and its owning service is listed in `db/README.md`. When adding a ne
 Each service Makefile has: `build`, `dev`, `start`, `stop`, `test`, `clean`.
 
 ```bash
-cd account-service
+cd core-service
 make proto          # Generate gRPC stubs → gen/accountv1/
 make ensure-db      # Create TimescaleDB schema
-make ensure-order-db # Create order DB schema for account-service/order module
+make ensure-order-db # Create order DB schema for core-service/order module
 make test-integration  # Integration tests (requires TimescaleDB)
-make dev            # go run ./cmd/account-service -config ./config.yaml
+make dev            # go run ./cmd/core-service -config ./config.yaml
 ```
 
 ```bash
 cd strategy-service
 pip install -r requirements.txt
-./generate_proto.sh              # Regenerate stubs from account-service proto
+./generate_proto.sh              # Regenerate stubs from core-service proto
 make dev                          # PYTHONPATH=... python run_grpc_server.py -config config.yaml
 pytest tests/                     # All tests
 pytest tests/test_strategy_engine.py  # Single file
@@ -300,13 +300,13 @@ Account mode (stored in `accounts.mode`) determines data authority:
 - **1 (live)**: Binance API is authoritative → strategy-service wallet ignored, exchange data fetched
 - **2 (testnet)**: Same as live but uses `testnet.binancefuture.com`
 
-Routing logic: `account-service/internal/exchange/router.go` and `account-service/internal/service/grpc.go`
+Routing logic: `core-service/internal/exchange/router.go` and `core-service/internal/service/grpc.go`
 
 ### Strategy Execution Flow (4 steps per market data tick)
 Defined in `strategy-service/strategy_service/strategy/base.py`:
 1. `wallet.on_market_data(symbol, symbol_type, price)` — update mark prices
 2. `user_strategy.on_market_data(data, wallet)` — returns `OrderDecision` or None
-3. `place_order(decision, mark_price)` — routed to `order.v1` served by account-service over gRPC (no longer a mock). In Stage 1 the fill model is still idealized (no slippage, instant fill at mark price); real Binance / testnet execution lands in Stage 2.
+3. `place_order(decision, mark_price)` — routed to `order.v1` served by core-service over gRPC (no longer a mock). In Stage 1 the fill model is still idealized (no slippage, instant fill at mark price); real Binance / testnet execution lands in Stage 2.
 4. `wallet.on_order(symbol, symbol_type, order_response)` — settle position
 
 ⚠️ **Stage 1 caveat**: the happy path is wired, but rollback on order rejection / partial fill / network failure is not. Stage 2 will harden this.
@@ -339,35 +339,35 @@ Python logging in `strategy-library/utils/log` aligns with the same JSON format 
 ### Notification Management
 通知是用户级附加能力，不阻断交易主链路。统一事件 topic 是 `notification.events`：
 - `control-panel-service` 生产 runtime/session/custom 事件；hosted 和 self-hosted 都必须从 control-plane 入口进入。
-- account-service/order module 在订单状态落库后生产订单通知事件；Kafka 失败只打日志，不改变订单结果。
-- `account-service` 是唯一通知消费者和 Telegram 发送方，负责读取用户 plan、偏好、通道绑定和自定义消息限频。
+- core-service/order module 在订单状态落库后生产订单通知事件；Kafka 失败只打日志，不改变订单结果。
+- `core-service` 是唯一通知消费者和 Telegram 发送方，负责读取用户 plan、偏好、通道绑定和自定义消息限频。
 - `strategy-service` 只给用户策略注入 `self.notify.info/warn/error`，不直接访问 Kafka、DB、account/order 内部服务。
 - Telegram 绑定/发送需要 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_BOT_USERNAME`；消息正文暂不入库，只更新用户级 delivery status/error。
 
 ### Distributed tracing (OpenTelemetry → Jaeger)
-All backend services propagate W3C traceparent via gRPC metadata, producing a single Jaeger trace per business request that spans quant-handler / strategy-service / account-service, including account-service's `order.v1` API. Jaeger UI lives at http://192.168.88.10:16686, OTLP HTTP receiver at :4318.
+All backend services propagate W3C traceparent via gRPC metadata, producing a single Jaeger trace per business request that spans quant-handler / strategy-service / core-service, including core-service's `order.v1` API. Jaeger UI lives at http://192.168.88.10:16686, OTLP HTTP receiver at :4318.
 - Go services wire via `golang-lib/middleware/grpc` (server) + `middleware/grpcclient` (client) + `elog.InitTracerFromConfig(cfg.Log.Tracing)` in main.
 - Python strategy-service wires via `strategy-library/utils/log/grpc_interceptors.py` (`ServerAccessInterceptor` + `ClientExtInterceptor`); `run_grpc_server.py` calls `utils.log.tracer.init_tracer(...)` when `cfg.log.tracing.enabled=true`.
 - Every log entry carries `trace_id` / `span_id` fields so ES / Kibana queries can filter by trace.
 - Regression test: `bash scripts/verify_tracing.sh` fires a signup call and asserts the resulting trace covers the expected service set + trace_id appears in ES.
 
 ### gRPC Proto
-Single proto: `account-service/proto/account_service.proto` (package `account.v1`)
+Single proto: `core-service/proto/account_service.proto` (package `account.v1`)
 - Strategy-service generates Python stubs via `strategy-service/generate_proto.sh`
-- quant-handler imports Go stubs from `account-service/gen/accountv1/`
+- quant-handler imports Go stubs from `core-service/gen/accountv1/`
 
 ## Key Environment Variables
 
 | Service | Variable | Default | Notes |
 |---------|----------|---------|-------|
-| account-service | `TIMESCALEDB_DSN` | `host=192.168.88.10 ...` | PostgreSQL DSN |
-| account-service | `MOCK_BINANCE` | unset | Set `1` for testing without Binance API |
-| account-service | `SYMBOL_CACHE_TTL` | `6h` | Go duration format |
-| account-service | `NOTIFICATION_KAFKA_BROKERS` | `192.168.88.10:19092` | Consumes `notification.events` |
-| account-service | `TELEGRAM_BOT_TOKEN` | unset | Required for Telegram send/bind |
-| account-service | `TELEGRAM_BOT_USERNAME` | unset | Displayed in Notification Management |
-| control-panel-service / account-service order module | `NOTIFICATION_KAFKA_BROKERS` | `192.168.88.10:19092` | Produces `notification.events` |
-| quant-handler | `ACCOUNT_SERVICE_GRPC_ADDR` | **required** | e.g. `127.0.0.1:50051` |
+| core-service | `TIMESCALEDB_DSN` | `host=192.168.88.10 ...` | PostgreSQL DSN |
+| core-service | `MOCK_BINANCE` | unset | Set `1` for testing without Binance API |
+| core-service | `SYMBOL_CACHE_TTL` | `6h` | Go duration format |
+| core-service | `NOTIFICATION_KAFKA_BROKERS` | `192.168.88.10:19092` | Consumes `notification.events` |
+| core-service | `TELEGRAM_BOT_TOKEN` | unset | Required for Telegram send/bind |
+| core-service | `TELEGRAM_BOT_USERNAME` | unset | Displayed in Notification Management |
+| control-panel-service / core-service order module | `NOTIFICATION_KAFKA_BROKERS` | `192.168.88.10:19092` | Produces `notification.events` |
+| quant-handler | `CORE_SERVICE_GRPC_ADDR` / `ACCOUNT_SERVICE_GRPC_ADDR` | **required** | e.g. `127.0.0.1:50051`; old name remains compatible |
 | quant-handler | `QUANT_HANDLER_JWT_SECRET` | **required** | HMAC signing key |
 | quant-handler | `HTTP_ADDR` | `:8090` | |
 | quant-handler | `HANDLER_CORS_ORIGINS` | `http://localhost:5173` | |
@@ -383,12 +383,12 @@ See **Project Stage** at the top of this file for the "where are we" narrative. 
 - **Remote debug / strategy authoring**: the next product phase should make remote strategy editing, debugging, session control, and runtime inspection usable from the frontend.
 - **Exchange-backed end-to-end proof gap**: `mode=2` has run and produced reconciliation samples, but long-run operational confidence still depends on repeated sessions spanning Binance testnet account fetch → strategy loop → order flow → post-fill reconciliation.
 - **Live wallet execution boundary**: `mode=0` and `mode=2` now share `BinanceWalletRuntime`, but `mode=1` remains intentionally fail-closed. This is a rollout guardrail, not an accidental gap.
-- **Order failure paths**: `strategy-service` handles only the happy path. Rejections, insufficient margin, rate limits, network timeouts, partial fills — none have rollback logic. account-service's order module places orders, but the end-to-end error contract (what does strategy do when place_order fails?) is not defined.
+- **Order failure paths**: `strategy-service` handles only the happy path. Rejections, insufficient margin, rate limits, network timeouts, partial fills — none have rollback logic. core-service's order module places orders, but the end-to-end error contract (what does strategy do when place_order fails?) is not defined.
 - **Kafka market data pipeline**:
   - `scraper` has Kafka publisher and live-delivery gating for canonical market-data topics, but end-to-end delivery into live sessions still needs repeated proof.
   - `strategy-service` has a `LiveDataLoop` scaffold; the live consumer/session path still needs hardening and proven operation with real topics.
   - Net effect: live market data is partially wired, but not production-proven end-to-end.
-- **Real Binance / testnet execution**: account-service's order module is partially wired for Binance futures REST, but the real path is not production-ready yet: spot execution is missing, limit-order semantics are incomplete, and long-run exchange-backed confidence still depends on repeated sessions.
+- **Real Binance / testnet execution**: core-service's order module is partially wired for Binance futures REST, but the real path is not production-ready yet: spot execution is missing, limit-order semantics are incomplete, and long-run exchange-backed confidence still depends on repeated sessions.
 - **Live / testnet end-to-end run**: `mode=2` has run and produced reconciliation samples; `mode=1` remains intentionally fail-closed until the execution/fill recovery contract is hardened.
 - **C3 follow-up observation**: C3 is closed, but real reconciliation samples across `checkpoint / event / sampled`, break-even advisory drift, funding-fee movement, and threshold calibration should continue during the next phase.
 - **Fault injection + production observability**: no chaos tests, no invariant assertions wired into runtime, no alerting on reconciliation mismatches.

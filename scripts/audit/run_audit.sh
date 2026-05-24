@@ -98,7 +98,8 @@ run_quant_handler_smoke() {
 
     (
         cd "${ROOT}/gateway/quant-handler"
-        # Compatibility var: order.v1 is served by account-service in normal runs.
+        # Compatibility var: order.v1 is served by core-service in normal runs.
+        CORE_SERVICE_GRPC_ADDR="127.0.0.1:59991" \
         ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:59991" \
         STRATEGY_SERVICE_GRPC_ADDR="127.0.0.1:59992" \
         ORDER_SERVICE_GRPC_ADDR="127.0.0.1:59991" \
@@ -142,10 +143,10 @@ run_compatibility() {
         skip "golang-lib/middleware/wsclient go test (sandbox does not allow local listener bind)"
     fi
     run_step "golang-lib/log-shipper go test ./..." "${ROOT}/golang-lib/log-shipper" "go test ./..."
-    run_step "account-service build" "${ROOT}/account-service" "go build ./cmd/account-service"
-    run_step "account-service make test" "${ROOT}/account-service" "make test"
-    run_step "account-service order module build" "${ROOT}/account-service" "go build ./cmd/ensure-order-db"
-    run_step "account-service order module tests" "${ROOT}/account-service" "go test ./internal/order/..."
+    run_step "core-service build" "${ROOT}/core-service" "go build ./cmd/core-service"
+    run_step "core-service make test" "${ROOT}/core-service" "make test"
+    run_step "core-service order module build" "${ROOT}/core-service" "go build ./cmd/ensure-order-db"
+    run_step "core-service order module tests" "${ROOT}/core-service" "go test ./internal/order/..."
     run_step "gateway/quant-handler build" "${ROOT}/gateway/quant-handler" "go build ./cmd/quant-handler"
     run_step "gateway/quant-handler make test" "${ROOT}/gateway/quant-handler" "make test"
     run_quant_handler_smoke

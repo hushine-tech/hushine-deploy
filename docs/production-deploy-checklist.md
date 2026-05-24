@@ -4,14 +4,14 @@
 
 ## 1. 代码拉取
 
-在目标机器上保持如下目录结构。注意 `core-service` 仓库需要 clone 到本地目录 `account-service`，因为当前脚本和服务名仍沿用这个目录名。
+在目标机器上保持如下目录结构。`core-service` 仓库需要 clone 到本地目录 `core-service`。
 
 ```bash
 mkdir -p hushine
 cd hushine
 
 git clone git@github.com:hushine-tech/hushine-deploy.git .
-git clone git@github.com:hushine-tech/core-service.git account-service
+git clone git@github.com:hushine-tech/core-service.git core-service
 git clone git@github.com:hushine-tech/control-panel-service.git control-panel-service
 git clone git@github.com:hushine-tech/quant-handler.git gateway/quant-handler
 git clone git@github.com:hushine-tech/quant-frontend.git gateway/quant-frontend
@@ -45,7 +45,7 @@ make local-start
 
 上线前逐个确认：
 
-- `account-service/config.yaml`
+- `core-service/config.yaml`
   - `database` 指向 account DB
   - `order_database` 或 order module DSN 指向 order DB
   - `notification.kafka.brokers` 指向 Kafka
@@ -60,7 +60,7 @@ make local-start
   - `control_panel_service_grpc` 指向 control-panel gRPC
   - `jwt_secret` 通过环境变量覆盖默认值
 - `strategy-service/config.yaml`
-  - `account_service_grpc` 和 `order_service_grpc` 都指向 `account-service:50051`
+  - `account_service_grpc` 和 `order_service_grpc` 都指向 `core-service:50051`；环境变量优先使用 `CORE_SERVICE_GRPC_ADDR`，旧的 `ACCOUNT_SERVICE_GRPC_ADDR` 仍兼容
   - `control_panel_service_grpc` 可达
   - `log.kafka.enabled` 与目标日志策略一致
 - `scraper/config.yaml`
@@ -100,7 +100,7 @@ lsof -nP \
 
 预期：
 
-- `account-service`: `:50051`, `:8080`
+- `core-service`: `:50051`, `:8080`
 - `control-panel-service`: `:50054`, `:8082`
 - `strategy-service`: `:50053`
 - `quant-handler`: `:8090`
@@ -163,7 +163,7 @@ bash scripts/verify_tracing.sh
 
 - Jaeger API 可达
 - 能找到最新 `quant-handler` trace
-- trace 中至少包含 `quant-handler,account-service`
+- trace 中至少包含 `quant-handler,core-service`
 - ES `app-logs-*` 可以查到对应 `trace_id` 的日志
 
 最近一次本地源码服务 + 远端基础设施验收结果：
@@ -173,7 +173,7 @@ bash scripts/verify_tracing.sh
   `HANDLER_URL=http://127.0.0.1:8090 JAEGER_URL=http://192.168.88.10:16686 ES_URL=http://192.168.88.10:9200 SLEEP_AFTER_FIRE=10 bash scripts/verify_tracing.sh`
 - 结果：
   - Jaeger trace id: `a6332419d44245b21d936a774be32bc0`
-  - trace services: `account-service,quant-handler`
+  - trace services: `core-service,quant-handler`
   - ES `app-logs-*` 命中：`3`
 
 如果 ES 为 0：
@@ -230,6 +230,6 @@ lsof -nP \
 - `scripts/e2e_full_flow.sh` 失败
 - hosted runtime 不能创建或不能清理
 - `quant-handler` 不能通过 control-panel route resolution 跑 session
-- Jaeger trace 缺少 `quant-handler` 或 `account-service`
+- Jaeger trace 缺少 `quant-handler` 或 `core-service`
 - ES 无法写入服务日志，且 Kafka/bridge 原因未定位
 - Docker 上存在无法解释的旧 runtime 容器

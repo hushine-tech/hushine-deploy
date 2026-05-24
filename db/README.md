@@ -18,8 +18,8 @@ make ensure-dbs
 等价手动步骤:
 
 ```bash
-cd account-service       && make ensure-db         # 创建 account
-cd account-service       && make ensure-order-db   # 创建 order
+cd core-service       && make ensure-db         # 创建 account
+cd core-service       && make ensure-order-db   # 创建 order
 cd control-panel-service && make ensure-db   # 创建 control_panel (Phase D1)
 cd scraper               && make ensure-db   # 创建 {exchange}_{year} 行情库
 ```
@@ -38,16 +38,16 @@ PG 连接信息通过标准环境变量:
 
 | 数据库 | 归属服务 | 作用 | 迁移路径 |
 |---|---|---|---|
-| `account` | `account-service` | 用户/账号/策略/会话/对账（Phase D2 后不再持有市场数据控制面） | [account-service/internal/storage/migrations/](../account-service/internal/storage/migrations/) |
-| `order`   | `account-service/order module`   | 订单四层执行域 (intent / attempt / order / fill) | [account-service/internal/order/storage/migrations/](../account-service/internal/order/storage/migrations/) |
+| `account` | `core-service` | 用户/账号/策略/会话/对账（Phase D2 后不再持有市场数据控制面） | [core-service/internal/storage/migrations/](../core-service/internal/storage/migrations/) |
+| `order`   | `core-service/order module`   | 订单四层执行域 (intent / attempt / order / fill) | [core-service/internal/order/storage/migrations/](../core-service/internal/order/storage/migrations/) |
 | `control_panel` | `control-panel-service` | Phase D1 runtime 控制面 + Phase D2 市场数据控制面 + Phase D3 self-hosted RuntimeChannel 凭证/路由 | [control-panel-service/internal/storage/migrations/](../control-panel-service/internal/storage/migrations/) |
 | `{exchange}_{year}` | `scraper` | 行情数据年库族，例如 `binance_2026` / `okx_2026`；K 线 / orderbook / funding / OI 都按事件时间路由到对应年份库 | [scraper/internal/storage/migrations/](../scraper/internal/storage/migrations/) |
 
-> `strategy-service` / `strategy-runtime` 不持有自己的表 —— 只读 `account` + 调用 account-service 承载的 `order.v1` 写 `order` + 读 scraper 的 Kafka / DB；hosted runtime 控制面状态写在 `control_panel` 由 control-panel-service 持有。
+> `strategy-service` / `strategy-runtime` 不持有自己的表 —— 只读 `account` + 调用 core-service 承载的 `order.v1` 写 `order` + 读 scraper 的 Kafka / DB；hosted runtime 控制面状态写在 `control_panel` 由 control-panel-service 持有。
 
 ## 表清单 (按数据库分组)
 
-### `account` (account-service)
+### `account` (core-service)
 
 | 表 | 作用 | 首次引入 migration |
 |---|---|---|
@@ -61,11 +61,11 @@ PG 连接信息通过标准环境变量:
 | `reconciliation_runs` | Phase C 对账 diff 审计 hypertable | `0007_create_reconciliation_runs.sql`, pk 调整于 `0008` |
 | `notification_settings` | 用户级通知偏好和最新发送诊断；不保存消息正文 | `0016_create_notification_management.sql` |
 | `notification_channels` | 通用通知通道绑定表；当前只允许 `channel=telegram`，但字段使用 target_id/type/label 以承载后续 WhatsApp/Discord 等通道 | `0016_create_notification_management.sql` |
-| `notification_plans` | account-service 拥有的通知 plan 配置；复用 `users.plan_code`，不读取 control-panel-service runtime plan | `0016_create_notification_management.sql` |
+| `notification_plans` | core-service 拥有的通知 plan 配置；复用 `users.plan_code`，不读取 control-panel-service runtime plan | `0016_create_notification_management.sql` |
 
 > Phase D2 (2026-05-06): 市场数据控制面（`market_data_streams` / `market_data_requests` / `market_data_leases` / `market_data_history_requests`）已迁出本库，搬到了下面 `control_panel` section；historical migrations `0009_create_market_data_control_plane.sql` 和 `0010_create_market_data_history_requests.sql` 在同次提交中被删除，新增的 `0012_drop_market_data_control_plane.sql` 仅做 `DROP TABLE IF EXISTS … CASCADE` 让旧库平滑退掉这 4 张表。
 
-### `order` (account-service order module)
+### `order` (core-service order module)
 
 | 表 | 作用 | 首次引入 migration |
 |---|---|---|
@@ -99,7 +99,7 @@ PG 连接信息通过标准环境变量:
 
 > D3 删除了 D1 forward-compat pairing scaffold：`runtime_pairings` 会在历史迁移 `0002` 创建后由 `0009_drop_runtime_pairings.sql` 幂等删除；`PairRuntime` RPC 和 `RegisterRuntime(source=self_hosted)` 分支也已移除/拒绝。真实 self-hosted UX 是 `runtime_credentials` + RuntimeChannel。
 
-> Phase D1 还在 `account` 库的 `users` 表加了 `plan_code TEXT NOT NULL DEFAULT 'pro'`（见上面 account section），control-panel-service 通过 `account-service.GetUser` gRPC 读取，不做跨库 FK。
+> Phase D1 还在 `account` 库的 `users` 表加了 `plan_code TEXT NOT NULL DEFAULT 'pro'`（见上面 account section），control-panel-service 通过 `core-service.GetUser` gRPC 读取，不做跨库 FK。
 
 ### `{exchange}_{year}` (scraper)
 
@@ -120,15 +120,15 @@ PG 连接信息通过标准环境变量:
 
 `account` 必须先于其他 DB 创建,因为:
 
-- account-service 内的 order module 通过进程内 adapter 读取 account/session meta 做下单前校验 (不再通过 gRPC 回连 account-service)
+- core-service 内的 order module 通过进程内 adapter 读取 account/session meta 做下单前校验 (不再通过 gRPC 回连 core-service)
 - 实际 DB 层没有跨库外键,但控制面 mode=2 启动要求流就绪,而流是由 scraper 写的 —— 所以:
   - `control_panel` DB 必须能接受新的 market-data request / stream / lease
   - scraper 的 `{exchange}_{year}` 年库必须能接受 collector 写入
 
 因此 `make ensure-dbs` 依次执行:
 
-1. `account-service/make ensure-db`
-2. `account-service/make ensure-order-db`
+1. `core-service/make ensure-db`
+2. `core-service/make ensure-order-db`
 3. `control-panel-service/make ensure-db`
 4. `scraper/make ensure-db`
 
