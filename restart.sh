@@ -19,6 +19,7 @@ DEP_HOST="${DEP_HOST:-192.168.88.10}"
 REMOTE_RUNTIME_USER="${REMOTE_RUNTIME_USER:-hushine-tech}"
 CONTROL_PANEL_ADDR="${CONTROL_PANEL_ADDR:-127.0.0.1:50054}"
 
+export PATH="/usr/local/go/bin:${PATH}"
 export NO_PROXY="127.0.0.1,localhost,::1,${DEP_HOST},${NO_PROXY:-}"
 export no_proxy="$NO_PROXY"
 export CONTROL_PANEL_SERVICE_GRPC_ADDR="${CONTROL_PANEL_SERVICE_GRPC_ADDR:-${CONTROL_PANEL_ADDR}}"
@@ -98,6 +99,11 @@ assert_single_listener() {
 
 echo "→ 停止现有服务..."
 make local-stop
+
+if command -v docker >/dev/null 2>&1; then
+  # 旧部署方式可能留下同名 strategy-service 容器并占用 50053。
+  docker rm -f hushine-strategy-service >/dev/null 2>&1 || true
+fi
 
 app_ports=(
   "50051:core-service"
