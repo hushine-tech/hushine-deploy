@@ -1538,7 +1538,7 @@ git commit -m "feat: persist preflight failed sessions"
 - Modify: `gateway/quant-handler/internal/app/accounts_ext.go`
 - Modify: `gateway/quant-handler/README.md`
 
-- [ ] **Step 1: Add guard tests**
+- [x] **Step 1: Add guard tests**
 
 Add to `strategy-service/tests/test_grpc_server.py`:
 
@@ -1561,7 +1561,7 @@ def test_phase3_normal_run_never_updates_legacy_wallet_state(monkeypatch):
     assert calls["legacy_update"] == 0
 ```
 
-- [ ] **Step 2: Run guard test and verify failure if old path is still used**
+- [x] **Step 2: Run guard test and verify failure if old path is still used**
 
 Run:
 
@@ -1573,7 +1573,7 @@ Expected:
 
 - FAIL until old snapshot write callbacks are replaced.
 
-- [ ] **Step 3: Remove old normal-path calls**
+- [x] **Step 3: Remove old normal-path calls**
 
 In strategy-service:
 
@@ -1587,7 +1587,7 @@ def get_online_account_info(...):
 
 - Ensure `RunStrategy`, `PreviewRunStrategy`, backtest runtime, lifecycle settlement, and periodic sample paths call portfolio APIs.
 
-- [ ] **Step 4: Update gateway account wallet read path**
+- [x] **Step 4: Update gateway account wallet read path**
 
 In `gateway/quant-handler/internal/app/accounts_ext.go`, prefer `GetPortfolioSnapshot` for Account Detail wallet display. If a compatibility endpoint remains named `/wallet`, its implementation should call portfolio snapshot and map aggregate + venue snapshots to JSON.
 
@@ -1600,7 +1600,7 @@ resp, err := s.accounts.GetPortfolioSnapshot(ctx, &accountv1.GetPortfolioSnapsho
 })
 ```
 
-- [ ] **Step 5: Update README**
+- [x] **Step 5: Update README**
 
 Modify `gateway/quant-handler/README.md`:
 
@@ -1608,7 +1608,7 @@ Modify `gateway/quant-handler/README.md`:
 - Replace `GetOnlineAccountInfo` wallet docs with `GetPortfolioSnapshot`.
 - Remove `UpdateAccountWalletState` from normal account creation flow documentation.
 
-- [ ] **Step 6: Run residual scan**
+- [x] **Step 6: Run residual scan**
 
 Run:
 
@@ -1621,7 +1621,7 @@ Expected:
 - Matches are either generated stubs, explicit legacy/admin helper comments, or negative tests.
 - No normal run path uses old APIs.
 
-- [ ] **Step 7: Commit old snapshot path removal**
+- [x] **Step 7: Commit old snapshot path removal**
 
 Run:
 
@@ -1646,7 +1646,7 @@ git commit -m "refactor: read account wallets from portfolio snapshots"
 - Test: `core-service/internal/order/service/*_test.go`
 - Test: `strategy-service/tests/test_order_client.py`
 
-- [ ] **Step 1: Add unresolved order blocking tests**
+- [x] **Step 1: Add unresolved order blocking tests**
 
 Add to `strategy-service/tests/test_order_client.py` or `tests/test_strategy_phase3_runtime.py`:
 
@@ -1668,7 +1668,7 @@ assert attempted == [
 ]
 ```
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run:
 
@@ -1680,7 +1680,7 @@ Expected:
 
 - FAIL until blocked keys and multi-order processing are updated.
 
-- [ ] **Step 3: Ensure lifecycle event route facts are complete**
+- [x] **Step 3: Ensure lifecycle event route facts are complete**
 
 In core-service order lifecycle event creation, assert every event has:
 
@@ -1695,7 +1695,7 @@ PositionSide string
 
 If any lifecycle event path can produce missing route facts, fail closed and persist the failure on the attempt rather than emitting an ambiguous event.
 
-- [ ] **Step 4: Update strategy blocked key handling**
+- [x] **Step 4: Update strategy blocked key handling**
 
 In `BaseStrategy`, use:
 
@@ -1705,7 +1705,7 @@ blocked_key = (sig_exchange, sig_market, sig_sym)
 
 Document that account_id is implicit in the session. Ensure core-service lifecycle/recovery queries include account_id.
 
-- [ ] **Step 5: Apply fill to correct venue wallet**
+- [x] **Step 5: Apply fill to correct venue wallet**
 
 In `_consume_order_updates`, replace:
 
@@ -1726,7 +1726,7 @@ self.wallet.on_order(
 )
 ```
 
-- [ ] **Step 6: Run lifecycle tests**
+- [x] **Step 6: Run lifecycle tests**
 
 Run:
 
@@ -1739,7 +1739,7 @@ Expected:
 
 - PASS.
 
-- [ ] **Step 7: Commit lifecycle isolation**
+- [x] **Step 7: Commit lifecycle isolation**
 
 Run:
 
@@ -1765,7 +1765,7 @@ git commit -m "feat: settle lifecycle fills into venue wallets"
 - Modify: `strategy-service/tests/test_order_client.py`
 - Modify: `strategy-service/tests/test_notification.py`
 
-- [ ] **Step 1: Replace old template imports**
+- [x] **Step 1: Replace old template imports**
 
 Update template strategy imports:
 
@@ -1773,7 +1773,7 @@ Update template strategy imports:
 from strategy_service.types import Exchange, Market, OrderDecision, OrderSide, OrderType, PositionSide
 ```
 
-- [ ] **Step 2: Replace old INPUTS**
+- [x] **Step 2: Replace old INPUTS**
 
 Use:
 
@@ -1787,7 +1787,7 @@ ORDER_TARGETS = [
 ]
 ```
 
-- [ ] **Step 3: Replace data access**
+- [x] **Step 3: Replace data access**
 
 Replace:
 
@@ -1801,7 +1801,7 @@ with:
 tick = data.exchange[Exchange.BINANCE][Market.PERPETUAL_FUTURES].symbol["ETHUSDT"].interval["1m"]
 ```
 
-- [ ] **Step 4: Replace wallet access**
+- [x] **Step 4: Replace wallet access**
 
 Replace:
 
@@ -1816,7 +1816,7 @@ futures_wallet = wallet.get(Exchange.BINANCE, Market.PERPETUAL_FUTURES)
 wallet_balance = float(futures_wallet.get_wallet_balance())
 ```
 
-- [ ] **Step 5: Replace OrderDecision**
+- [x] **Step 5: Replace OrderDecision**
 
 Replace old futures LONG/SHORT decisions:
 
@@ -1840,7 +1840,7 @@ OrderDecision(
 
 Use `OrderSide.SELL` for closing/reducing a long in one-way mode.
 
-- [ ] **Step 6: Run strategy-service tests**
+- [x] **Step 6: Run strategy-service tests**
 
 Run:
 
@@ -1852,7 +1852,7 @@ Expected:
 
 - PASS after all tests are updated to Phase 3 API.
 
-- [ ] **Step 7: Commit template/test hard cut**
+- [x] **Step 7: Commit template/test hard cut**
 
 Run:
 
@@ -1876,7 +1876,7 @@ git commit -m "test: update strategies to phase 3 api"
 - Modify: `gateway/quant-handler/internal/app/debug_package.go`
 - Modify: `gateway/quant-handler/internal/app/debug_package_test.go`
 
-- [ ] **Step 1: Write failing debugger template tests**
+- [x] **Step 1: Write failing debugger template tests**
 
 In `strategy-debugger-cli/tests/test_cli.py`, assert generated template contains:
 
@@ -1889,7 +1889,7 @@ assert 'market = "futures"' not in content
 assert "data.market" not in content
 ```
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run:
 
@@ -1901,7 +1901,7 @@ Expected:
 
 - FAIL because templates still use old API.
 
-- [ ] **Step 3: Update debugger template**
+- [x] **Step 3: Update debugger template**
 
 Modify `strategy-debugger-cli/src/hushine_debugger/templates/strategy.py.template`:
 
@@ -1925,7 +1925,7 @@ class MyStrategy:
         return None
 ```
 
-- [ ] **Step 4: Update debugger market defaults**
+- [x] **Step 4: Update debugger market defaults**
 
 Replace default `futures` with `perpetual_futures` in:
 
@@ -1940,11 +1940,11 @@ Use:
 DEFAULT_MARKET = "perpetual_futures"
 ```
 
-- [ ] **Step 5: Update gateway debug package**
+- [x] **Step 5: Update gateway debug package**
 
 Modify `gateway/quant-handler/internal/app/debug_package.go` to generate the same Phase 3 template and include `ORDER_TARGETS`.
 
-- [ ] **Step 6: Run debugger/gateway tests**
+- [x] **Step 6: Run debugger/gateway tests**
 
 Run:
 
@@ -1957,7 +1957,7 @@ Expected:
 
 - PASS.
 
-- [ ] **Step 7: Commit debugger hard cut**
+- [x] **Step 7: Commit debugger hard cut**
 
 Run:
 
@@ -1982,7 +1982,7 @@ git commit -m "feat: generate phase 3 debugger packages"
 - Modify: `gateway/quant-frontend/src/pages/SessionDetailPage.tsx`
 - Modify: `gateway/quant-frontend/src/pages/OrderHistory.tsx`
 
-- [ ] **Step 1: Add BFF tests for Phase 3 declarations**
+- [x] **Step 1: Add BFF tests for Phase 3 declarations**
 
 In `gateway/quant-handler/internal/app/strategy_test.go`, add test asserting preview output contains:
 
@@ -2000,7 +2000,7 @@ wantTarget := map[string]any{
 }
 ```
 
-- [ ] **Step 2: Run BFF tests and verify failure**
+- [x] **Step 2: Run BFF tests and verify failure**
 
 Run:
 
@@ -2012,7 +2012,7 @@ Expected:
 
 - FAIL until strategy declaration mapping includes `ORDER_TARGETS`.
 
-- [ ] **Step 3: Update BFF mapping**
+- [x] **Step 3: Update BFF mapping**
 
 Modify strategy preview/start response JSON to include:
 
@@ -2024,7 +2024,7 @@ Modify strategy preview/start response JSON to include:
 }
 ```
 
-- [ ] **Step 4: Update frontend API types**
+- [x] **Step 4: Update frontend API types**
 
 Modify `gateway/quant-frontend/src/api/client.ts`:
 
@@ -2043,7 +2043,7 @@ export type StrategyOrderTargetDeclaration = {
 };
 ```
 
-- [ ] **Step 5: Update AccountDetail Run Strategy UI**
+- [x] **Step 5: Update AccountDetail Run Strategy UI**
 
 In `AccountDetail.tsx`, show:
 
@@ -2066,7 +2066,7 @@ market: "perpetual_futures"
 
 where a literal payload is still required by API.
 
-- [ ] **Step 6: Update Session/Order route facts**
+- [x] **Step 6: Update Session/Order route facts**
 
 Ensure `SessionDetailPage.tsx` and `OrderHistory.tsx` display:
 
@@ -2077,7 +2077,7 @@ Ensure `SessionDetailPage.tsx` and `OrderHistory.tsx` display:
 
 Do not display `venue -` placeholders when BFF has route facts.
 
-- [ ] **Step 7: Run frontend and BFF tests**
+- [x] **Step 7: Run frontend and BFF tests**
 
 Run:
 
@@ -2090,7 +2090,7 @@ Expected:
 
 - PASS.
 
-- [ ] **Step 8: Commit gateway/frontend updates**
+- [x] **Step 8: Commit gateway/frontend updates**
 
 Run:
 
@@ -2117,7 +2117,7 @@ git commit -m "feat: show phase 3 venue strategy preflight"
   - `gateway/quant-handler/README.md`
   - `gateway/quant-frontend/src/pages/AccountDetail.tsx`
 
-- [ ] **Step 1: Run strict residual scan**
+- [x] **Step 1: Run strict residual scan**
 
 Run:
 
@@ -2132,7 +2132,7 @@ Expected:
 
 - No matches in normal runtime code, templates, or tests except negative tests that explicitly assert rejection.
 
-- [ ] **Step 2: Run mode/path residual scan**
+- [x] **Step 2: Run mode/path residual scan**
 
 Run:
 
@@ -2147,7 +2147,7 @@ Expected:
 - No matches in normal strategy startup, order settlement, periodic snapshot, debugger template generation, or account wallet display.
 - Generated stubs and explicit legacy/admin helpers may remain if not called by Phase 3 normal paths.
 
-- [ ] **Step 3: Fix any remaining normal-path residual**
+- [x] **Step 3: Fix any remaining normal-path residual**
 
 For each residual:
 
@@ -2165,7 +2165,7 @@ tick = data.market["futures"].symbol["ETHUSDT"].interval["1m"]
 tick = data.exchange[Exchange.BINANCE][Market.PERPETUAL_FUTURES].symbol["ETHUSDT"].interval["1m"]
 ```
 
-- [ ] **Step 4: Commit residual cleanup**
+- [x] **Step 4: Commit residual cleanup**
 
 Run commits in each affected repo with the concrete likely file set:
 
@@ -2191,13 +2191,26 @@ git add src README.md
 git commit -m "refactor: remove legacy strategy route ui"
 ```
 
+**Task 14 Result (2026-05-31):**
+
+- Residual scan still shows expected generated stubs, historical docs, wallet implementation internals, negative tests, and market-data storage tests using the internal `"futures"` storage key.
+- Fixed one normal runtime residual: `Stop + close positions` now requires `PortfolioWalletRuntime`, builds close orders per `(exchange, market, venue_id)`, sends `perpetual_futures` decisions, and settles fills back into the matching route wallet.
+- Updated `quant-handler` README to remove stale account `mode` / legacy wallet-update wording from user-facing API notes.
+- Verification:
+  - `strategy-service`: targeted stop/preview/preflight tests — `24 passed`
+  - `strategy-service`: `python -m compileall -q strategy_service/grpc_server.py`
+  - `gateway/quant-handler`: `go test ./internal/app -run '^$' -count=1`
+- Commits:
+  - `strategy-service`: `2e783b2 fix: close portfolio sessions by route`
+  - `gateway/quant-handler`: `273883b docs: update phase 3 account api notes`
+
 ## Task 15: Full Verification and Browser Smoke
 
 **Files:**
 - No source files unless bugs are found.
 - Update docs/smoke notes if needed.
 
-- [ ] **Step 1: Run all unit/build tests**
+- [x] **Step 1: Run all unit/build tests**
 
 Run:
 
@@ -2214,7 +2227,7 @@ Expected:
 
 - All pass.
 
-- [ ] **Step 2: Start local stack**
+- [x] **Step 2: Start local stack**
 
 Run from repo root:
 
@@ -2226,7 +2239,7 @@ Expected:
 
 - core-service, strategy-service, quant-handler, control-panel-service, frontend dev server, and dependencies are reachable.
 
-- [ ] **Step 3: Browser smoke setup**
+- [x] **Step 3: Browser smoke setup**
 
 Using Chrome DevTools / Browser plugin:
 
@@ -2275,7 +2288,7 @@ class MyStrategy:
 6. Create hosted runtime.
 7. Start backtest from Account Detail.
 
-- [ ] **Step 4: Browser smoke assertions**
+- [x] **Step 4: Browser smoke assertions**
 
 Expected UI result:
 
@@ -2290,7 +2303,7 @@ Expected UI result:
   - `position_side=BOTH`
 - Session Detail shows route facts and no placeholder `venue -`.
 
-- [ ] **Step 5: Negative preflight smoke**
+- [x] **Step 5: Negative preflight smoke**
 
 Create a read/write strategy with `ORDER_TARGETS` targeting Binance spot, then unbind/disable the Binance spot venue and start it.
 
@@ -2300,7 +2313,7 @@ Expected:
 - Session Management shows a `preflight_failed` session.
 - Failure includes structured message for missing spot venue.
 
-- [ ] **Step 6: Stop services and clean runtime**
+- [x] **Step 6: Stop services and clean runtime**
 
 Run:
 
@@ -2310,7 +2323,7 @@ make stop
 
 If hosted runtime containers remain, clean them through Runtime Management first; use Docker cleanup only if the control plane is already stopped.
 
-- [ ] **Step 7: Commit smoke notes**
+- [x] **Step 7: Commit smoke notes**
 
 If docs are updated:
 
@@ -2318,6 +2331,40 @@ If docs are updated:
 git -C hushine-deploy add docs
 git -C hushine-deploy commit -m "docs: record phase 3 smoke results"
 ```
+
+**Task 15 Result (2026-05-30):**
+
+- Full verification:
+  - `strategy-library`: `pytest -q tests/` — `90 passed`
+  - `strategy-service`: `PYTHONPATH=.:../strategy-library pytest -q tests/` — `428 passed`
+  - `core-service`: `go test ./...` — passed
+  - `gateway/quant-handler`: `go test ./...` — passed
+  - `gateway/quant-frontend`: `npm run build` — passed
+  - `strategy-debugger-cli`: `PYTHONPATH=src:../strategy-library pytest -q` — `39 passed`
+- Browser smoke:
+  - User: `test-user`
+  - Account: `phase3-smoke-funded-20260530223032` (`account_id=56`)
+  - Strategy: `phase3-browser-smoke-perp-20260530221224` (`strategy_id=39`)
+  - Data: Binance `ETHUSDT` `perpetual_futures` `1m`, `2026-05-30 00:00:00` → `2026-05-31 00:00:00`
+  - Coverage check: `1440/1440`, `COMPLETE`
+  - Runtime: hosted executor `rt-74a9462119296c1eb17a572d`
+  - Session: `4da4c4c16d634d589585bb9edfa77220`, `FINISHED`, `bars_processed=1440`
+  - Order History and Session Detail show route facts: `binance / perpetual_futures`, `venue 37`, `position BOTH`, account/session links present.
+- Negative preflight smoke:
+  - Account: `phase3-negative-no-spot-1780182464107` (`account_id=61`)
+  - Strategy: `phase3-negative-spot-target-1780182464107` (`strategy_id=41`)
+  - Spot venue released before run.
+  - Run failed before execution with `VENUE_MISSING: active venue is missing exchange=1 market=1`.
+  - Session: `f237ef7c898c4e1094157c2e85776714`, status `preflight_failed`, error `active venue is missing`.
+- Cleanup:
+  - Hosted smoke runtime `rt-74a9462119296c1eb17a572d` ended through Runtime Management API; Docker runtime container list is empty.
+  - `make stop` completed: core-service, control-panel-service, strategy-service, quant-handler, quant-frontend, and scraper stopped.
+- Bugs found and fixed during smoke:
+  - `control-panel-service` RuntimeChannel proxy did not implement `account.PreflightStrategySession`, causing hosted runtime preflight to fail.
+  - `gateway/quant-handler` backtest account creation wrote account rows but did not bootstrap wallet state, leaving futures venue snapshots empty.
+  - `strategy-service` portfolio snapshot adapter validated unrequested venue snapshots before applying `allowed_routes`.
+  - `strategy-service` proxy-delivered market-data used storage market `futures` inside the strategy API instead of canonical `perpetual_futures`.
+  - `strategy-service` runtime `InputView` lacked the `data.exchange[exchange][market]` shorthand that `strategy-library` exposes.
 
 ## Final Acceptance Criteria
 
