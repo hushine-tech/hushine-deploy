@@ -223,6 +223,26 @@ Expected:
 
 - Baseline state is auditable.
 
+**Baseline Result (2026-05-30):**
+
+- Repository cleanliness: all affected repositories were clean before Phase 3 code changes. `hushine-deploy` was clean and `main` was ahead of `origin/main` by existing documentation commits.
+- Passed:
+  - `strategy-library`: `pytest -q tests/` — `69 passed`
+  - `strategy-service`: `PYTHONPATH=.:../strategy-library pytest -q tests/` — `349 passed`
+  - `core-service`: `go test ./...`
+  - `gateway/quant-handler`: `go test ./...`
+  - `gateway/quant-frontend`: `npm run build`
+- Failed baseline:
+  - `strategy-debugger-cli`: `pytest -q` failed during collection with `ModuleNotFoundError: No module named 'hushine_debugger'`.
+  - This does not block Task 1 because Task 1 only modifies `strategy-library`.
+  - This must be resolved before claiming full Phase 3 verification is green.
+- Confirmed Phase 2 residuals:
+  - legacy account wallet APIs: `GetOnlineAccountInfo`, `UpdateAccountWalletState`
+  - single-wallet facade: `VenueWalletView`
+  - old data API: `data.market[...]`, `_MarketNode`
+  - old market literal: `market="futures"` / `market='futures'`
+  - direct wallet shortcuts: `wallet.futures`, `wallet.spot`, `get_wallet_balance`, `get_available_balance`
+
 ## Task 1: Hard-Cut strategy-library Public API
 
 **Files:**
