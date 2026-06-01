@@ -18,6 +18,8 @@ fi
 DEP_HOST="${DEP_HOST:-192.168.88.10}"
 REMOTE_RUNTIME_USER="${REMOTE_RUNTIME_USER:-hushine-tech}"
 CONTROL_PANEL_ADDR="${CONTROL_PANEL_ADDR:-127.0.0.1:50054}"
+APP_CONFIG="${APP_CONFIG:-./config.local.yaml}"
+SCRAPER_LOG_CONFIG="${SCRAPER_LOG_CONFIG:-./log-config.local.json}"
 
 export PATH="/usr/local/go/bin:${PATH}"
 export NO_PROXY="127.0.0.1,localhost,::1,${DEP_HOST},${NO_PROXY:-}"
@@ -161,13 +163,13 @@ echo "→ 应用数据库迁移..."
 make ensure-dbs
 
 echo "→ 启动应用服务...（远端 runtime 用户默认 ${REMOTE_RUNTIME_USER}@${DEP_HOST}）"
-make -C core-service start CONFIG=./config.local.yaml
+make -C core-service start CONFIG="${APP_CONFIG}"
 sleep 2
-make -C control-panel-service start CONFIG=./config.local.yaml
-make -C strategy-service start CONFIG=./config.local.yaml
-make -C scraper start CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json
+make -C control-panel-service start CONFIG="${APP_CONFIG}"
+make -C strategy-service start CONFIG="${APP_CONFIG}"
+make -C scraper start CONFIG="${APP_CONFIG}" LOG_CONFIG="${SCRAPER_LOG_CONFIG}"
 sleep 1
-make -C gateway/quant-handler start CONFIG=./config.local.yaml
+make -C gateway/quant-handler start CONFIG="${APP_CONFIG}"
 make -C gateway/quant-frontend start
 
 assert_single_process "control-panel-service" "control-panel-service.*-config"
