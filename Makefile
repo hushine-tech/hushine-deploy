@@ -64,7 +64,6 @@ dev:
 	$(DEV_NO_PROXY) $(MAKE) -C core-service dev & \
 	sleep 2; \
 	$(DEV_NO_PROXY) $(MAKE) -C control-panel-service dev & \
-	$(DEV_NO_PROXY) $(MAKE) -C strategy-service dev & \
 	$(DEV_NO_PROXY) $(MAKE) -C scraper dev & \
 	sleep 1; \
 	$(DEV_NO_PROXY) $(MAKE) -C gateway/quant-handler dev & \
@@ -76,7 +75,6 @@ start:
 	@$(DEV_NO_PROXY) $(MAKE) -C core-service start
 	@sleep 2
 	@$(DEV_NO_PROXY) $(MAKE) -C control-panel-service start
-	@$(DEV_NO_PROXY) $(MAKE) -C strategy-service start
 	@$(DEV_NO_PROXY) $(MAKE) -C scraper start
 	@sleep 1
 	@$(DEV_NO_PROXY) $(MAKE) -C gateway/quant-handler start
@@ -119,7 +117,6 @@ local-dev: local-bootstrap
 	$(LOCAL_NO_PROXY) $(MAKE) -C core-service CONFIG=./config.local.yaml dev & \
 	sleep 2; \
 	$(LOCAL_NO_PROXY) $(MAKE) -C control-panel-service CONFIG=./config.local.yaml dev & \
-	$(LOCAL_NO_PROXY) $(MAKE) -C strategy-service CONFIG=./config.local.yaml dev & \
 	$(LOCAL_NO_PROXY) $(MAKE) -C scraper CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json dev & \
 	sleep 1; \
 	$(LOCAL_NO_PROXY) $(MAKE) -C gateway/quant-handler CONFIG=./config.local.yaml dev & \
@@ -131,7 +128,6 @@ local-start: local-bootstrap
 	@$(LOCAL_NO_PROXY) $(MAKE) -C core-service CONFIG=./config.local.yaml start
 	@sleep 2
 	@$(LOCAL_NO_PROXY) $(MAKE) -C control-panel-service CONFIG=./config.local.yaml start
-	@$(LOCAL_NO_PROXY) $(MAKE) -C strategy-service CONFIG=./config.local.yaml start
 	@$(LOCAL_NO_PROXY) $(MAKE) -C scraper CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json start
 	@sleep 1
 	@$(LOCAL_NO_PROXY) $(MAKE) -C gateway/quant-handler CONFIG=./config.local.yaml start

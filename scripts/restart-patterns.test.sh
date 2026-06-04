@@ -15,16 +15,18 @@ required_literals=(
   'kill_listening_ports'
   'app_ports=('
   '50051:core-service'
-  '50053:strategy-service'
   '50054:control-panel-service'
   '8090:quant-handler'
   '5173:quant-frontend'
   'legacy_ports=('
+  '50053:legacy-strategy-service'
   '50052:legacy-order-service'
   'assert_single_listener'
 )
 
 forbidden_literals=(
+  'make -C '"strategy-service"' start'
+  'strategy-service/'"logs/strategy-service.out"
   'make -C '"order-service"' start'
   'order-service/'"logs/order-service.out"
 )

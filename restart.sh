@@ -110,16 +110,17 @@ fi
 app_ports=(
   "50051:core-service"
   "18080:core-service-http"
-  "50053:strategy-service"
   "50054:control-panel-service"
   "8082:control-panel-service-http"
   "8090:quant-handler"
   "5173:quant-frontend"
 )
 
-# 历史遗留：order.v1 已并入 core-service，但开发机上可能还残留旧独立
-# order-service 进程。这里仅清理，不再启动它。
+# 历史遗留：order.v1 已并入 core-service；strategy-service 现在由
+# control-panel-service 通过 hosted runtime 镜像按需拉起。这里只清理旧
+# standalone 进程 / 端口，不再启动它们。
 legacy_ports=(
+  "50053:legacy-strategy-service"
   "50052:legacy-order-service"
 )
 
@@ -166,7 +167,6 @@ echo "→ 启动应用服务...（远端 runtime 用户默认 ${REMOTE_RUNTIME_U
 make -C core-service start CONFIG="${APP_CONFIG}"
 sleep 2
 make -C control-panel-service start CONFIG="${APP_CONFIG}"
-make -C strategy-service start CONFIG="${APP_CONFIG}"
 make -C scraper start CONFIG="${APP_CONFIG}" LOG_CONFIG="${SCRAPER_LOG_CONFIG}"
 sleep 1
 make -C gateway/quant-handler start CONFIG="${APP_CONFIG}"
@@ -181,7 +181,6 @@ echo ""
 echo "日志文件："
 echo "  core-service/logs/core-service.out"
 echo "  control-panel-service/logs/control-panel-service.out"
-echo "  strategy-service/logs/strategy-service.out"
 echo "  scraper/logs/scraper.out"
 echo "  gateway/quant-handler/logs/quant-handler.out"
 echo "  gateway/quant-frontend/logs/quant-frontend.out"
