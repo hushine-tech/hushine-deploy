@@ -81,15 +81,15 @@ Language: Chinese is the working language for comments, docs, and commit message
   - the work has shifted from "make C3 exist" to "correct C3 runtime behavior"
 - Two concrete runtime issues were identified today:
   1. **Order execution mismatch**
-     - strategy-side futures decisions use `LONG / SHORT`
+     - old strategy-side futures decisions used `LONG / SHORT`
      - Binance futures REST expects `BUY / SELL`
      - this produced `HTTP 400 {"code":-1117,"msg":"Invalid side."}` and left only a local `FAILED` audit row
-     - the code path has been fixed for one-way mode in the order module, but runtime verification still depends on restarting `core-service` and rerunning smoke
-  2. **Session stop is only half-designed**
+     - the current order contract rejects `LONG / SHORT` as order side before persistence; direction belongs in `position_side`
+  2. **Session stop is action-based with guarded close**
      - backend `StopStrategy` exists
      - gateway exposes `/api/strategy-sessions/:id/stop`
-     - frontend account page does not expose stop
-     - `close_positions=true` is still TODO, so current stop is only a soft stop
+     - frontend account page exposes stop actions
+     - stop uses explicit `action` semantics; `stop_and_close` issues close orders and fail-closes when open orders or unsupported spot exits are present
 
 ## Next Phase Focus (2026-04-29)
 
@@ -212,8 +212,8 @@ strategy-service (Python gRPC :50053)
 ## Build & Run Commands
 
 Each backend service has a `config.yaml` with development defaults. Env vars override
-specific fields (`<SECTION>_<KEY>` convention, plus legacy names like `TIMESCALEDB_DSN`,
-`ACCOUNT_SERVICE_GRPC_ADDR`, `QUANT_HANDLER_JWT_SECRET`).
+specific fields (`<SECTION>_<KEY>` convention, plus selected shorthand names like
+`CORE_SERVICE_GRPC_ADDR` and `QUANT_HANDLER_JWT_SECRET`).
 
 ### Root Makefile (all services)
 ```bash
@@ -250,8 +250,6 @@ pip install -r requirements.txt
 make dev                          # PYTHONPATH=... python run_grpc_server.py -config config.yaml
 pytest tests/                     # All tests
 pytest tests/test_strategy_engine.py  # Single file
-# Optional HTTP entry (legacy FastAPI wrapper used by a few local flows):
-python run_http_server.py        # FastAPI on :8000
 ```
 
 After Phase C2b legacy cleanup, `run_backtest.py` / `run_debug.py` /
@@ -367,7 +365,7 @@ Single proto: `core-service/proto/account_service.proto` (package `account.v1`)
 | core-service | `TELEGRAM_BOT_TOKEN` | unset | Required for Telegram send/bind |
 | core-service | `TELEGRAM_BOT_USERNAME` | unset | Displayed in Notification Management |
 | control-panel-service / core-service order module | `NOTIFICATION_KAFKA_BROKERS` | `192.168.88.10:19092` | Produces `notification.events` |
-| quant-handler | `CORE_SERVICE_GRPC_ADDR` / `ACCOUNT_SERVICE_GRPC_ADDR` | **required** | e.g. `127.0.0.1:50051`; old name remains compatible |
+| quant-handler | `CORE_SERVICE_GRPC_ADDR` | **required** | e.g. `127.0.0.1:50051` |
 | quant-handler | `QUANT_HANDLER_JWT_SECRET` | **required** | HMAC signing key |
 | quant-handler | `HTTP_ADDR` | `:8090` | |
 | quant-handler | `HANDLER_CORS_ORIGINS` | `http://localhost:5173` | |

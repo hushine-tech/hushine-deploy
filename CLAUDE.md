@@ -228,7 +228,7 @@ core-service/internal/order
 
 ## Build & Run Commands
 
-Each backend service has `config.yaml` with development defaults. Env vars override fields (`<SECTION>_<KEY>` convention, plus legacy names like `TIMESCALEDB_DSN`, `ACCOUNT_SERVICE_GRPC_ADDR`, `QUANT_HANDLER_JWT_SECRET`).
+Each backend service has `config.yaml` with development defaults. Env vars override fields (`<SECTION>_<KEY>` convention, plus selected shorthand names like `CORE_SERVICE_GRPC_ADDR` and `QUANT_HANDLER_JWT_SECRET`).
 
 ### Root Makefile
 ```bash
@@ -266,7 +266,6 @@ pip install -r requirements.txt
 make dev                                # PYTHONPATH=... python run_grpc_server.py -config config.yaml
 pytest tests/                           # all
 pytest tests/test_strategy_engine.py    # single
-python run_http_server.py               # legacy FastAPI on :8000
 ```
 
 Backtests run through the gRPC `RunStrategy` call (the production path); legacy `run_backtest.py` / `run_debug.py` / `backtest_runner.py` were removed in Phase C2b.
@@ -375,9 +374,9 @@ W3C traceparent propagated via gRPC metadata across all backend services. Jaeger
 | control-panel-service | `TIMESCALEDB_DSN` | `host=192.168.88.10 ... dbname=control_panel` | DSN |
 | control-panel-service | `HTTP_ADDR` | `:8082` | health / readyz |
 | control-panel-service | `GRPC_ADDR` | `:50054` | gRPC |
-| control-panel-service | `CORE_SERVICE_GRPC_ADDR` / `ACCOUNT_SERVICE_GRPC_ADDR` | `127.0.0.1:50051` | for `GetUser` plan lookup |
+| control-panel-service | `CORE_SERVICE_GRPC_ADDR` | `127.0.0.1:50051` | for `GetUser` plan lookup |
 | control-panel-service | `RUNTIME_PLATFORM_DEFAULT_PLAN_CODE` | `pro` | overrides config default plan |
-| quant-handler | `CORE_SERVICE_GRPC_ADDR` / `ACCOUNT_SERVICE_GRPC_ADDR` | **required** | e.g. `127.0.0.1:50051`; old name remains compatible |
+| quant-handler | `CORE_SERVICE_GRPC_ADDR` | **required** | e.g. `127.0.0.1:50051` |
 | quant-handler | `QUANT_HANDLER_JWT_SECRET` | **required** | HMAC signing key |
 | quant-handler | `HTTP_ADDR` | `:8090` | |
 | quant-handler | `HANDLER_CORS_ORIGINS` | `http://localhost:5173` | |
@@ -394,7 +393,7 @@ W3C traceparent propagated via gRPC metadata across all backend services. Jaeger
 - **Exchange-backed end-to-end proof gap**: `mode=2` has run and produced reconciliation samples, but long-run operational confidence still requires repeated full sessions (testnet account fetch → strategy loop → order flow → post-fill reconciliation).
 - **Real Binance / testnet execution**: core-service's order module is partially wired for Binance futures REST. Spot execution missing, limit-order semantics incomplete, and long-run exchange-backed confidence still depends on repeated sessions.
 - **Kafka market data pipeline**: `scraper` has Kafka publisher and live-delivery gating for canonical market-data topics, but the strategy-service live consumer/session path is not production-proven end-to-end.
-- **Session lifecycle**: backend `StopStrategy` and gateway `/api/strategy-sessions/:id/stop` exist; `close_positions=true` is still TODO; frontend account page does not expose stop yet.
+- **Session lifecycle**: backend `StopStrategy` and gateway `/api/strategy-sessions/:id/stop` use explicit stop `action`; `stop_and_close` issues close orders and fail-closes when open orders or unsupported spot exits are present.
 - **C3 follow-up observation**: real reconciliation samples across `checkpoint / event / sampled`, break-even advisory drift, funding-fee movement, threshold calibration.
 - **Fault injection + production observability**: no chaos tests, no invariant assertions wired into runtime, no alerting on reconciliation mismatches.
 

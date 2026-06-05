@@ -100,7 +100,6 @@ run_quant_handler_smoke() {
         cd "${ROOT}/gateway/quant-handler"
         # Compatibility var: order.v1 is served by core-service in normal runs.
         CORE_SERVICE_GRPC_ADDR="127.0.0.1:59991" \
-        ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:59991" \
         ORDER_SERVICE_GRPC_ADDR="127.0.0.1:59991" \
         AUTH_JWT_SECRET="audit-secret" \
         AUTH_LOGIN_PASSWORD="audit-password" \

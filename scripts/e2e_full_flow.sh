@@ -141,7 +141,6 @@ EOF
 
 cd "$ROOT/control-panel-service"
 CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
-ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 "$ROOT/.e2e-build/control-panel-service" -config "${CP_CONFIG}" > /tmp/e2e-control-panel.log 2>&1 &
 PIDS+=($!)
@@ -152,7 +151,6 @@ cd "$ROOT/strategy-service"
 PYTHONPATH="$ROOT/strategy-service:$ROOT/strategy-service/strategy-library" \
 GRPC_ADDR="0.0.0.0:${STRAT_GRPC}" \
 CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
-ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 TIMESCALE_HOST="${DB_HOST}" \
 TIMESCALE_DB="${TIMESCALE_DB_PATTERN}" \
@@ -163,7 +161,6 @@ echo "  strategy-service PID=$! → gRPC:${STRAT_GRPC}"
 # quant-handler
 cd "$ROOT/gateway/quant-handler"
 CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
-ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 CONTROL_PANEL_SERVICE_GRPC_ADDR="127.0.0.1:${CP_GRPC}" \
 QUANT_HANDLER_JWT_SECRET="${JWT_SECRET}" \
 HTTP_ADDR=":${HANDLER_HTTP}" \

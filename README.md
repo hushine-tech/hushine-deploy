@@ -53,7 +53,7 @@ hushine/
 | `gateway/quant-handler` | `hushine-tech/quant-handler` | Go | HTTP `:8090` |
 | `gateway/quant-frontend` | `hushine-tech/quant-frontend` | React | `:5173` |
 | `scraper` | `hushine-tech/scraper` | Go | market-data collector |
-| `strategy-service` | `hushine-tech/strategy-service` | Python + Go proto stubs | gRPC `:50053`, HTTP `:8000` |
+| `strategy-service` | `hushine-tech/strategy-service` | Python + Go proto stubs | gRPC `:50053` |
 | `strategy-library` | `hushine-tech/strategy-library` | Python | shared strategy utilities |
 | `golang-lib` | `hushine-tech/golang-lib` | Go | shared logging/middleware |
 

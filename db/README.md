@@ -53,7 +53,12 @@ PG 连接信息通过标准环境变量:
 |---|---|---|
 | `schema_migrations` | 服务运行时迁移记录表 | `0000_create_schema_migrations.sql` |
 | `users` | 登录用户 + bcrypt 口令；`plan_code` 字段供 control-panel-service 读取（Phase D1） | `0005_add_user_ownership.sql`, `0011_add_user_plan_code.sql` |
-| `accounts` | 交易账号 (mode=0/1/2, 交易所凭据, 风控参数) | `0001_create_accounts.sql` |
+| `accounts` | portfolio / trading context；`environment=0/1/2` 表示 backtest/demo/live | `0019_portfolio_venue_hard_cut.sql` |
+| `venues` | account 下的 exchange / market / environment 交易场所；凭证、margin/position mode 挂在 venue 层 | `0019_portfolio_venue_hard_cut.sql` |
+| `venue_wallet_states` | venue 级当前 wallet state；backtest venue 可游离持有 wallet，绑定后才进入 account portfolio 汇总 | `0019_portfolio_venue_hard_cut.sql`, `0027_allow_unbound_venue_wallet_states.sql` |
+| `venue_events` | venue bind / release / archive 审计事件 | `0019_portfolio_venue_hard_cut.sql` |
+| `session_venues` | session 启动时捕获的 active venue 路由快照 | `0019_portfolio_venue_hard_cut.sql` |
+| `current_portfolio_snapshots` | 当前 portfolio snapshot 只读视图；Phase 2 hard-cut 后统一从 accounts 当前状态映射账号级 portfolio snapshot | `0021_portfolio_snapshot_hard_cut.sql` |
 | `account_snapshots` | 钱包快照 hypertable, 写入触发原因追溯 | `0002_create_account_snapshots.sql` |
 | `strategies` | 策略定义 (name+version unique, immutable)；保存时记录 runtime_version/runtime_profile，供后续 runtime 版本兼容检查 | `0003_create_strategies.sql`, runtime metadata 于 `0017_strategy_runtime_debug_metadata.sql` |
 | `strategy_sessions` | 策略运行 session (backtest/live/testnet/debugging), Phase D 起持久化 owning runtime (`runtime_id` / source / runtime_name)；`recoverable` 表示 runtime 失败后可恢复；`session_type` 区分 backtest/testnet/debugging，debugging session 可无 mounted strategy | `0004_create_strategy_sessions.sql`, runtime binding 于 `0013` + `0015` rename, active guardrails 于 `0014`, debug metadata 于 `0017_strategy_runtime_debug_metadata.sql` |
@@ -70,11 +75,10 @@ PG 连接信息通过标准环境变量:
 | 表 | 作用 | 首次引入 migration |
 |---|---|---|
 | `schema_migrations` | 服务运行时迁移记录表 | `0000_create_schema_migrations.sql` |
-| `legacy_order_fills` | 四层订单域上线前的历史成交表, 由旧 `order_fills` 自动改名保留 | `0001_create_order_fills.sql` → `0004_order_execution_domain.sql` |
-| `order_intents` | 策略产生的交易意图 | `0004_order_execution_domain.sql` |
-| `order_attempts` | 一次意图的执行尝试, 包含本地 attempt 状态、client order id 和恢复错误 | `0004_order_execution_domain.sql`, `0005_order_attempt_recovery.sql` |
-| `orders` | 交易所接受后的订单, 与 attempt 一对一 | `0004_order_execution_domain.sql`, `0005_order_attempt_recovery.sql` |
-| `order_fills` | 订单成交明细 hypertable, 与 order/attempt/intent 关联 | `0004_order_execution_domain.sql` |
+| `order_intents` | 策略产生的交易意图 | `0006_order_venue_hard_cut.sql` |
+| `order_attempts` | 一次意图的执行尝试, 包含本地 attempt 状态、client order id 和恢复错误 | `0006_order_venue_hard_cut.sql` |
+| `orders` | 交易所接受后的订单, 与 attempt 一对一 | `0006_order_venue_hard_cut.sql` |
+| `order_fills` | 订单成交明细 hypertable, 与 order/attempt/intent 关联 | `0006_order_venue_hard_cut.sql` |
 
 ### `control_panel` (control-panel-service, Phase D1)
 
@@ -84,18 +88,18 @@ PG 连接信息通过标准环境变量:
 | `runtime_registry` | 平台已知的所有 strategy-runtime；`source=hosted/self_hosted`；`role=executor/debugger`；status 状态机当前为 `paired/active/unhealthy/ended`；hosted 的 token_hash；self_hosted 行记录 credential_key_id 便于吊销；非 ended 行要求一个 credential_key_id 只能绑定一个 runtime；同一 user 的 `name` 全生命周期唯一；runtime 选择只以 `runtime_id` 为准，`name` 只是不可变展示名；connection owner 字段记录当前 RuntimeChannel owner instance；cleanup 字段记录 hosted deprovision 成败或 self-hosted 用户自管容器边界；debug workspace 字段记录 self-hosted debugger 的模板准备状态 | `0001_create_runtime_registry.sql`, `0008_add_runtime_registry_credential_key_id.sql`, `0010_unique_active_runtime_credential.sql`, `0011_allow_multiple_selected_runtimes_per_service.sql`, `0012_unique_active_hosted_runtime_slot.sql`, lifecycle rename 于 `0013_runtime_identity_lifecycle.sql`, role/owner 于 `0014_runtime_identity_role_owner.sql`, cleanup state 于 `0023_runtime_cleanup_state.sql`, debug workspace 于 `0026_runtime_debug_state.sql` |
 | `market_data_streams` | 每条物理流的聚合状态 (desired/actual + live delivery) — **Phase D2 从 account 库迁入** | `0003_create_market_data_streams.sql` |
 | `market_data_requests` | 用户声明的 kline 流需求 (demand-driven control plane) — Phase D2 迁入 | `0004_create_market_data_requests.sql` |
-| `market_data_leases` | 活跃 mode=2 session 的 TTL 占用 — Phase D2 迁入 | `0005_create_market_data_leases.sql` |
+| `market_data_leases` | 活跃 demo/live-data session 的 TTL 占用 — Phase D2 迁入 | `0005_create_market_data_leases.sql` |
 | `market_data_history_requests` | 有限时间窗口历史数据请求/回填状态 — Phase D2 迁入 | `0006_create_market_data_history_requests.sql` |
 | `runtime_credentials` | RuntimeChannel Ed25519 公钥、role、生命周期状态、下载/消费/过期/吊销审计；私钥只返回一次，不入库；hosted-internal credential 不对用户展示 secret | `0007_create_runtime_credentials.sql`, lifecycle 字段于 `0015_runtime_credential_lifecycle.sql` |
 | `runtime_commands` | runtime 异步命令记录；包含 target runtime、可选 session、幂等键、状态、deadline、ack/completion 时间、payload/result/failure reason | `0016_create_runtime_commands.sql` |
-| `session_market_data_subscriptions` | session 从策略 input universe 派生出的授权数据订阅；绑定 session/runtime/market/symbol/interval/mode | `0017_create_runtime_data_delivery_leases.sql` |
+| `session_market_data_subscriptions` | session 从策略 input universe 派生出的授权数据订阅；绑定 session/runtime/market/symbol/interval/environment | `0017_create_runtime_data_delivery_leases.sql` |
 | `stream_delivery_leases` | Kafka/control-panel delivery worker 对 session subscription 的投递所有权租约；支持 heartbeat、expiry、steal/release，并记录最后一次投递的 topic/partition/offset/时间用于 delivery health | `0017_create_runtime_data_delivery_leases.sql`, progress columns 于 `0024_stream_delivery_progress.sql` |
 | `stream_delivery_failures` | Kafka/control-panel delivery worker 的非敏感失败诊断；记录 subscription/topic/stream_key/failure_code/reason/attempt_count，供 runtime/session delivery blocked 状态排查 | `0022_create_stream_delivery_failures.sql` |
 | `market_data_writer_leases` | scraper 写入 `(exchange, market, kind, symbol, interval, year)` 前必须持有的 writer lease；记录 owner/scraper/collector/lease 状态 | `0018_create_market_data_writer_leases.sql` |
-| `market_data_coverage_segments` | 历史行情覆盖索引；按 `(exchange, market, kind, symbol, interval, year)` 保存连续可用区间，供 Market Data 时间轴、mode=0 backtest preflight 和 download-and-run 判断缺口 | `0025_create_market_data_coverage_segments.sql` |
+| `market_data_coverage_segments` | 历史行情覆盖索引；按 `(exchange, market, kind, symbol, interval, year)` 保存连续可用区间，供 Market Data 时间轴、backtest preflight 和 download-and-run 判断缺口 | `0025_create_market_data_coverage_segments.sql` |
 | `runtime_channel_leases` | RuntimeChannel 同进程续连 token 的 hash 租约；原始 token 只在 runtime 进程内存中保存，不通过 UI/API 暴露 | `0021_runtime_channel_resume_and_admission_failures.sql` |
 | `runtime_admission_failures` | RuntimeChannel HELLO/RESUME 准入失败审计；用于 Runtime Management 展示 consumed/revoked/expired credential 等启动失败原因 | `0021_runtime_channel_resume_and_admission_failures.sql` |
-| `runtime_debug_datasets` | self-hosted debugger runtime 当前加载的 mode=0 调试数据集元数据；真实 bars 只缓存在 runtime 内存，不入库 | `0026_runtime_debug_state.sql` |
+| `runtime_debug_datasets` | self-hosted debugger runtime 当前加载的 backtest 调试数据集元数据；真实 bars 只缓存在 runtime 内存，不入库 | `0026_runtime_debug_state.sql` |
 
 > D3 删除了 D1 forward-compat pairing scaffold：`runtime_pairings` 会在历史迁移 `0002` 创建后由 `0009_drop_runtime_pairings.sql` 幂等删除；`PairRuntime` RPC 和 `RegisterRuntime(source=self_hosted)` 分支也已移除/拒绝。真实 self-hosted UX 是 `runtime_credentials` + RuntimeChannel。
 
@@ -121,7 +125,7 @@ PG 连接信息通过标准环境变量:
 `account` 必须先于其他 DB 创建,因为:
 
 - core-service 内的 order module 通过进程内 adapter 读取 account/session meta 做下单前校验 (不再通过 gRPC 回连 core-service)
-- 实际 DB 层没有跨库外键,但控制面 mode=2 启动要求流就绪,而流是由 scraper 写的 —— 所以:
+- 实际 DB 层没有跨库外键,但控制面 demo/live-data 启动要求流就绪,而流是由 scraper 写的 —— 所以:
   - `control_panel` DB 必须能接受新的 market-data request / stream / lease
   - scraper 的 `{exchange}_{year}` 年库必须能接受 collector 写入
 
