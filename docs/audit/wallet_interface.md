@@ -7,15 +7,15 @@
 目的：
 
 - 统一 `core-service -> strategy-service -> runtime wallet` 的接口分层
-- 明确 canonical 字段、legacy 兼容边界、以及各字段的使用场景
+- 明确 canonical 字段、provider raw 边界、以及各字段的使用场景
 - 作为 `Phase B` 收尾后的接口与行为基线文档
 
 ## 1. 设计原则
 
 | 规则 | 说明 | 使用场景 |
 | --- | --- | --- |
-| 严格 canonical ingress | `strategy-service` 接口层只消费 canonical 字段，不在入口层做 alias fallback。 | `GetOnlineAccountInfo` 返回的钱包快照进入 `strategy-service` 时。 |
-| 兼容只放在 wire / archive 边界 | 旧字段/旧结构只允许保留在 proto mirror、provider raw 或历史脚本中；主代码不再经过 `LegacyWalletAdapter`。 | `core-service` raw → canonical、历史脚本 / 审计。 |
+| 严格 canonical ingress | `strategy-service` 接口层只消费 canonical 字段，不在入口层做 alias fallback。 | `GetPortfolioSnapshot` / venue snapshots 进入 `strategy-service` 时。 |
+| 兼容从主路径移除 | 旧字段/旧结构只允许出现在 provider raw 或历史归档中；主代码不再经过 `LegacyWalletAdapter`。 | `core-service` raw → canonical、历史归档 / 审计。 |
 | `mode` 是唯一运行时选择键 | `0 -> BinanceWalletRuntime`，`2 -> BinanceWalletRuntime`，`1 -> fail-closed`。 | `RunStrategy` / HTTP backtest 启动前选择钱包实现。 |
 | 运行时接口围绕行为定义 | 统一暴露余额读取、价格更新、订单事件处理、快照导出，不直接暴露 provider raw schema。 | 策略运行、订单回写、状态同步。 |
 | oracle/computed 边界显式化 | 尚未本地等价重算的字段保留 exchange/oracle 值，不允许用 legacy 近似值冒充 Binance 对齐结果。 | `mode=2` testnet 验证阶段。 |

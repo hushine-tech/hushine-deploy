@@ -16,7 +16,7 @@ Phase 3 的目标不是继续做 account/venue 管理，也不是接入 OKX。Ph
 4. `on_market_data` 支持返回 `None`、一个 `OrderDecision` 或 `list[OrderDecision]`。
 5. strategy-service 引入 `PortfolioWalletRuntime`，按 venue 隔离 wallet state。
 6. strategy-service 从 core-service `PortfolioSnapshot.VenueSnapshots` 构建 runtime wallet。
-7. strategy-service 用 `UpdatePortfolioSnapshot` 写回 portfolio 状态，不再用旧 `UpdateAccountWalletState` 作为正常策略运行路径。
+7. strategy-service 用 `UpdatePortfolioSnapshot` 写回 portfolio 状态，不再用旧 `removed account wallet write RPC` 作为正常策略运行路径。
 8. 未决订单阻塞粒度为 `(account_id, exchange, market, symbol)`。
 9. preflight 失败必须创建可审计的 `preflight_failed` session 记录。
 10. 模板、debugger、本地调试包、README 示例全部同步新策略 API。
@@ -234,7 +234,7 @@ order fill / lifecycle event
 
 1. `GetPortfolioSnapshot` 是 strategy-service 构建 runtime wallet 的唯一入口。
 2. `UpdatePortfolioSnapshot` 是 strategy-service 写回 wallet state 的唯一入口。
-3. 旧 `GetOnlineAccountInfo` / `UpdateAccountWalletState` 不再用于正常 strategy session。
+3. 旧 `removed account wallet read RPC` / `removed account wallet write RPC` 不再用于正常 strategy session。
 4. `PortfolioSnapshot.wallet` 只能作为 UI/兼容聚合字段，不作为 runtime 构建来源。
 5. runtime 构建来源必须是 `PortfolioSnapshot.venues[]`。
 6. backtest simulated venue 与 demo/live venue 使用同一种 `VenueSnapshot` shape。
@@ -437,7 +437,7 @@ cd strategy-debugger-cli && pytest -q
 10. hedge futures 缺 `position_side` 被拒绝。
 11. `list[OrderDecision]` 独立处理。
 12. lifecycle fill 更新正确 venue wallet。
-13. `UpdatePortfolioSnapshot` 被调用，旧 `UpdateAccountWalletState` 不在正常 strategy session 被调用。
+13. `UpdatePortfolioSnapshot` 被调用，旧 `removed account wallet write RPC` 不在正常 strategy session 被调用。
 14. preflight 失败生成 `preflight_failed` session。
 15. browser smoke 跑通 Binance spot + Binance perpetual 双 venue account。
 

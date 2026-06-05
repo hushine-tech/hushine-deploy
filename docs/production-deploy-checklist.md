@@ -56,11 +56,10 @@ make local-start
   - Linux 单机可评估 `network_mode: host`，但必须验证容器内能连到 control-panel
   - `runtime_platform` / `runtime_plans` 满足目标环境限额
 - `gateway/quant-handler/config.yaml`
-  - `features.control_panel_route_resolution: true`
-  - `control_panel_service_grpc` 指向 control-panel gRPC
+  - `control_panel_service_grpc` 指向 control-panel gRPC；strategy RPC routing 不再支持 handler 直连 strategy-service
   - `jwt_secret` 通过环境变量覆盖默认值
 - `strategy-service/config.yaml`
-  - `account_service_grpc` 和 `order_service_grpc` 都指向 `core-service:50051`；环境变量优先使用 `CORE_SERVICE_GRPC_ADDR`，旧的 `ACCOUNT_SERVICE_GRPC_ADDR` 仍兼容
+  - `core_service_grpc`、`account_service_grpc` 和 `order_service_grpc` 都指向 `core-service:50051`
   - `control_panel_service_grpc` 可达
   - `log.kafka.enabled` 与目标日志策略一致
 - `scraper/config.yaml`

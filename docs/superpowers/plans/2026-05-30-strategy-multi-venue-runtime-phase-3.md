@@ -31,14 +31,14 @@ Execution order is strict:
 
 The current code still contains Phase 2 / pre-Phase-3 leftovers that must be removed from the normal strategy path:
 
-1. `strategy-service/strategy_service/account_client.py` and `strategy-service/strategy_service/platform_proxy.py` still expose `GetOnlineAccountInfo` / `UpdateAccountWalletState`.
+1. `strategy-service/strategy_service/account_client.py` and `strategy-service/strategy_service/platform_proxy.py` still expose `removed account wallet read RPC` / `removed account wallet write RPC`.
 2. `strategy-service/strategy_service/strategy/base.py` still has `VenueWalletView`, which wraps one default wallet.
 3. `strategy-service/strategy_service/strategy/base.py` still derives the order universe from `INPUTS`.
 4. `strategy-library/hushine_strategy/inputs.py` still aliases `futures` to `perpetual_futures` and exposes `data.market[...]`.
 5. `strategy-library/hushine_strategy/types.py` still uses `qty: float`, `price: float | None`, and default `MarketData.market = "futures"`.
 6. `strategy-debugger-cli/README.md`, `strategy-debugger-cli/src/hushine_debugger/templates/strategy.py.template`, and debugger CLI tests still use `market="futures"` and `data.market[...]`.
 7. `strategy-service/strategy_templates/eth_pyramid_futures.py` and seed scripts still use old strategy API examples.
-8. `gateway/quant-handler/README.md` still documents `mode`, `GetOnlineAccountInfo`, and `UpdateAccountWalletState`.
+8. `gateway/quant-handler/README.md` still documents `mode`, `removed account wallet read RPC`, and `removed account wallet write RPC`.
 9. `gateway/quant-frontend/src/pages/AccountDetail.tsx` still sends legacy `market: "futures"` in at least one path and carries many mode-based run labels.
 
 Generated code and old historical docs may still contain strings like `mode=0` or `futures`; normal Phase 3 runtime code, templates, tests, and user-facing docs must not rely on them.
@@ -197,7 +197,7 @@ Expected:
 Run:
 
 ```bash
-rg -n 'GetOnlineAccountInfo|UpdateAccountWalletState|ACCOUNT_GET_ONLINE|ACCOUNT_UPDATE_WALLET|VenueWalletView|data\\.market\\[|self\\.market = _MarketNode|market="futures"|market='"'"'futures'"'"'|MarketData\\(.+market="futures"|wallet\\.futures|wallet\\.spot|get_wallet_balance\\(|get_available_balance\\(' \
+rg -n 'removed account wallet read RPC|removed account wallet write RPC|ACCOUNT_GET_ONLINE|ACCOUNT_UPDATE_WALLET|VenueWalletView|data\\.market\\[|self\\.market = _MarketNode|market="futures"|market='"'"'futures'"'"'|MarketData\\(.+market="futures"|wallet\\.futures|wallet\\.spot|get_wallet_balance\\(|get_available_balance\\(' \
   strategy-service strategy-library gateway/quant-handler gateway/quant-frontend strategy-debugger-cli \
   -g '!**/.git/**'
 ```
@@ -237,7 +237,7 @@ Expected:
   - This does not block Task 1 because Task 1 only modifies `strategy-library`.
   - This must be resolved before claiming full Phase 3 verification is green.
 - Confirmed Phase 2 residuals:
-  - legacy account wallet APIs: `GetOnlineAccountInfo`, `UpdateAccountWalletState`
+  - legacy account wallet APIs: `removed account wallet read RPC`, `removed account wallet write RPC`
   - single-wallet facade: `VenueWalletView`
   - old data API: `data.market[...]`, `_MarketNode`
   - old market literal: `market="futures"` / `market='futures'`
@@ -1280,9 +1280,9 @@ def test_run_strategy_builds_wallet_from_portfolio_snapshot(monkeypatch):
             calls["portfolio"] += 1
             return make_portfolio_snapshot_with_binance_perp_and_spot(account_id)
 
-        def get_online_account_info(self, account_id, user_id=0):
+        def removed_account_wallet_read(self, account_id, user_id=0):
             calls["online"] += 1
-            raise AssertionError("normal Phase 3 run must not call GetOnlineAccountInfo")
+            raise AssertionError("normal Phase 3 run must not call removed account wallet read RPC")
 
     # Use existing servicer test setup and inject AccountClient.
     # Assert calls["portfolio"] == 1 and calls["online"] == 0 after startup.
@@ -1360,7 +1360,7 @@ snapshot = self._account_client.get_portfolio_snapshot(account_id, user_id=user_
 wallet = build_portfolio_wallet_from_snapshot(snapshot, allowed_routes=decl.required_routes)
 ```
 
-Do not fall back to `GetOnlineAccountInfo`.
+Do not fall back to `removed account wallet read RPC`.
 
 - [ ] **Step 5: Switch snapshot write callback**
 
@@ -1376,7 +1376,7 @@ self._account_client.update_portfolio_snapshot(
 )
 ```
 
-Do not call `UpdateAccountWalletState` from normal strategy sessions.
+Do not call `removed account wallet write RPC` from normal strategy sessions.
 
 - [ ] **Step 6: Run startup tests**
 
@@ -1553,9 +1553,9 @@ def test_phase3_normal_run_never_updates_legacy_wallet_state(monkeypatch):
         def update_portfolio_snapshot(self, *args, **kwargs):
             calls["portfolio_update"] += 1
 
-        def update_account_wallet_state(self, *args, **kwargs):
+        def removed_account_wallet_write(self, *args, **kwargs):
             calls["legacy_update"] += 1
-            raise AssertionError("normal Phase 3 run must not call UpdateAccountWalletState")
+            raise AssertionError("normal Phase 3 run must not call removed account wallet write RPC")
 
     # Execute a minimal run through existing servicer harness.
     assert calls["legacy_update"] == 0
@@ -1577,11 +1577,11 @@ Expected:
 
 In strategy-service:
 
-- Keep `get_online_account_info` only if debugger/admin inspection still needs it.
+- Keep `removed_account_wallet_read` only if debugger/admin inspection still needs it.
 - Mark it non-normal with a docstring:
 
 ```python
-def get_online_account_info(...):
+def removed_account_wallet_read(...):
     """Legacy/admin-only helper. Normal Phase 3 strategy sessions use get_portfolio_snapshot."""
 ```
 
@@ -1605,15 +1605,15 @@ resp, err := s.accounts.GetPortfolioSnapshot(ctx, &accountv1.GetPortfolioSnapsho
 Modify `gateway/quant-handler/README.md`:
 
 - Replace `mode` account creation docs with `environment`.
-- Replace `GetOnlineAccountInfo` wallet docs with `GetPortfolioSnapshot`.
-- Remove `UpdateAccountWalletState` from normal account creation flow documentation.
+- Replace `removed account wallet read RPC` wallet docs with `GetPortfolioSnapshot`.
+- Remove `removed account wallet write RPC` from normal account creation flow documentation.
 
 - [x] **Step 6: Run residual scan**
 
 Run:
 
 ```bash
-rg -n 'GetOnlineAccountInfo|UpdateAccountWalletState|ACCOUNT_GET_ONLINE|ACCOUNT_UPDATE_WALLET' strategy-service gateway/quant-handler -g '!**/.git/**'
+rg -n 'removed account wallet read RPC|removed account wallet write RPC|ACCOUNT_GET_ONLINE|ACCOUNT_UPDATE_WALLET' strategy-service gateway/quant-handler -g '!**/.git/**'
 ```
 
 Expected:
@@ -2137,7 +2137,7 @@ Expected:
 Run:
 
 ```bash
-rg -n 'GetOnlineAccountInfo|UpdateAccountWalletState|ACCOUNT_GET_ONLINE|ACCOUNT_UPDATE_WALLET|GetAccountMeta\\(' \
+rg -n 'removed account wallet read RPC|removed account wallet write RPC|ACCOUNT_GET_ONLINE|ACCOUNT_UPDATE_WALLET|GetAccountMeta\\(' \
   strategy-service gateway/quant-handler \
   -g '!**/.git/**'
 ```
@@ -2376,7 +2376,7 @@ Phase 3 is complete when:
 4. `wallet.get(exchange, market)` is the only wallet access API for strategies.
 5. `PortfolioWalletRuntime` reads from multiple `VenueSnapshot` records.
 6. Normal strategy sessions call `GetPortfolioSnapshot` and `UpdatePortfolioSnapshot`.
-7. Normal strategy sessions do not call `GetOnlineAccountInfo` or `UpdateAccountWalletState`.
+7. Normal strategy sessions do not call `removed account wallet read RPC` or `removed account wallet write RPC`.
 8. `OrderDecision` requires explicit route fields and string `qty`/`price`.
 9. `list[OrderDecision]` is supported as independent ordinary orders.
 10. Lifecycle fills update the correct venue wallet.

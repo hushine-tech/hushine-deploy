@@ -147,14 +147,14 @@ Language: Chinese is the working language for comments, docs, and commit message
 
 - **Account flow: passed at service level**.
   - `core-service` local test suite passed: `cd core-service && go test ./...`
-  - Existing integration coverage already proves the account happy path for **backtest + live(mock)** registration / wallet sync: create account → `GetOnlineAccountInfo` → `UpdateAccountWalletState`
+  - Existing integration coverage proves the service-level account happy path around portfolio context creation, venue wallet bootstrap, and portfolio snapshot sync.
   - order module tests passed under the then-current service layout; after the runtime merge, use `cd core-service && go test ./internal/order/...`
   - `strategy-service` targeted gRPC / data-loop tests passed with explicit path ordering:
     `PYTHONPATH=/Users/xdy/Workplace/hushine/strategy-service:/Users/xdy/Workplace/hushine/strategy-library pytest -q tests/test_grpc_server.py tests/test_data_loop.py`
 - **Important scope limit**: this does **not** prove real Binance live/testnet end-to-end. It proves the current service-layer happy path and mock-backed account flow are runnable.
 - **Real live/testnet is still not considered runnable end-to-end**. Current known blockers:
   1. ~~`core-service` exchange fetch uses process-level env credentials, while the order path places orders with per-account credentials from DB.~~ **Resolved by Phase A**: exchange-backed fetch now uses per-account credentials from the `accounts` row; `accounts.api_key` is constrained unique.
-  2. ~~`strategy-service` drops live futures runtime state when hydrating wallet from `GetOnlineAccountInfo`.~~ **Resolved for `mode=2` by Phase B1**: canonical hydration now restores `qty`, `entry_price`, `mark_price`, `wallet_balance`, and balance context into `BinanceParityWallet`. `mode=1` remains intentionally fail-closed.
+  2. ~~`strategy-service` drops live futures runtime state during wallet hydration.~~ **Resolved for `mode=2` by Phase B1**: canonical hydration now restores `qty`, `entry_price`, `mark_price`, `wallet_balance`, and balance context into `BinanceWalletRuntime`. `mode=1` remains intentionally fail-closed.
   3. The order module live executor is futures-only (`/fapi/v1/order`, market order path). Spot live/testnet is not wired, and limit-order semantics are not implemented in the real executor path.
   4. `scripts/e2e_full_flow.sh` is still a **mode=0 backtest** script and starts `core-service` with `MOCK_BINANCE=1`, so it is not evidence for real exchange readiness.
 

@@ -108,7 +108,6 @@ market_data:
 dependencies:
   account_service_grpc: "127.0.0.1:${ACCT_GRPC}"
   order_service_grpc: "127.0.0.1:${ACCT_GRPC}"
-  legacy_strategy_service_grpc: "127.0.0.1:${STRAT_GRPC}"
 
 provisioning:
   backend: "docker"
@@ -144,7 +143,6 @@ cd "$ROOT/control-panel-service"
 CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
-STRATEGY_SERVICE_GRPC_ADDR="127.0.0.1:${STRAT_GRPC}" \
 "$ROOT/.e2e-build/control-panel-service" -config "${CP_CONFIG}" > /tmp/e2e-control-panel.log 2>&1 &
 PIDS+=($!)
 echo "  control-panel    PID=$! → HTTP:${CP_HTTP} gRPC:${CP_GRPC}"
@@ -166,9 +164,7 @@ echo "  strategy-service PID=$! → gRPC:${STRAT_GRPC}"
 cd "$ROOT/gateway/quant-handler"
 CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ACCOUNT_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
-STRATEGY_SERVICE_GRPC_ADDR="127.0.0.1:${STRAT_GRPC}" \
 CONTROL_PANEL_SERVICE_GRPC_ADDR="127.0.0.1:${CP_GRPC}" \
-FEATURES_CONTROL_PANEL_ROUTE_RESOLUTION=1 \
 QUANT_HANDLER_JWT_SECRET="${JWT_SECRET}" \
 HTTP_ADDR=":${HANDLER_HTTP}" \
 HANDLER_CORS_ORIGINS="http://localhost:5173" \
@@ -237,15 +233,33 @@ AUTH="Authorization: Bearer ${TOKEN}"
 pass "Login OK (user_id=${USER_ID}, token=${TOKEN:0:20}...)"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 4: Create account
+# Step 4: Create account + backtest venue wallet
 # ══════════════════════════════════════════════════════════════════════════════
-info "Step 4: Create account (TESTUSDT isolated futures, 10000 USDT)"
+info "Step 4: Create account context + backtest venue wallet (TESTUSDT isolated futures, 10000 USDT)"
 ACCOUNT_RESP=$(curl -s -X POST "${API}/api/accounts" \
     -H "$AUTH" -H 'Content-Type: application/json' \
     -d '{
   "name": "e2e-full-flow",
-  "mode": 0,
-  "initial_balance": 10000,
+  "description": "E2E portfolio context",
+  "environment": 0
+}')
+ACCOUNT_ID=$(echo "$ACCOUNT_RESP" | jq -r '.account_id')
+if [ -z "$ACCOUNT_ID" ] || [ "$ACCOUNT_ID" = "null" ]; then
+    fail "Create account failed: $ACCOUNT_RESP"
+    exit 1
+fi
+pass "Account created: ID=${ACCOUNT_ID}"
+
+VENUE_BODY=$(cat <<EOF
+{
+  "account_id": ${ACCOUNT_ID},
+  "exchange": "binance",
+  "market": "perpetual_futures",
+  "environment": "backtest",
+  "status": "active",
+  "display_name": "e2e-backtest-binance-usdm",
+  "margin_mode": "isolated",
+  "position_mode": "one_way",
   "futures": {
     "margin_mode": "isolated",
     "position_mode": "one_way",
@@ -254,13 +268,18 @@ ACCOUNT_RESP=$(curl -s -X POST "${API}/api/accounts" \
       {"symbol": "TESTUSDT", "direction": 0, "initial_balance": 10000, "leverage": 20, "fee_rate": 0.0004}
     ]
   }
-}')
-ACCOUNT_ID=$(echo "$ACCOUNT_RESP" | jq -r '.account_id')
-if [ -z "$ACCOUNT_ID" ] || [ "$ACCOUNT_ID" = "null" ]; then
-    fail "Create account failed: $ACCOUNT_RESP"
+}
+EOF
+)
+VENUE_RESP=$(curl -s -X POST "${API}/api/venues" \
+    -H "$AUTH" -H 'Content-Type: application/json' \
+    -d "${VENUE_BODY}")
+VENUE_ID=$(echo "$VENUE_RESP" | jq -r '.venue_id')
+if [ -z "$VENUE_ID" ] || [ "$VENUE_ID" = "null" ]; then
+    fail "Create venue failed: $VENUE_RESP"
     exit 1
 fi
-pass "Account created: ID=${ACCOUNT_ID}"
+pass "Backtest venue created: ID=${VENUE_ID}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 5: Create strategy

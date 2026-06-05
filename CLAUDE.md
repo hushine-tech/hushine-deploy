@@ -118,7 +118,7 @@ Phase D (runtime control plane / 用户隔离 / 容器化调试). Each phase = o
 
 ### D3 local smoke defaults
 
-`restart.sh` now starts all app services, including `control-panel-service`, against third-party dependencies on `192.168.88.10`. For local D3 smoke, `config.local.yaml` uses DockerProvisioner (`bridge` + `host.docker.internal`) and quant-handler has `features.control_panel_route_resolution=true`.
+`restart.sh` now starts all app services, including `control-panel-service`, against third-party dependencies on `192.168.88.10`. For local D3 smoke, `config.local.yaml` uses DockerProvisioner (`bridge` + `host.docker.internal`) and quant-handler points `dependencies.control_panel_service_grpc` at control-panel-service.
 
 Smoke helpers:
 - `USER_ID=<id> scripts/smoke_d3_hosted_runtime.sh` starts/proves the default hosted Docker runtime path.
@@ -191,14 +191,12 @@ quant-frontend (React :5173)
             → TimescaleDB (account DB)
             → TimescaleDB (order DB)
             → Binance REST API (live/testnet)
-        → strategy-service (gRPC :50053) — legacy direct-dial path
-        → control-panel-service (gRPC :50054) — Phase D1 cutover path
-              EnsureHostedRuntime / ResolveRuntimeRoute (when
-              features.control_panel_route_resolution=true)
+        → control-panel-service (gRPC :50054)
+              EnsureHostedRuntime / ResolveRuntimeRoute / RuntimeChannel proxy
         → strategy-runtime container (gRPC, host:allocated_port)
               direct-dial after route resolution; carries x-caller-token
 
-control-panel-service (Go gRPC :50054, HTTP :8082) — Phase D1
+control-panel-service (Go gRPC :50054, HTTP :8082)
     → TimescaleDB (control_panel DB)
     → core-service (gRPC, GetUser → users.plan_code)
     → docker daemon (DockerProvisioner via os/exec)
@@ -383,8 +381,7 @@ W3C traceparent propagated via gRPC metadata across all backend services. Jaeger
 | quant-handler | `QUANT_HANDLER_JWT_SECRET` | **required** | HMAC signing key |
 | quant-handler | `HTTP_ADDR` | `:8090` | |
 | quant-handler | `HANDLER_CORS_ORIGINS` | `http://localhost:5173` | |
-| quant-handler | `CONTROL_PANEL_SERVICE_GRPC_ADDR` | unset | enables runtime route resolution |
-| quant-handler | `FEATURES_CONTROL_PANEL_ROUTE_RESOLUTION` | `0` | flip to `1` only at D1 cutover |
+| quant-handler | `CONTROL_PANEL_SERVICE_GRPC_ADDR` | **required** | strategy RPC routing always goes through control-panel-service |
 | quant-frontend | `VITE_API_BASE_URL` | `http://localhost:8090` | |
 
 ## What's Not Yet Implemented
