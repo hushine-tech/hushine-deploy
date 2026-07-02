@@ -14,13 +14,13 @@ Language: Chinese is the working language for comments, docs, and commit message
 
 - **Stage 1 (complete)** — End-to-end happy path is wired up. `quant-frontend` → `quant-handler` → `core-service` → `strategy-service` → `core-service/order.v1` → back. Backtests run, orders flow through the real order module, and wallets update through the full chain.
 - **Stage 2 (active)** — Wallet/account hardening for exchange-backed modes.
-  - `Phase A` is complete and archived in `core-service`: exchange-backed fetch routes by `account.mode`, uses per-account credentials, and returns Binance v3-backed canonical snapshots.
+  - `Phase A` is complete and archived in `core-service`: exchange-backed fetch routes by `account.environment`, uses per-account credentials, and returns Binance v3-backed canonical snapshots.
   - `Phase B1` / `B2` / `B3` are complete in `strategy-service`: runtime split, strict canonical contract, backtest bootstrap, metadata-backed risk fields, futures open-order lifecycle, ledger events, isolated-wallet/break-even parity, spot locked lifecycle, and unsupported Binance margin modes fail-closed.
   - Post-`B3` code review fixes are already landed: lifecycle events now require explicit `order_id`, futures open prechecks read `available_balance`, and spot sell prechecks read unlocked quantity (`qty - locked`).
 - **Stage 2 priorities from here**, in recommended order:
   1. **Remote debug / strategy authoring product phase** — support remotely editing, debugging, starting, stopping, and observing strategy sessions without relying on local-only workflows.
   2. **Partial-fill and execution-state hardening** — define and implement behavior for half-filled orders, fill-pending orders, rejections, insufficient margin, rate limits, network timeouts, and rollback/blocking semantics.
-  3. **Reconciliation follow-up observation** — keep collecting `mode=2` samples, especially break-even advisory drift and funding-fee wallet movements at settlement times; this is no longer a C3 gate.
+  3. **Reconciliation follow-up observation** — keep collecting `environment=1` demo samples, especially break-even advisory drift and funding-fee wallet movements at settlement times; this is no longer a C3 gate.
   4. **Session lifecycle hardening** — explicit stop-session UX exists in pieces; `Stop + close positions` still needs a real implementation.
   5. **Real-time market data pipeline** — scraper → Kafka → strategy-service live loop still needs a proven end-to-end Kafka market-data session.
 - **Later** — OKX exchange, broader user-facing features, multi-user, and production live-mode rollout.
@@ -31,7 +31,7 @@ Language: Chinese is the working language for comments, docs, and commit message
 
 - **`core-service` Phase A is complete and archived.**
   - Archived change: `openspec/changes/archive/2026-04-16-core-service-exchange-adapter-phase-a/`
-  - Exchange-backed fetch now routes by `account.mode`, uses per-account `api_key/api_secret`, and standardizes Binance futures snapshots from `/fapi/v3/account` + `/fapi/v3/balance` + `/fapi/v3/positionRisk`.
+  - Exchange-backed fetch now routes by `account.environment`, uses per-account `api_key/api_secret`, and standardizes Binance futures snapshots from `/fapi/v3/account` + `/fapi/v3/balance` + `/fapi/v3/positionRisk`.
 - **`strategy-service` Phase B is complete through `B3`.**
   - Active changes:
     - `openspec/changes/strategy-wallet-abstraction-phase-b/`
@@ -39,15 +39,15 @@ Language: Chinese is the working language for comments, docs, and commit message
     - `openspec/changes/strategy-wallet-abstraction-phase-b3/`
 - **What is landed now**
   - Canonical wallet naming between `core-service -> strategy-service`
-  - Runtime selection by `account.mode`: `0 -> BinanceWalletRuntime`, `2 -> BinanceWalletRuntime`, `1 -> fail-closed`. Phase C2b legacy harness removal (`future.py` / `account.py` / `BinanceParityWallet` alias / legacy CLI scripts / 5 legacy test-fixture entry points) is complete; all wallet construction now flows through `build_wallet_from_account → BinanceWalletRuntime`.
+  - Runtime selection by `account.environment`: `0 -> BinanceWalletRuntime` (backtest), `1 -> BinanceWalletRuntime` (demo), `2 -> fail-closed` (live). Phase C2b legacy harness removal (`future.py` / `account.py` / `BinanceParityWallet` alias / legacy CLI scripts / 5 legacy test-fixture entry points) is complete; all wallet construction now flows through `build_wallet_from_account → BinanceWalletRuntime`.
   - Strict canonical ingress: no `qty -> position_qty`, `margin_type -> margin_mode`, or `total_* -> canonical` fallback in `strategy-service`
   - Backtest bootstrap rules:
     - `cross`: `wallet_balance_0 = futures.initial_balance + deposit_sum - withdrawal_sum`
     - `isolated`: `wallet_balance_0 = Σ position.initial_balance + deposit_sum - withdrawal_sum`
-  - `mode=2` hydration of real exchange-backed runtime state (`position_qty`, `entry_price`, `mark_price`, `wallet_balance`, `available_balance`, `margin_balance`, `risk_metadata`, etc.)
+  - `environment=1` hydration of real exchange-backed runtime state (`position_qty`, `entry_price`, `mark_price`, `wallet_balance`, `available_balance`, `margin_balance`, `risk_metadata`, etc.)
   - Binance parity formulas for `unrealized_pnl`, `margin_balance`, `available_balance`, `initial_margin`, `position_initial_margin`, metadata-backed `maint_margin` and `liquidation_price`
   - Futures open-order lifecycle (`open_order_initial_margin`, `total_open_order_initial_margin`), ledger events (`funding_fee`, `transfer`, `deposit`, `withdrawal`), local `isolated_wallet` / `break_even_price`, and spot `locked` lifecycle
-  - Unsupported Binance account modes (`multi_assets_mode`, `portfolio_margin`) fail-closed in `mode=2`
+  - Unsupported Binance account modes (`multi_assets_mode`, `portfolio_margin`) fail-closed in demo/live exchange-backed environments
   - Post-review hardening:
     - lifecycle order events require explicit `order_id`
     - futures open checks use `available_balance`
@@ -55,10 +55,10 @@ Language: Chinese is the working language for comments, docs, and commit message
 - **Verification / runtime status as of 2026-04-20**
   - `cd core-service && go test ./...` — passed
   - `cd strategy-service && PYTHONPATH=.:../strategy-library pytest tests/ -q` — passed (`89 passed`)
-  - `mode=2` testnet session + reconciliation have been started for real; the project is no longer blocked at preflight-only or UI-only validation.
+  - `environment=1` demo session + reconciliation have been started for real; the project is no longer blocked at preflight-only or UI-only validation.
 - **Important remaining scope limit**
-  - `mode=1` live runtime remains intentionally fail-closed.
-  - `C3` is accepted as closed; remaining `mode=2` observations are operational follow-up, not a blocker for moving into the remote-debug product phase.
+  - `environment=2` live runtime remains intentionally fail-closed.
+  - `C3` is accepted as closed; remaining `environment=1` observations are operational follow-up, not a blocker for moving into the remote-debug product phase.
   - The next hardening targets are partial fills / fill-pending state, execution recovery semantics, and `Stop + close positions`.
 
 ## pre_C3 Snapshot (2026-04-20)
@@ -76,7 +76,7 @@ Language: Chinese is the working language for comments, docs, and commit message
 ## C3 Runtime Snapshot (2026-04-20)
 
 - `C3` main path is considered complete enough to run:
-  - `mode=2` session startup works
+  - `environment=1` session startup works
   - reconciliation runs are being produced
   - the work has shifted from "make C3 exist" to "correct C3 runtime behavior"
 - Two concrete runtime issues were identified today:
@@ -123,7 +123,7 @@ Language: Chinese is the working language for comments, docs, and commit message
   - `quant-handler`: `go test ./internal/app`
   - `quant-frontend`: `npm run build`
 - Follow-up observation:
-  - future `mode=2` sessions should confirm one-way `ETHUSDT/SHORT.exists` / `ETHUSDT/LONG.exists` hard fails stay gone
+  - future `environment=1` sessions should confirm one-way `ETHUSDT/SHORT.exists` / `ETHUSDT/LONG.exists` hard fails stay gone
   - future sessions should confirm `wallet_balance` diff no longer grows by missing-fee steps
 
 ## C3 Break-even Correction Snapshot (2026-04-28)
@@ -154,19 +154,19 @@ Language: Chinese is the working language for comments, docs, and commit message
 - **Important scope limit**: this does **not** prove real Binance live/testnet end-to-end. It proves the current service-layer happy path and mock-backed account flow are runnable.
 - **Real live/testnet is still not considered runnable end-to-end**. Current known blockers:
   1. ~~`core-service` exchange fetch uses process-level env credentials, while the order path places orders with per-account credentials from DB.~~ **Resolved by Phase A**: exchange-backed fetch now uses per-account credentials from the `accounts` row; `accounts.api_key` is constrained unique.
-  2. ~~`strategy-service` drops live futures runtime state during wallet hydration.~~ **Resolved for `mode=2` by Phase B1**: canonical hydration now restores `qty`, `entry_price`, `mark_price`, `wallet_balance`, and balance context into `BinanceWalletRuntime`. `mode=1` remains intentionally fail-closed.
+  2. ~~`strategy-service` drops exchange-backed futures runtime state during wallet hydration.~~ **Resolved for `environment=1` by Phase B1**: canonical hydration now restores `qty`, `entry_price`, `mark_price`, `wallet_balance`, and balance context into `BinanceWalletRuntime`. `environment=2` remains intentionally fail-closed.
   3. The order module live executor is futures-only (`/fapi/v1/order`, market order path). Spot live/testnet is not wired, and limit-order semantics are not implemented in the real executor path.
-  4. `scripts/e2e_full_flow.sh` is still a **mode=0 backtest** script and starts `core-service` with `MOCK_BINANCE=1`, so it is not evidence for real exchange readiness.
+  4. `scripts/e2e_full_flow.sh` is still an **environment=0 backtest** script and starts `core-service` with `MOCK_BINANCE=1`, so it is not evidence for real exchange readiness.
 
 ## Wallet Algorithm Assessment (2026-04-18)
 
 - **Current implementation model**
-  - The repo now routes both active modes through the Binance runtime:
-    - `mode=0 -> BinanceWalletRuntime`
-    - `mode=2 -> BinanceWalletRuntime`
-    - `mode=1 -> fail-closed`
+  - The repo now routes both active environments through the Binance runtime:
+    - `environment=0 -> BinanceWalletRuntime` (backtest)
+    - `environment=1 -> BinanceWalletRuntime` (demo)
+    - `environment=2 -> fail-closed` (live)
   - `LegacyWalletAdapter` + `FutureWallet` + `Position` + `Account` + `BinanceParityWallet` alias + the `run_backtest.py` / `run_debug.py` / `backtest_runner.py` legacy entry scripts have all been removed (Phase C2b cleanup, archived change `strategy-wallet-legacy-cleanup`).
-- **What is already parity-backed in `mode=2`**
+- **What is already parity-backed in `environment=1`**
   - strict canonical hydration
   - `wallet_balance`, `unrealized_pnl`, `margin_balance`, `available_balance`
   - `notional`, `initial_margin`, `position_initial_margin`
@@ -176,7 +176,7 @@ Language: Chinese is the working language for comments, docs, and commit message
   - local `isolated_wallet`, `break_even_price`
   - spot `locked` lifecycle
 - **What is still intentionally out of scope / fail-closed**
-  - `mode=1` live runtime
+  - `environment=2` live runtime
   - `multi_assets_mode`
   - `portfolio_margin`
   - full testnet-sampled drift calibration and long-session reconciliation observations
@@ -245,17 +245,19 @@ make dev            # go run ./cmd/core-service -config ./config.yaml
 
 ```bash
 cd strategy-service
-pip install -r requirements.txt
-./generate_proto.sh              # Regenerate stubs from core-service proto
-make dev                          # PYTHONPATH=... python run_grpc_server.py -config config.yaml
-pytest tests/                     # All tests
-pytest tests/test_strategy_engine.py  # Single file
+uv sync
+./generate_proto.sh                    # Regenerate stubs from core-service proto
+make dev                                # uv run hushine-runtime start --config ./config.yaml
+PYTHONPATH=.:../strategy-library uv run --extra dev pytest tests/ -q
+PYTHONPATH=.:../strategy-library uv run --extra dev pytest tests/test_strategy_engine.py -q  # Single file
 ```
 
 After Phase C2b legacy cleanup, `run_backtest.py` / `run_debug.py` /
-`backtest_runner.py` no longer exist — backtests run through the gRPC
-`RunStrategy` call (`strategy-service`'s normal production path). Use
-`make dev` at the repo root to start the full local stack.
+`backtest_runner.py` no longer exist. After the RuntimeChannel cutover,
+`run_grpc_server.py` is also gone; hosted/self-hosted/bare runtimes all start
+through `uv run hushine-runtime start`, and backtests run through the platform
+`RunStrategy` path over RuntimeChannel. Use `make dev` at the repo root to
+start the full local stack.
 
 ### scraper (Go)
 ```bash
@@ -292,11 +294,11 @@ go run ./examples/e2e-all-types/main.go  # E2E demo
 
 ## Architecture
 
-### Account Modes
-Account mode (stored in `accounts.mode`) determines data authority:
-- **0 (backtest)**: strategy-service wallet is authoritative → saved as-is in DB
-- **1 (live)**: Binance API is authoritative → strategy-service wallet ignored, exchange data fetched
-- **2 (testnet)**: Same as live but uses `testnet.binancefuture.com`
+### Account Environments
+Account environment (stored in `accounts.environment`) determines data authority:
+- **0 (backtest)**: strategy-runtime wallet is authoritative during the session; final state is restored to the pre-run backtest wallet snapshot
+- **1 (demo)**: exchange-backed demo/testnet path; Binance testnet-style account/order data is fetched through core-service
+- **2 (live)**: production exchange-backed path; rollout remains guarded until execution/fill recovery is hardened
 
 Routing logic: `core-service/internal/exchange/router.go` and `core-service/internal/service/grpc.go`
 
@@ -304,17 +306,17 @@ Routing logic: `core-service/internal/exchange/router.go` and `core-service/inte
 Defined in `strategy-service/strategy_service/strategy/base.py`:
 1. `wallet.on_market_data(symbol, symbol_type, price)` — update mark prices
 2. `user_strategy.on_market_data(data, wallet)` — returns `OrderDecision` or None
-3. `place_order(decision, mark_price)` — routed to `order.v1` served by core-service over gRPC (no longer a mock). In Stage 1 the fill model is still idealized (no slippage, instant fill at mark price); real Binance / testnet execution lands in Stage 2.
+3. `place_order(decision, mark_price)` — routed to `order.v1` served by core-service through the RuntimeChannel platform proxy.
 4. `wallet.on_order(symbol, symbol_type, order_response)` — settle position
 
-⚠️ **Stage 1 caveat**: the happy path is wired, but rollback on order rejection / partial fill / network failure is not. Stage 2 will harden this.
+⚠️ **Current hardening caveat**: the happy path is wired, but rejection / partial fill / rate-limit / network-timeout recovery is still the main execution-state hardening area.
 
 ### Wallet System
-`strategy-service/strategy_service/wallet/` (also in `strategy-library/wallet/`):
-- **Account** = root, routes by `symbol_type` to FutureWallet or SpotWallet
-- **FutureWallet**: `margin_mode` ∈ {isolated, cross}, `position_mode` ∈ {one_way, hedge}
-- **Position**: Single USDT-M contract with Binance formulas (WB, IM, MM, MMR tier lookup, liquidation price)
-- Cross-margin positions raise `RuntimeError` on per-position WB/equity calls — must use FutureWallet-level methods
+`strategy-service/strategy_service/wallet/` (with formulas mirrored in `strategy-library/wallet/`):
+- **BinanceWalletRuntime** is the single production wallet runtime, built through `build_wallet_from_account(...)`.
+- **BinanceFuturesBook / BinancePosition** implement futures account and position accounting, including cross/isolated margin, one-way/hedge positions, wallet balance, available balance, margin, maintenance margin, liquidation price, open-order margin, ledger events, and break-even advisory state.
+- **SpotWallet / SpotAsset** implement spot free/locked balance and estimated value lifecycle.
+- Legacy `Account`, `FutureWallet`, `Position`, `Wallet`, and `BinanceParityWallet` exports have been removed from the runtime surface; current code should not import or construct them.
 
 ### TimescaleDB Table Naming
 Scraper currently separates live vs historical by database and symbol/interval by table:
@@ -332,7 +334,7 @@ All Go services use `golang-lib/pkg/log` with middleware auto-collection. Config
 - Session ID propagation via `X-Session-ID` header and context
 - Go services call `logger.InitWithConfig(&cfg.Log)` which forwards to `golang-lib/pkg/log.InitLogWithConfig(cfg)` (in-memory struct, no file read)
 
-Python logging in `strategy-library/utils/log` aligns with the same JSON format (Elemental). `strategy-service/run_grpc_server.py` calls `utils.log.init_log_with_kafka(...)` when `cfg.log.kafka.enabled=true`.
+Python logging in `strategy-library/utils/log` aligns with the same JSON format (Elemental). `hushine-runtime start` initializes Kafka logging via `utils.log.init_log_with_kafka(...)` when `cfg.log.kafka.enabled=true`.
 
 ### Notification Management
 通知是用户级附加能力，不阻断交易主链路。统一事件 topic 是 `notification.events`：
@@ -345,7 +347,7 @@ Python logging in `strategy-library/utils/log` aligns with the same JSON format 
 ### Distributed tracing (OpenTelemetry → Jaeger)
 All backend services propagate W3C traceparent via gRPC metadata, producing a single Jaeger trace per business request that spans quant-handler / strategy-service / core-service, including core-service's `order.v1` API. Jaeger UI lives at http://192.168.88.10:16686, OTLP HTTP receiver at :4318.
 - Go services wire via `golang-lib/middleware/grpc` (server) + `middleware/grpcclient` (client) + `elog.InitTracerFromConfig(cfg.Log.Tracing)` in main.
-- Python strategy-service wires via `strategy-library/utils/log/grpc_interceptors.py` (`ServerAccessInterceptor` + `ClientExtInterceptor`); `run_grpc_server.py` calls `utils.log.tracer.init_tracer(...)` when `cfg.log.tracing.enabled=true`.
+- Python strategy-service wires via `strategy-library/utils/log/grpc_interceptors.py` (`ServerAccessInterceptor` + `ClientExtInterceptor`); `hushine-runtime start` calls `utils.log.tracer.init_tracer(...)` when `cfg.log.tracing.enabled=true`.
 - Every log entry carries `trace_id` / `span_id` fields so ES / Kibana queries can filter by trace.
 - Regression test: `bash scripts/verify_tracing.sh` fires a signup call and asserts the resulting trace covers the expected service set + trace_id appears in ES.
 
@@ -379,15 +381,15 @@ See **Project Stage** at the top of this file for the "where are we" narrative. 
 
 - **Wallet reconciliation / invariants**: C3 compare path, diff persistence, and ELK metric logs are in code and archived; remaining work is runtime observation and threshold calibration, not feature construction.
 - **Remote debug / strategy authoring**: the next product phase should make remote strategy editing, debugging, session control, and runtime inspection usable from the frontend.
-- **Exchange-backed end-to-end proof gap**: `mode=2` has run and produced reconciliation samples, but long-run operational confidence still depends on repeated sessions spanning Binance testnet account fetch → strategy loop → order flow → post-fill reconciliation.
-- **Live wallet execution boundary**: `mode=0` and `mode=2` now share `BinanceWalletRuntime`, but `mode=1` remains intentionally fail-closed. This is a rollout guardrail, not an accidental gap.
+- **Exchange-backed end-to-end proof gap**: `environment=1` has run and produced reconciliation samples, but long-run operational confidence still depends on repeated sessions spanning Binance demo account fetch → strategy loop → order flow → post-fill reconciliation.
+- **Live wallet execution boundary**: `environment=0` and `environment=1` now share `BinanceWalletRuntime`, but `environment=2` remains intentionally fail-closed. This is a rollout guardrail, not an accidental gap.
 - **Order failure paths**: `strategy-service` handles only the happy path. Rejections, insufficient margin, rate limits, network timeouts, partial fills — none have rollback logic. core-service's order module places orders, but the end-to-end error contract (what does strategy do when place_order fails?) is not defined.
 - **Kafka market data pipeline**:
   - `scraper` has Kafka publisher and live-delivery gating for canonical market-data topics, but end-to-end delivery into live sessions still needs repeated proof.
   - `strategy-service` has a `LiveDataLoop` scaffold; the live consumer/session path still needs hardening and proven operation with real topics.
   - Net effect: live market data is partially wired, but not production-proven end-to-end.
 - **Real Binance / testnet execution**: core-service's order module is partially wired for Binance futures REST, but the real path is not production-ready yet: spot execution is missing, limit-order semantics are incomplete, and long-run exchange-backed confidence still depends on repeated sessions.
-- **Live / testnet end-to-end run**: `mode=2` has run and produced reconciliation samples; `mode=1` remains intentionally fail-closed until the execution/fill recovery contract is hardened.
+- **Demo / live end-to-end run**: `environment=1` has run and produced reconciliation samples; `environment=2` remains intentionally fail-closed until the execution/fill recovery contract is hardened.
 - **C3 follow-up observation**: C3 is closed, but real reconciliation samples across `checkpoint / event / sampled`, break-even advisory drift, funding-fee movement, and threshold calibration should continue during the next phase.
 - **Fault injection + production observability**: no chaos tests, no invariant assertions wired into runtime, no alerting on reconciliation mismatches.
 

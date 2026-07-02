@@ -2,7 +2,7 @@
 
 日期：`2026-04-18`，最后整理：`2026-04-26`
 
-状态：`Phase C / C2b` 已落地；`mode=0` 与 `mode=2` 已收敛到同一 `BinanceWalletRuntime`，`C3` 已进入对账校正 / 稳定化阶段。
+状态：`Phase C / C2b` 已落地；`environment=0` 回测与 `environment=1` demo 已收敛到同一 `BinanceWalletRuntime`，live `environment=2` 仍 fail-closed。
 
 目的：
 
@@ -16,9 +16,9 @@
 | --- | --- | --- |
 | 严格 canonical ingress | `strategy-service` 接口层只消费 canonical 字段，不在入口层做 alias fallback。 | `GetPortfolioSnapshot` / venue snapshots 进入 `strategy-service` 时。 |
 | 兼容从主路径移除 | 旧字段/旧结构只允许出现在 provider raw 或历史归档中；主代码不再经过 `LegacyWalletAdapter`。 | `core-service` raw → canonical、历史归档 / 审计。 |
-| `mode` 是唯一运行时选择键 | `0 -> BinanceWalletRuntime`，`2 -> BinanceWalletRuntime`，`1 -> fail-closed`。 | `RunStrategy` / HTTP backtest 启动前选择钱包实现。 |
+| `environment` 是唯一运行时选择键 | `0 -> BinanceWalletRuntime`，`1 -> BinanceWalletRuntime`，`2 -> fail-closed`。 | `RunStrategy` / backtest 启动前选择钱包实现。 |
 | 运行时接口围绕行为定义 | 统一暴露余额读取、价格更新、订单事件处理、快照导出，不直接暴露 provider raw schema。 | 策略运行、订单回写、状态同步。 |
-| oracle/computed 边界显式化 | 尚未本地等价重算的字段保留 exchange/oracle 值，不允许用 legacy 近似值冒充 Binance 对齐结果。 | `mode=2` testnet 验证阶段。 |
+| oracle/computed 边界显式化 | 尚未本地等价重算的字段保留 exchange/oracle 值，不允许用 legacy 近似值冒充 Binance 对齐结果。 | `environment=1` demo 验证阶段。 |
 | 生命周期事件必须有稳定身份 | `NEW / PARTIALLY_FILLED / CANCELED / EXPIRED` 这类 order lifecycle 事件必须带显式 `order_id`；只有直接 `FILLED` 的即时成交路径可以省略。 | futures / spot open-order state machine。 |
 
 ## 2. 分层接口总览
@@ -28,16 +28,16 @@
 | 跨服务 proto contract | `AccountWalletState` / `FuturesWallet` / `FuturesPosition` / `SpotWallet` / `SpotAsset` | `core-service` | `strategy-service` | 服务间传输的钱包快照 | 对外可暂时保留旧字段，但 `strategy-service` 新入口只读 canonical 字段 |
 | strategy canonical state | `CanonicalAccountState` / `CanonicalFuturesState` / `CanonicalFuturesPositionState` / `CanonicalSpotState` | `wallet_adapter.py` | `wallet_factory.py` / runtime 实现 | Python 内部标准状态 | 不做 legacy fallback |
 | runtime protocol | `WalletRuntime` | `strategy-service` | `grpc_server.py` / `StrategyEngine` / `account_client.py` | 统一运行时能力接口 | 所有 runtime 都必须满足 |
-| mode=0 runtime | `BinanceWalletRuntime` | `wallet_factory.py` | 策略引擎 / 快照回写 | backtest 与 testnet 共用 Binance runtime | 不再走 legacy adapter |
-| mode=2 runtime | `BinanceWalletRuntime` | `wallet_factory.py` | 策略引擎 / 快照回写 | Binance testnet / reconciliation 主路径 | 旧 `BinanceParityWallet` alias 已删除 |
+| environment=0 runtime | `BinanceWalletRuntime` | `wallet_factory.py` | 策略引擎 / 快照回写 | backtest 与 demo 共用 Binance runtime | 不再走 legacy adapter |
+| environment=1 runtime | `BinanceWalletRuntime` | `wallet_factory.py` | 策略引擎 / 快照回写 | Binance demo / reconciliation 主路径 | 旧 `BinanceParityWallet` alias 已删除 |
 
 ## 3. 运行时选择
 
-| `account.mode` | 运行时实现 | 状态 | 使用场景 |
+| `account.environment` | 运行时实现 | 状态 | 使用场景 |
 | --- | --- | --- | --- |
 | `0` | `BinanceWalletRuntime` | 启用 | 回测、HTTP / gRPC backtest 共用 Binance runtime |
-| `1` | 无，明确报错 | fail-closed | live 暂不开放，防止误用未验证 runtime |
-| `2` | `BinanceWalletRuntime` | 启用 | Binance futures testnet / reconciliation 主路径 |
+| `1` | `BinanceWalletRuntime` | 启用 | Binance demo / reconciliation 主路径 |
+| `2` | 无，明确报错 | fail-closed | live 暂不开放，防止误用未验证 runtime |
 | 其他 | 无，明确报错 | unsupported | 未来新交易所/新环境接入前不得静默回退 |
 
 ## 4. `WalletRuntime` 协议
@@ -46,7 +46,7 @@
 
 | 属性 | 类型 | 含义 | 使用场景 |
 | --- | --- | --- | --- |
-| `mode` | `int` | 当前钱包实现对应的账户模式 | 路由、审计、快照回写 |
+| `environment_code` | `int` | 当前钱包实现对应的账户环境 | 路由、审计、快照回写 |
 | `futures` | `object` | 期货账本对象 | 策略读取仓位、账户余额、订单结算 |
 | `spot` | `object` | 现货账本对象 | 策略读取现货资产、估值、订单结算 |
 
@@ -86,8 +86,8 @@
 | --- | --- | --- | --- | --- | --- |
 | `margin_mode` | `CanonicalFuturesState` | `cross` / `isolated` | 不计算；由上游或 runtime 上下文直接给出。 | runtime / strategy | 决定保证金计算分支 |
 | `position_mode` | 期货账户级 | `one_way` / `hedge` | 不计算；由上游或 runtime 上下文直接给出。 | runtime / strategy | 决定仓位 key 与方向解析 |
-| `multi_assets_mode` | 期货账户级 | Binance 多资产模式开关 | ingress：由 `core-service` 明确给出。当前 `mode=2` 若该字段为 `true` 则 fail-closed，不构建 parity runtime。 | `wallet_factory` | 支持边界判断 |
-| `portfolio_margin` | 期货账户级 | Binance 组合保证金模式开关 | ingress：由 `core-service` 明确给出。当前 `mode=2` 若该字段为 `true` 则 fail-closed，不构建 parity runtime。 | `wallet_factory` | 支持边界判断 |
+| `multi_assets_mode` | 期货账户级 | Binance 多资产模式开关 | ingress：由 `core-service` 明确给出。demo/live 交易所环境若该字段为 `true` 则 fail-closed，不构建 runtime。 | `wallet_factory` | 支持边界判断 |
+| `portfolio_margin` | 期货账户级 | Binance 组合保证金模式开关 | ingress：由 `core-service` 明确给出。demo/live 交易所环境若该字段为 `true` 则 fail-closed，不构建 runtime。 | `wallet_factory` | 支持边界判断 |
 | `initial_balance` | 期货账户级 | 账户初始余额 | 不计算；作为账户历史上下文直接透传。 | legacy / parity runtime | 初始化 cross 账户上下文 |
 | `deposit_sum` | 期货账户级 | 累计入金 | 不计算；作为账户历史上下文直接透传。 | legacy / parity runtime | 历史余额上下文 |
 | `withdrawal_sum` | 期货账户级 | 累计出金 | 不计算；作为账户历史上下文直接透传。 | legacy / parity runtime | 历史余额上下文 |
@@ -110,7 +110,7 @@
 | backtest bootstrap | `cross` 启动时 `wallet_balance_0 = futures.initial_balance + deposit_sum - withdrawal_sum`；`isolated` 启动时 `wallet_balance_0 = Σ position.initial_balance + deposit_sum - withdrawal_sum`。 |
 | `wallet_balance` 的变化边界 | 运行中 `wallet_balance` 只受账本事件影响；`on_market_data` 只会更新 `mark_price`、`unrealized_pnl`、`margin_balance`、`available_balance`，不会改写 `wallet_balance`。 |
 | futures 开仓前置检查 | 策略层应读取 `get_available_balance()`，而不是 `get_wallet_balance()`；`wallet_balance` 是账本余额，不代表可立即开新仓的可用保证金。 |
-| unsupported futures modes | `multi_assets_mode=true` 或 `portfolio_margin=true` 时，`mode=2` 直接 fail-closed；不再静默按 single-asset `USDT-M` 处理。 |
+| unsupported futures modes | `multi_assets_mode=true` 或 `portfolio_margin=true` 时，demo/live 交易所环境直接 fail-closed；不再静默按 single-asset `USDT-M` 处理。 |
 
 ## 7. canonical 期货仓位级字段
 
@@ -166,7 +166,7 @@
 
 | 实现 | 输入 | 输出 | 主要使用场景 | 说明 |
 | --- | --- | --- | --- | --- |
-| `BinanceWalletRuntime.from_canonical(state)` | `CanonicalAccountState` | Binance runtime | `mode=0` backtest、`mode=2` testnet | 当前主路径唯一 runtime 构造入口 |
+| `BinanceWalletRuntime.from_canonical(state)` | `CanonicalAccountState` | Binance runtime | `environment=0` backtest、`environment=1` demo | 当前主路径唯一 runtime 构造入口 |
 | `to_canonical_state()` | runtime 内部状态 | `CanonicalAccountState` | 快照回写、后续对账 | 作为统一导出接口 |
 
 ## 10. 兼容字段与清理方向
@@ -186,11 +186,11 @@
 | --- | --- | --- |
 | canonical contract | 已建立并收紧 | 顶层 summary-only，canonical ingress 不再接受 alias fallback |
 | runtime protocol | 已建立并扩展 | 主路径统一使用 `get_wallet_balance()`，并新增 `on_ledger_event()` |
-| `mode=0` runtime 路径 | 已切到 Binance runtime | HTTP / gRPC backtest 都走 `BinanceWalletRuntime`；`LegacyWalletAdapter` 已删除 |
-| `mode=2` parity 路径 | 已完成 hydration + lifecycle parity | futures open-order margin、ledger events、isolated wallet、break-even、spot locked lifecycle 已本地化；unsupported futures modes fail-closed |
+| `environment=0` runtime 路径 | 已切到 Binance runtime | backtest 走 `BinanceWalletRuntime`；`LegacyWalletAdapter` 已删除 |
+| `environment=1` parity 路径 | 已完成 hydration + lifecycle parity | futures open-order margin、ledger events、isolated wallet、break-even、spot locked lifecycle 已本地化；unsupported futures modes fail-closed |
 | B3 review 收尾 | 已完成 | lifecycle order events 缺 `order_id` 时 fail-closed；策略层 futures 开仓预检查改读 `available_balance`；spot 卖出预检查改读未冻结数量 |
 | 接口层 fallback | 已收紧 | 缺 `position_qty` / `margin_mode` / `margin_balance` / `unrealized_pnl` 时直接报 contract error |
-| 对账能力 | `C1` 已落地 | `mode=2` reconciliation、`reconciliation_runs`、ELK metrics logs、PeriodicSample 触发已进入代码 |
+| 对账能力 | `C1` 已落地 | `environment=1` reconciliation、`reconciliation_runs`、ELK metrics logs、PeriodicSample 触发已进入代码 |
 
 ## 12. 推荐的接口使用方式
 
@@ -198,5 +198,5 @@
 | --- | --- | --- | --- |
 | `grpc_server.py` | `AccountWalletState -> CanonicalAccountState -> WalletRuntime` | 直接按 proto raw 字段拼 legacy wallet | 避免 provider schema 侵入运行时 |
 | 策略引擎 | futures 开仓读 `wallet.get_available_balance()`；账本/展示读 `wallet.get_wallet_balance()`；spot 卖出读 `asset.qty - asset.locked`；统一通过 `wallet.on_market_data()` / `wallet.on_order()` / `wallet.on_ledger_event()` 更新状态 | 直接假设所有 runtime 都是 legacy `FutureWallet`，或把 `wallet_balance` 当作开新仓的可用保证金 | 为后续新 runtime 保留扩展面，并避免冻结资产/已占用保证金被误判为可用 |
-| backtest / testnet runtime | `CanonicalAccountState -> BinanceWalletRuntime` | 分叉出新的 legacy runtime | 当前 `mode=0` / `mode=2` 已共享同一条 Binance runtime 主路径 |
-| testnet parity 路径 | 读取 canonical 字段并显式区分 computed/oracle | 用 legacy 公式去补未完成 Binance 字段 | 会污染对账与后续替换路径 |
+| backtest / demo runtime | `CanonicalAccountState -> BinanceWalletRuntime` | 分叉出新的 legacy runtime | 当前 `environment=0` / `environment=1` 已共享同一条 Binance runtime 主路径 |
+| demo parity 路径 | 读取 canonical 字段并显式区分 computed/oracle | 用 legacy 公式去补未完成 Binance 字段 | 会污染对账与后续替换路径 |
