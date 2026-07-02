@@ -7,11 +7,10 @@ script="scripts/smoke_d3_self_hosted_runtime.sh"
 
 required_literals=(
   '--rm'
-  '-e RUNTIME_INGRESS_MODE=outbound'
   '-e "RUNTIME_CREDENTIAL_PATH=${RUNTIME_CRED_PATH}"'
-  '-e "CONTROL_PANEL_SERVICE_GRPC_ADDR=${CONTROL_PANEL_ADDR}"'
+  '-e "RUNTIME_CHANNEL_GRPC_ADDR=${RUNTIME_CHANNEL_ADDR}"'
   '-e RUNTIME_CREDENTIAL_PATH='"'"'${RUNTIME_CRED_PATH}'"'"''
-  '-e CONTROL_PANEL_SERVICE_GRPC_ADDR='"'"'${CONTROL_PANEL_ADDR}'"'"''
+  '-e RUNTIME_CHANNEL_GRPC_ADDR='"'"'${RUNTIME_CHANNEL_ADDR}'"'"''
 )
 
 for literal in "${required_literals[@]}"; do
@@ -21,7 +20,7 @@ for literal in "${required_literals[@]}"; do
   fi
 done
 
-for forbidden in '--restart' 'unless-stopped' 'RUNTIME_RUNTIME_ID' 'runtime_id_from_credential()'; do
+for forbidden in '--restart' 'unless-stopped' 'RUNTIME_RUNTIME_ID' 'runtime_id_from_credential()' 'CONTROL_PANEL_SERVICE_GRPC_ADDR' 'RUNTIME_INGRESS_MODE'; do
   if grep -Fq -- "$forbidden" "$script"; then
     echo "forbidden self-hosted runtime launcher literal still present: $forbidden" >&2
     exit 1

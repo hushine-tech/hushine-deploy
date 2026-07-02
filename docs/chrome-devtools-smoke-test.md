@@ -26,7 +26,7 @@ make start
 
 ```bash
 lsof -nP \
-  -iTCP:50051 -iTCP:50053 -iTCP:50054 \
+  -iTCP:50051 -iTCP:50053 -iTCP:50054 -iTCP:50055 \
   -iTCP:8090 -iTCP:5173 -iTCP:18080 -iTCP:8082 \
   -sTCP:LISTEN
 ```
@@ -36,7 +36,7 @@ lsof -nP \
 | 服务 | 端口 |
 |---|---|
 | `core-service` | `:50051`，`restart.sh` 启动时为 `:18080` |
-| `control-panel-service` | `:50054`, `:8082` |
+| `control-panel-service` | `:50054`, `:50055`, `:8082` |
 | `strategy-service` | `:50053` |
 | `quant-handler` | `:8090` |
 | `quant-frontend` | `:5173` |

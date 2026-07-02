@@ -21,7 +21,7 @@ terminal 状态，新建会返回冲突错误，提示先结束旧 runtime。
 3. 本机 Docker：
    ```bash
    CREDENTIAL_FILE=$HOME/.hushine/runtime.cred \
-   CONTROL_PANEL_ADDR=host.docker.internal:50054 \
+   RUNTIME_CHANNEL_ADDR=host.docker.internal:50055 \
    make smoke-self-hosted-runtime
    ```
 4. 远端 Docker：
@@ -29,7 +29,7 @@ terminal 状态，新建会返回冲突错误，提示先结束旧 runtime。
    CREDENTIAL_FILE=$HOME/.hushine/runtime.cred \
    REMOTE_HOST=<docker-host> \
    REMOTE_USER=<ssh-user> \
-   CONTROL_PANEL_ADDR=<mac-lan-ip>:50054 \
+   RUNTIME_CHANNEL_ADDR=<mac-lan-ip>:50055 \
    make smoke-self-hosted-runtime
    ```
 

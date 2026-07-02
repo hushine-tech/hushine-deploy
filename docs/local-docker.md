@@ -44,11 +44,11 @@ core-service / order.v1 / Kafka / 数据库地址：
 
 ```bash
 CREDENTIAL_FILE=$HOME/.hushine/runtime.cred \
-CONTROL_PANEL_ADDR=host.docker.internal:50054 \
+RUNTIME_CHANNEL_ADDR=host.docker.internal:50055 \
 make smoke-self-hosted-runtime
 ```
 
-远端 Docker 主机模拟用户机器时，把 `CONTROL_PANEL_ADDR` 换成本机 Mac
+远端 Docker 主机模拟用户机器时，把 `RUNTIME_CHANNEL_ADDR` 换成本机 Mac
 在局域网中的可达地址，并设置 `REMOTE_HOST` / `REMOTE_USER`。
 
 清空本地 Docker 数据：

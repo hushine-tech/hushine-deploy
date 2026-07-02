@@ -2,13 +2,22 @@
 # D3 hosted/default runtime smoke.
 #
 # Starts the normal hosted Docker runtime through control-panel-service
-# EnsureHostedRuntime. This is the "default mode" runtime path: inbound
-# gRPC server + caller_token, unchanged by D3.
+# EnsureHostedRuntime. Hosted runtimes now self-register through the dedicated
+# RuntimeChannel listener; this smoke calls the normal control-panel gRPC API
+# that provisions the container.
 #
 # UI equivalent: Runtime Management -> Start hosted runtime.
 set -euo pipefail
 
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+DEPLOY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_ROOT="${DEPLOY_ROOT}"
+if [[ ! -d "${SOURCE_ROOT}/strategy-service" && -d "${DEPLOY_ROOT}/../strategy-service" ]]; then
+  SOURCE_ROOT="$(cd "${DEPLOY_ROOT}/.." && pwd -P)"
+fi
+if [[ ! -d "${SOURCE_ROOT}/strategy-service" || ! -d "${SOURCE_ROOT}/control-panel-service" ]]; then
+  echo "cannot find service source tree under ${DEPLOY_ROOT} or ${DEPLOY_ROOT}/.." >&2
+  exit 1
+fi
 
 USER_ID="${USER_ID:-${1:-}}"
 PROFILE="${PROFILE:-small}"
@@ -22,11 +31,11 @@ if [[ -z "${USER_ID}" ]]; then
 fi
 
 echo "→ build hosted runtime image hushine/strategy-runtime:${IMAGE_TAG}"
-bash "${ROOT_DIR}/strategy-service/scripts/build_strategy_runtime.sh" "${IMAGE_TAG}"
+bash "${SOURCE_ROOT}/strategy-service/scripts/build_strategy_runtime.sh" "${IMAGE_TAG}"
 
 echo "→ EnsureHostedRuntime via ${CONTROL_PANEL_ADDR}"
 (
-  cd "${ROOT_DIR}/control-panel-service"
+  cd "${SOURCE_ROOT}/control-panel-service"
   go run scripts/smoke_ensure_runtime.go \
     -addr "${CONTROL_PANEL_ADDR}" \
     -user "${USER_ID}" \

@@ -107,11 +107,10 @@ Phase D (runtime control plane / 用户隔离 / 容器化调试). Each phase = o
 
 ### D1 architecture as shipped
 
-`control-panel-service` is the new Go microservice (HTTP `:8082`, gRPC `:50054`, DB `control_panel` on TimescaleDB).
+`control-panel-service` is the new Go microservice (HTTP `:8082`, gRPC `:50054`, RuntimeChannel gRPC `:50055`, DB `control_panel` on TimescaleDB).
 
-- handler → control-panel `EnsureHostedRuntime` → DockerProvisioner runs `docker run -d` → strategy-runtime container starts → self-registers (status `paired`) → first heartbeat flips to `active` → control-panel returns route + `caller_token`.
-- handler dials hosted runtimes **directly** and attaches `x-caller-token`; self-hosted runtimes go through the D3 control-panel proxy over RuntimeChannel.
-- runtime's `CallerTokenInterceptor` calls control-panel `ValidateCallerToken` (5s validation cache); cross-checks `request.user_id` against the runtime's `bound_user_id`; rejects mismatches with `PermissionDenied`.
+- handler → control-panel `EnsureHostedRuntime` → DockerProvisioner runs `docker run -d` → strategy-runtime container starts → opens RuntimeChannel on `:50055` → first heartbeat flips to `active` → control-panel proxies strategy RPCs over the stream.
+- hosted, self-hosted, and bare debug runtimes all use RuntimeChannel. Handler no longer dials strategy runtimes directly.
 - Strategy RPCs Run/Preview use `Ensure` (lazy provision); Status/Stop use `Resolve` (read-only).
 - Fail-closed throughout (NotFound / ResourceExhausted / Unhealthy / RegistrationTimeout / ProvisionerUnavailable surface as typed gRPC errors).
 - D3 removed the D1 pairing scaffold (`PairRuntime`, `runtime_pairings`, pairing-code helpers). `RegisterRuntime` is hosted-only; self-hosted admission is signed RuntimeChannel HELLO with a user runtime credential.
@@ -122,16 +121,16 @@ Phase D (runtime control plane / 用户隔离 / 容器化调试). Each phase = o
 
 Smoke helpers:
 - `USER_ID=<id> scripts/smoke_d3_hosted_runtime.sh` starts/proves the default hosted Docker runtime path.
-- `CREDENTIAL_FILE=... CONTROL_PANEL_ADDR=<mac-lan-ip>:50054 REMOTE_HOST=192.168.88.10 REMOTE_USER=hushine-tech SYNC_IMAGE=1 scripts/smoke_d3_self_hosted_runtime.sh` starts a remote self-hosted runtime that simulates a user's Docker runtime.
+- `CREDENTIAL_FILE=... RUNTIME_CHANNEL_ADDR=<mac-lan-ip>:50055 REMOTE_HOST=192.168.88.10 REMOTE_USER=hushine-tech SYNC_IMAGE=1 scripts/smoke_d3_self_hosted_runtime.sh` starts a remote self-hosted runtime that simulates a user's Docker runtime.
 
 ### D1 design decisions (in `design.md`)
 
-- **D1 is hosted-only**; self-hosted moved to D3 because direct-dial fails for NAT-bound deployments.
-- **handler→runtime is direct-dial**; control-panel only resolves routes, not in the data path. D3 changes this for self-hosted via reverse-tunnel proxy.
+- **D1 is hosted-only**; self-hosted moved to D3 because NAT-bound deployments require a runtime-initiated channel.
+- **handler→runtime network access was removed after D3**; control-panel is now in the strategy RPC data path for hosted, self-hosted, and bare runtimes.
 - **handler↔control-panel trusts internal network** (no service-level token in D1; D3's mTLS replaces the trust boundary anyway).
 - `users.plan_code` lives in `account` DB; control-panel reads via `core-service.GetUser` RPC.
 - Hosted default runtime is **lazy** — created on first strategy run, not eagerly at user creation.
-- Runtime auth in D1 = gRPC metadata tokens only (`registration_token`, `caller_token`). mTLS deferred to D3+.
+- Runtime auth in D1 used gRPC metadata tokens; current runtime admission is RuntimeChannel HELLO verification.
 - Runtime plans are config-file-driven (`runtime_plans:` in `control-panel-service/config.yaml`); debug default `pro`. Plan/platform limits use `0=forbid, -1=unlimited, >0=real cap`.
 
 ### D2 progress (code-side complete 2026-05-06, 46/53)
@@ -161,11 +160,11 @@ Migrates the **market-data control plane** (4 tables + 10 RPCs) out of `core-ser
 
 D3 (`phase-d3-self-hosted-runtime`) was specced 2026-05-03 and sat at 0/34 awaiting implementation. Pre-implementation design review surfaced 6 issues that needed answering before any code, formalized as `phase-d3-self-hosted-runtime-design-fixes`:
 
-- **C1** — Decision 4 (`caller_token` removed) and Decision 6 (hosted migrate to stream model, gated) were in tension. **Fix**: hosted stays direct-dial in D3; `caller_token` removed only on self-hosted path. D4+ may unify.
+- **C1** — Decision 4 (runtime caller token removal) and Decision 6 (hosted migrate to stream model, gated) were in tension. The current runtime cutover uses RuntimeChannel for hosted too.
 - **C2** — RuntimeChannel had no wire format. **Fix**: `RuntimeFrame` envelope + 7-value `FrameType` enum (`HELLO`/`REQUEST`/`RESPONSE`/`PROGRESS`/`ABORT`/`HEARTBEAT`/`ERROR`) + `deadline_unix_ms` propagation (gRPC deadlines don't auto-cross multiplexed streams) + disconnect semantics (proxy fails Unavailable + runtime aborts execution to prevent phantom sessions) + 30s/90s heartbeat (matches D1 lease cadence).
 - **C3** — Decision 8 (revocation) didn't specify stream-registry indexing. **Fix**: double-index `runtime_id → *stream` + `key_id → set<runtime_id>`, both maintained at open/close. Revocation is O(1) average.
 - **C4** — D2 had a 7-step operator rollout doc; D3 was missing the equivalent. **Fix**: explicit task to add "D3 self-hosted runtime onboarding" section to `control-panel-service/README.md`.
-- **C5** — `strategy-runtime` container needs to know whether to boot in inbound (D1 hosted) or outbound (D3 self-hosted) mode. **Fix**: new `RUNTIME_INGRESS_MODE` env var with values `inbound` (default, D1-compatible) / `outbound` / `both` (dev/test).
+- **C5** — `strategy-runtime` no longer has an inbound/outbound switch. Runtime startup is RuntimeChannel-only.
 - **C6** — Credential file contract was underspecified. **Fix**: default mount path `/etc/hushine/runtime.cred` (override via `RUNTIME_CREDENTIAL_PATH`), permission `0600` (warn-not-reject for CI compat), schema `{version: 1, key_id, private_key_pem}` with reserved `version`, fail-closed startup on missing/malformed.
 
 C7 (phishing scenario polish) and C8 (per-session attestation re-entry note) intentionally informational, not in the proposal.
@@ -174,8 +173,8 @@ C7 (phishing scenario polish) and C8 (per-session attestation re-entry note) int
 
 - Runtime credentials: UI/handler/control-panel issue/list/revoke flow; private key returned once; runtime credential file contract is `/etc/hushine/runtime.cred` with `version/key_id/private_key_pem`.
 - RuntimeChannel: signed HELLO, replay protection, double-index stream registry, heartbeat, disconnect abort semantics, request multiplexing and deadline propagation.
-- Strategy runtime: `RUNTIME_INGRESS_MODE=inbound|outbound|both`; inbound remains D1 hosted behavior, outbound opens RuntimeChannel and does not bind a public gRPC port.
-- Handler: hosted routes attach `caller_token` and direct-dial; self-hosted routes call control-panel strategy proxy RPCs with no silent fallback.
+- Strategy runtime: RuntimeChannel-only; no public strategy gRPC port or ingress mode switch.
+- Handler: all strategy session RPCs go through control-panel strategy proxy RPCs with no silent fallback.
 - D1 scaffold removed: `PairRuntime` proto/RPC and `runtime_pairings` final table are gone; historical migration `0002` remains replayable and `0009_drop_runtime_pairings.sql` drops the table.
 - Docs: `control-panel-service/README.md` has D3 onboarding and threat-model review; `db/README.md` records `runtime_credentials`.
 - Verification run so far: `control-panel-service go test ./...`, `quant-handler go test ./...`, and strategy-service targeted D3 runtime tests. Manual cross-service self-hosted smoke remains pending until services/credential/remote runtime are started.
@@ -191,17 +190,15 @@ quant-frontend (React :5173)
             → TimescaleDB (account DB)
             → TimescaleDB (order DB)
             → Binance REST API (live/testnet)
-        → control-panel-service (gRPC :50054)
+        → control-panel-service (gRPC :50054, RuntimeChannel :50055)
               EnsureHostedRuntime / ResolveRuntimeRoute / RuntimeChannel proxy
-        → strategy-runtime container (gRPC, host:allocated_port)
-              direct-dial after route resolution; carries x-caller-token
 
-control-panel-service (Go gRPC :50054, HTTP :8082)
+control-panel-service (Go gRPC :50054, RuntimeChannel gRPC :50055, HTTP :8082)
     → TimescaleDB (control_panel DB)
     → core-service (gRPC, GetUser → users.plan_code)
     → docker daemon (DockerProvisioner via os/exec)
     Owns runtime registry / route resolution / per-user plan/quota /
-    hosted runtime provisioning / caller_token issuance & validation.
+    hosted runtime provisioning / RuntimeChannel admission.
 
 scraper (Go)
     → Binance REST + WebSocket

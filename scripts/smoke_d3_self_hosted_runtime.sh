@@ -5,7 +5,7 @@
 # remote host that simulates the user's own Docker runtime, set:
 #
 #   REMOTE_HOST=192.168.88.10 REMOTE_USER=hushine-tech \
-#   CONTROL_PANEL_ADDR=<mac-lan-ip>:50054 \
+#   RUNTIME_CHANNEL_ADDR=<mac-lan-ip>:50055 \
 #   CREDENTIAL_FILE=/path/to/downloaded/runtime.cred \
 #   scripts/smoke_d3_self_hosted_runtime.sh
 #
@@ -13,7 +13,15 @@
 # quant-frontend Runtime Management -> Runtime Credentials first.
 set -euo pipefail
 
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+DEPLOY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_ROOT="${DEPLOY_ROOT}"
+if [[ ! -d "${SOURCE_ROOT}/strategy-service" && -d "${DEPLOY_ROOT}/../strategy-service" ]]; then
+  SOURCE_ROOT="$(cd "${DEPLOY_ROOT}/.." && pwd -P)"
+fi
+if [[ ! -d "${SOURCE_ROOT}/strategy-service" ]]; then
+  echo "cannot find service source tree under ${DEPLOY_ROOT} or ${DEPLOY_ROOT}/.." >&2
+  exit 1
+fi
 
 RUNTIME_ROLE="${RUNTIME_ROLE:-executor}"
 if [[ "${RUNTIME_ROLE}" != "executor" && "${RUNTIME_ROLE}" != "debugger" ]]; then
@@ -26,7 +34,7 @@ CONTAINER_NAME="${CONTAINER_NAME:-hushine-self-hosted-runtime-default}"
 CREDENTIAL_FILE="${CREDENTIAL_FILE:-}"
 RUNTIME_CRED_PATH="${RUNTIME_CRED_PATH:-/etc/hushine/runtime.cred}"
 
-CONTROL_PANEL_ADDR="${CONTROL_PANEL_ADDR:-host.docker.internal:50054}"
+RUNTIME_CHANNEL_ADDR="${RUNTIME_CHANNEL_ADDR:-host.docker.internal:50055}"
 
 REMOTE_HOST="${REMOTE_HOST:-}"
 REMOTE_USER="${REMOTE_USER:-hushine-tech}"
@@ -51,7 +59,7 @@ fi
 
 build_image() {
   echo "→ building runtime images"
-  bash "${ROOT_DIR}/strategy-service/scripts/build_strategy_runtime.sh" dev
+  bash "${SOURCE_ROOT}/strategy-service/scripts/build_strategy_runtime.sh" dev
 }
 
 run_local() {
@@ -71,9 +79,8 @@ run_local() {
     )
   fi
   args+=(
-    -e RUNTIME_INGRESS_MODE=outbound
     -e "RUNTIME_CREDENTIAL_PATH=${RUNTIME_CRED_PATH}"
-    -e "CONTROL_PANEL_SERVICE_GRPC_ADDR=${CONTROL_PANEL_ADDR}"
+    -e "RUNTIME_CHANNEL_GRPC_ADDR=${RUNTIME_CHANNEL_ADDR}"
     -e LOG_TRACING_ENABLED=false
     "${IMAGE}"
   )
@@ -110,9 +117,8 @@ run_remote() {
     --name '${CONTAINER_NAME}' \
     -v '${REMOTE_CRED_PATH}:${RUNTIME_CRED_PATH}:ro' \
     ${debug_args} \
-    -e RUNTIME_INGRESS_MODE=outbound \
     -e RUNTIME_CREDENTIAL_PATH='${RUNTIME_CRED_PATH}' \
-    -e CONTROL_PANEL_SERVICE_GRPC_ADDR='${CONTROL_PANEL_ADDR}' \
+    -e RUNTIME_CHANNEL_GRPC_ADDR='${RUNTIME_CHANNEL_ADDR}' \
     -e LOG_TRACING_ENABLED=false \
     '${IMAGE}'"
 }
@@ -127,7 +133,7 @@ else
 fi
 
 echo "✓ self-hosted runtime container launched"
-echo "  control_panel = ${CONTROL_PANEL_ADDR}"
+echo "  runtime_channel = ${RUNTIME_CHANNEL_ADDR}"
 echo "  role          = ${RUNTIME_ROLE}"
 echo "  image         = ${IMAGE}"
 echo "  container     = ${CONTAINER_NAME}"

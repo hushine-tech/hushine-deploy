@@ -4,7 +4,14 @@
 # 用法: bash scripts/e2e_full_flow.sh
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -d "${SCRIPT_ROOT}/strategy-service" ] && [ -d "${SCRIPT_ROOT}/core-service" ]; then
+    ROOT="${SCRIPT_ROOT}"
+elif [ -d "${SCRIPT_ROOT}/../strategy-service" ] && [ -d "${SCRIPT_ROOT}/../core-service" ]; then
+    ROOT="$(cd "${SCRIPT_ROOT}/.." && pwd)"
+else
+    ROOT="${SCRIPT_ROOT}"
+fi
 PYTHON="${PYTHON:-/opt/anaconda3/bin/python3}"
 DB_HOST="${E2E_DB_HOST:-192.168.88.10}"
 ACCOUNT_DB_NAME="${E2E_ACCOUNT_DB:-account}"
@@ -16,7 +23,7 @@ ACCT_HTTP=18080
 ACCT_GRPC=18051
 CP_HTTP=18082
 CP_GRPC=18054
-STRAT_GRPC=18053
+CP_RUNTIME_GRPC=18055
 HANDLER_HTTP=18090
 JWT_SECRET="e2e-secret-key-do-not-use-in-prod"
 RUN_ID="$(date +%s)-$$"
@@ -24,6 +31,7 @@ LOGIN_USER="e2e-user-${RUN_ID}"
 LOGIN_PASS="e2e-pass-${RUN_ID}"
 API="http://127.0.0.1:${HANDLER_HTTP}"
 CP_CONFIG="/tmp/e2e-control-panel-${RUN_ID}.yaml"
+CERT_DIR="/tmp/e2e-runtime-certs-${RUN_ID}"
 RUNTIME_ID=""
 TOKEN=""
 
@@ -46,6 +54,7 @@ cleanup() {
         wait "$pid" 2>/dev/null || true
     done
     rm -f "${CP_CONFIG}"
+    rm -rf "${CERT_DIR}"
     info "Done."
 }
 trap cleanup EXIT
@@ -71,6 +80,17 @@ pass "All Go services built"
 # Step 2: Start services
 # ══════════════════════════════════════════════════════════════════════════════
 info "Step 2: Starting services"
+mkdir -p "${CERT_DIR}"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj "/CN=runtime-channel.local" \
+  -addext "subjectAltName=DNS:runtime-channel.local,DNS:host.docker.internal,IP:127.0.0.1" \
+  -keyout "${CERT_DIR}/runtime-channel-server.key" \
+  -out "${CERT_DIR}/runtime-channel-server.pem" >/tmp/e2e-runtime-certs.log 2>&1
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj "/CN=hushine-runtime-client-ca-e2e" \
+  -keyout "${CERT_DIR}/runtime-client-ca.key" \
+  -out "${CERT_DIR}/runtime-client-ca.pem" >>/tmp/e2e-runtime-certs.log 2>&1
+chmod 600 "${CERT_DIR}"/*.key
 
 # core-service
 cd "$ROOT/core-service"
@@ -88,6 +108,16 @@ cat > "${CP_CONFIG}" <<EOF
 server:
   http_addr: ":${CP_HTTP}"
   grpc_addr: ":${CP_GRPC}"
+
+runtime_channel_server:
+  grpc_addr: ":${CP_RUNTIME_GRPC}"
+  tls:
+    enabled: true
+    cert_file: "${CERT_DIR}/runtime-channel-server.pem"
+    key_file: "${CERT_DIR}/runtime-channel-server.key"
+    server_name: "runtime-channel.local"
+    client_ca_file: "${CERT_DIR}/runtime-client-ca.pem"
+    client_ca_key_file: "${CERT_DIR}/runtime-client-ca.key"
 
 database:
   host: "${DB_HOST}"
@@ -118,9 +148,8 @@ provisioning:
   registration_timeout_seconds: 30
   docker:
     network_mode: "bridge"
-    control_panel_dial_addr: "host.docker.internal:${CP_GRPC}"
+    runtime_channel_dial_addr: "host.docker.internal:${CP_RUNTIME_GRPC}"
     label_prefix: "hushine.runtime"
-    runtime_user_grpc_port: 50053
 
 notification:
   enabled: false
@@ -144,19 +173,7 @@ CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
 "$ROOT/.e2e-build/control-panel-service" -config "${CP_CONFIG}" > /tmp/e2e-control-panel.log 2>&1 &
 PIDS+=($!)
-echo "  control-panel    PID=$! → HTTP:${CP_HTTP} gRPC:${CP_GRPC}"
-
-# strategy-service
-cd "$ROOT/strategy-service"
-PYTHONPATH="$ROOT/strategy-service:$ROOT/strategy-service/strategy-library" \
-GRPC_ADDR="0.0.0.0:${STRAT_GRPC}" \
-CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
-ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
-TIMESCALE_HOST="${DB_HOST}" \
-TIMESCALE_DB="${TIMESCALE_DB_PATTERN}" \
-$PYTHON run_grpc_server.py > /tmp/e2e-strategy.log 2>&1 &
-PIDS+=($!)
-echo "  strategy-service PID=$! → gRPC:${STRAT_GRPC}"
+echo "  control-panel    PID=$! → HTTP:${CP_HTTP} gRPC:${CP_GRPC} RuntimeChannel:${CP_RUNTIME_GRPC}"
 
 # quant-handler
 cd "$ROOT/gateway/quant-handler"
@@ -180,7 +197,6 @@ for i in $(seq 1 30); do
         fail "Services did not start within 30s"
         echo "--- core-service log ---"; tail -20 /tmp/e2e-account.log 2>/dev/null
         echo "--- control-panel log ---"; tail -20 /tmp/e2e-control-panel.log 2>/dev/null
-        echo "--- strategy-service log ---"; tail -20 /tmp/e2e-strategy.log 2>/dev/null
         echo "--- quant-handler log ---";   tail -20 /tmp/e2e-handler.log 2>/dev/null
         exit 1
     fi
@@ -232,7 +248,7 @@ pass "Login OK (user_id=${USER_ID}, token=${TOKEN:0:20}...)"
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 4: Create account + backtest venue wallet
 # ══════════════════════════════════════════════════════════════════════════════
-info "Step 4: Create account context + backtest venue wallet (TESTUSDT isolated futures, 10000 USDT)"
+info "Step 4: Create account context + verify default backtest venue"
 ACCOUNT_RESP=$(curl -s -X POST "${API}/api/accounts" \
     -H "$AUTH" -H 'Content-Type: application/json' \
     -d '{
@@ -247,36 +263,74 @@ if [ -z "$ACCOUNT_ID" ] || [ "$ACCOUNT_ID" = "null" ]; then
 fi
 pass "Account created: ID=${ACCOUNT_ID}"
 
-VENUE_BODY=$(cat <<EOF
-{
-  "account_id": ${ACCOUNT_ID},
-  "exchange": "binance",
-  "market": "perpetual_futures",
-  "environment": "backtest",
-  "status": "active",
-  "display_name": "e2e-backtest-binance-usdm",
-  "margin_mode": "isolated",
-  "position_mode": "one_way",
-  "futures": {
-    "margin_mode": "isolated",
-    "position_mode": "one_way",
-    "initial_balance": 10000,
-    "positions": [
-      {"symbol": "TESTUSDT", "direction": 0, "initial_balance": 10000, "leverage": 20, "fee_rate": 0.0004}
-    ]
-  }
-}
-EOF
-)
-VENUE_RESP=$(curl -s -X POST "${API}/api/venues" \
-    -H "$AUTH" -H 'Content-Type: application/json' \
-    -d "${VENUE_BODY}")
-VENUE_ID=$(echo "$VENUE_RESP" | jq -r '.venue_id')
+VENUE_RESP=$(curl -s "${API}/api/accounts/${ACCOUNT_ID}/venues" -H "$AUTH")
+VENUE_ID=$(echo "$VENUE_RESP" | jq -r '.items[] | select(.exchange_label=="binance" and .market_label=="perpetual_futures" and .environment_label=="backtest" and .status_label=="active") | .venue_id' | head -1)
 if [ -z "$VENUE_ID" ] || [ "$VENUE_ID" = "null" ]; then
-    fail "Create venue failed: $VENUE_RESP"
+    fail "Default backtest venue missing: $VENUE_RESP"
     exit 1
 fi
-pass "Backtest venue created: ID=${VENUE_ID}"
+pass "Default backtest venue ready: ID=${VENUE_ID}"
+
+ACCOUNT_ID="${ACCOUNT_ID}" USER_ID="${USER_ID}" ACCT_GRPC="${ACCT_GRPC}" \
+PYTHONPATH="${ROOT}/strategy-service:${ROOT}/strategy-library" \
+"${PYTHON}" - <<'PY'
+import os
+
+import grpc
+
+from strategy_service.gen import account_service_pb2 as pb
+from strategy_service.gen import account_service_pb2_grpc as pb_grpc
+
+account_id = int(os.environ["ACCOUNT_ID"])
+user_id = int(os.environ["USER_ID"])
+addr = f"127.0.0.1:{os.environ['ACCT_GRPC']}"
+
+channel = grpc.insecure_channel(addr)
+stub = pb_grpc.AccountServiceStub(channel)
+resp = stub.UpdateAccountWalletState(pb.UpdateAccountWalletStateRequest(
+    account_id=account_id,
+    user_id=user_id,
+    total_value=10000.0,
+    wallet_balance=10000.0,
+    available_balance=10000.0,
+    futures=pb.FuturesWallet(
+        margin_mode="cross",
+        position_mode="one_way",
+        initial_balance=10000.0,
+        wallet_balance=10000.0,
+        available_balance=10000.0,
+        margin_balance=10000.0,
+        total_margin_balance=10000.0,
+        total_cross_wallet_balance=10000.0,
+        positions=[
+            pb.FuturesPosition(
+                symbol="TESTUSDT",
+                direction=0,
+                initial_balance=10000.0,
+                leverage=20.0,
+                fee_rate=0.0004,
+                mark_price=100.0,
+                position_side="BOTH",
+                margin_type="cross",
+                margin_mode="cross",
+            )
+        ],
+        risk_metadata=[
+            pb.FuturesRiskMetadata(
+                symbol="TESTUSDT",
+                configured_leverage=20.0,
+                configured_margin_mode="cross",
+                price_precision=2,
+                quantity_precision=3,
+                tick_size=0.01,
+                step_size=0.001,
+            )
+        ],
+    ),
+))
+wallet = resp.wallet
+print(f"  Backtest wallet initialized: margin_balance={wallet.futures.margin_balance} available_balance={wallet.futures.available_balance}")
+PY
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 5: Create strategy
@@ -327,13 +381,23 @@ fi
 info "Step 7: Ensure hosted runtime"
 bash "$ROOT/strategy-service/scripts/build_strategy_runtime.sh" dev >/tmp/e2e-runtime-image.log 2>&1
 cd "$ROOT/control-panel-service"
+set +e
 RUNTIME_RESP=$(go run scripts/smoke_ensure_runtime.go \
     -addr "127.0.0.1:${CP_GRPC}" \
     -user "${USER_ID}" \
-    -profile small \
-    -validate true 2>&1)
+    -profile small 2>&1)
+RUNTIME_RC=$?
+set -e
 echo "$RUNTIME_RESP"
-RUNTIME_ID=$(echo "$RUNTIME_RESP" | awk -F'= ' '/runtime_id/{gsub(/[[:space:]]/, "", $2); print $2; exit}')
+if [ "$RUNTIME_RC" -ne 0 ]; then
+    fail "EnsureHostedRuntime command failed: exit=${RUNTIME_RC}"
+    echo "--- control-panel log ---"
+    tail -60 /tmp/e2e-control-panel.log
+    echo "--- runtime image log ---"
+    tail -60 /tmp/e2e-runtime-image.log
+    exit 1
+fi
+RUNTIME_ID=$(echo "$RUNTIME_RESP" | sed -n 's/.*runtime_id=\([^[:space:]]*\).*/\1/p' | head -1)
 if [ -z "$RUNTIME_ID" ]; then
     fail "EnsureHostedRuntime did not return runtime_id"
     echo "--- control-panel log ---"
@@ -359,8 +423,10 @@ RUN_RESP=$(curl -s -X POST "${API}/api/accounts/${ACCOUNT_ID}/run-strategy" \
 SESSION_ID=$(echo "$RUN_RESP" | jq -r '.session_id')
 if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
     fail "Run backtest failed: $RUN_RESP"
-    echo "--- strategy-service log ---"
-    tail -30 /tmp/e2e-strategy.log
+    echo "--- control-panel log ---"
+    tail -40 /tmp/e2e-control-panel.log
+    echo "--- quant-handler log ---"
+    tail -40 /tmp/e2e-handler.log
     exit 1
 fi
 pass "Backtest started: session=${SESSION_ID}"
@@ -380,8 +446,8 @@ for i in $(seq 1 30); do
     elif [ "$STATUS" = "failed" ]; then
         ERROR=$(echo "$STATUS_RESP" | jq -r '.error')
         fail "Backtest failed: ${ERROR}"
-        echo "--- strategy-service log (last 40 lines) ---"
-        tail -40 /tmp/e2e-strategy.log
+        echo "--- control-panel log (last 40 lines) ---"
+        tail -40 /tmp/e2e-control-panel.log
         exit 1
     fi
     echo "  [${i}] status=${STATUS} bars=${BARS}"
@@ -412,16 +478,20 @@ import psycopg2, json
 conn = psycopg2.connect('host=${DB_HOST} port=5432 dbname=${ORDER_DB_NAME} user=postgres password=postgres sslmode=disable')
 cur = conn.cursor()
 cur.execute('''
-    SELECT order_id, account_id, user_id, symbol, side, qty, fill_price, status, strategy_id, market, session_id
-    FROM order_fills
-    WHERE user_id = %s AND account_id = %s
-    ORDER BY time
+    SELECT f.order_id, i.account_id, i.user_id, i.symbol, i.side, f.qty, f.fill_price,
+           f.status, COALESCE(i.strategy_id, 0), i.market, COALESCE(i.session_id, '')
+    FROM order_fills f
+    JOIN order_intents i ON i.intent_id = f.intent_id
+    WHERE i.user_id = %s AND i.account_id = %s
+    ORDER BY f.time
 ''', (${USER_ID}, ${ACCOUNT_ID}))
 rows = cur.fetchall()
+side_labels = {1: 'BUY', 2: 'SELL'}
+market_labels = {1: 'spot', 2: 'perpetual_futures', 3: 'delivery_futures'}
 print(json.dumps([{
-    'order_id': r[0], 'account_id': r[1], 'user_id': r[2], 'symbol': r[3], 'side': r[4], 'qty': float(r[5]),
+    'order_id': r[0], 'account_id': r[1], 'user_id': r[2], 'symbol': r[3], 'side': side_labels.get(r[4], str(r[4])), 'qty': float(r[5]),
     'fill_price': float(r[6]), 'status': r[7],
-    'strategy_id': r[8], 'market': r[9], 'session_id': r[10]
+    'strategy_id': r[8], 'market': market_labels.get(r[9], str(r[9])), 'session_id': r[10]
 } for r in rows]))
 cur.close()
 conn.close()
@@ -446,11 +516,11 @@ else
 fi
 
 # Check market is set
-MARKET_SET=$(echo "$ORDER_RESULT" | jq '[.[] | select(.market == "futures")] | length')
+MARKET_SET=$(echo "$ORDER_RESULT" | jq '[.[] | select(.market == "perpetual_futures")] | length')
 if [ "$MARKET_SET" = "$ORDER_COUNT" ]; then
-    pass "All order_fills have market='futures'"
+    pass "All order_fills have market='perpetual_futures'"
 else
-    fail "Not all order_fills have market='futures' (${MARKET_SET}/${ORDER_COUNT})"
+    fail "Not all order_fills have market='perpetual_futures' (${MARKET_SET}/${ORDER_COUNT})"
 fi
 
 # Check account_id is preserved
@@ -530,10 +600,10 @@ else
 
     [ "$SESSION_ACCOUNT_ID" = "$ACCOUNT_ID" ] && pass "strategy_sessions account_id matches ${ACCOUNT_ID}" || fail "strategy_sessions account_id=${SESSION_ACCOUNT_ID}, expected ${ACCOUNT_ID}"
     [ "$SESSION_STRATEGY_ID" = "$STRATEGY_ID" ] && pass "strategy_sessions strategy_id matches ${STRATEGY_ID}" || fail "strategy_sessions strategy_id=${SESSION_STRATEGY_ID}, expected ${STRATEGY_ID}"
-    if [ "$SESSION_STATUS" = "completed" ] || [ "$SESSION_STATUS" = "finished" ]; then
+    if [ "$SESSION_STATUS" = "completed" ] || [ "$SESSION_STATUS" = "finished" ] || [ "$SESSION_STATUS" = "6" ]; then
         pass "strategy_sessions status=${SESSION_STATUS}"
     else
-        fail "strategy_sessions status=${SESSION_STATUS}, expected completed/finished"
+        fail "strategy_sessions status=${SESSION_STATUS}, expected completed/finished/6"
     fi
     [ "$SESSION_BARS" = "$BARS" ] && pass "strategy_sessions bars_processed=${BARS}" || fail "strategy_sessions bars_processed=${SESSION_BARS}, expected ${BARS}"
 fi

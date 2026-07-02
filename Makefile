@@ -35,7 +35,7 @@ help:
 	@echo "  local-stop         — stop background services"
 	@echo "  runtime-image      — build hushine/strategy-runtime image (IMAGE_TAG=dev)"
 	@echo "  smoke-hosted-runtime      — EnsureHostedRuntime smoke (requires USER_ID)"
-	@echo "  smoke-self-hosted-runtime — outbound RuntimeChannel smoke (requires CREDENTIAL_FILE)"
+	@echo "  smoke-self-hosted-runtime — self-hosted RuntimeChannel smoke (requires CREDENTIAL_FILE)"
 
 # Idempotent — safe to rerun. See db/README.md for the full table inventory
 # and the PG* env vars the underlying scripts honor.

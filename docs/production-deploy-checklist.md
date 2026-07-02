@@ -52,15 +52,15 @@ make local-start
   - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_BOT_USERNAME` 通过环境变量注入，不提交到仓库
 - `control-panel-service/config.yaml`
   - `provisioning.backend` 为 `docker`
-  - Mac / Docker Desktop 场景使用 `network_mode: bridge` 和 `control_panel_dial_addr: host.docker.internal:50054`
+  - Mac / Docker Desktop 场景使用 `network_mode: bridge` 和 `runtime_channel_dial_addr: host.docker.internal:50055`
   - Linux 单机可评估 `network_mode: host`，但必须验证容器内能连到 control-panel
   - `runtime_platform` / `runtime_plans` 满足目标环境限额
 - `gateway/quant-handler/config.yaml`
   - `control_panel_service_grpc` 指向 control-panel gRPC；strategy RPC routing 不再支持 handler 直连 strategy-service
   - `jwt_secret` 通过环境变量覆盖默认值
 - `strategy-service/config.yaml`
-  - `core_service_grpc`、`account_service_grpc` 和 `order_service_grpc` 都指向 `core-service:50051`
-  - `control_panel_service_grpc` 可达
+  - `runtime_channel_grpc` 指向 control-panel RuntimeChannel gRPC（通常 `:50055`）
+  - `control_panel_service_grpc` / `market_data_control_panel_grpc` 指向普通 control-panel gRPC（通常 `:50054`）
   - `log.kafka.enabled` 与目标日志策略一致
 - `scraper/config.yaml`
   - market-data DB 指向 `{exchange}_{year}` 年库族
@@ -92,7 +92,7 @@ make start
 
 ```bash
 lsof -nP \
-  -iTCP:50051 -iTCP:50053 -iTCP:50054 \
+  -iTCP:50051 -iTCP:50053 -iTCP:50054 -iTCP:50055 \
   -iTCP:8090 -iTCP:5173 -iTCP:18080 -iTCP:8082 \
   -sTCP:LISTEN
 ```
@@ -100,7 +100,7 @@ lsof -nP \
 预期：
 
 - `core-service`: `:50051`，`restart.sh` 启动时为 `:18080`
-- `control-panel-service`: `:50054`, `:8082`
+- `control-panel-service`: `:50054`, `:50055`, `:8082`
 - `strategy-service`: `:50053`
 - `quant-handler`: `:8090`
 - `quant-frontend`: `:5173`
@@ -213,7 +213,7 @@ make stop
 
 ```bash
 lsof -nP \
-  -iTCP:50051 -iTCP:50053 -iTCP:50054 \
+  -iTCP:50051 -iTCP:50053 -iTCP:50054 -iTCP:50055 \
   -iTCP:8090 -iTCP:5173 -iTCP:18080 -iTCP:8082 \
   -sTCP:LISTEN || true
 ```

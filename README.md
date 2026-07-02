@@ -135,6 +135,6 @@ Self-hosted runtime:
 
 ```bash
 CREDENTIAL_FILE=$HOME/.hushine/runtime.cred \
-CONTROL_PANEL_ADDR=host.docker.internal:50054 \
+RUNTIME_CHANNEL_ADDR=host.docker.internal:50055 \
 make smoke-self-hosted-runtime
 ```
