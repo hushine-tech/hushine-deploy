@@ -18,11 +18,48 @@ make ensure-dbs
 等价手动步骤:
 
 ```bash
-cd core-service       && make ensure-db         # 创建 account
+cd core-service       && make ensure-db         # 创建 portfolio
 cd core-service       && make ensure-order-db   # 创建 order
 cd control-panel-service && make ensure-db   # 创建 control_panel (Phase D1)
 cd scraper               && make ensure-db   # 创建 {exchange}_{year} 行情库
 ```
+
+## 建表 SQL bundle
+
+如果后续要在其他机器部署前先审阅完整建表语句，或需要走手工 `psql` bootstrap，可以从当前 migration 渲染一份 SQL bundle：
+
+```bash
+make db-schema-bundle
+```
+
+生成文件在 [db/generated/](generated/)：
+
+| 文件 | 连接目标 | 内容 |
+|---|---|---|
+| `00_create_databases.psql` | `postgres` 管理库 | 幂等创建 `portfolio` / `order` / `control_panel` / 当前年份 `binance_YYYY` / `okx_YYYY` 数据库；使用 `psql \gexec` |
+| `portfolio.sql` | `portfolio` | core-service portfolio DB 的全部 migration DDL |
+| `order.sql` | `order` | core-service order module 的全部 migration DDL |
+| `control_panel.sql` | `control_panel` | control-panel-service 的全部 migration DDL |
+| `market_data_year.sql` | 每个 `{exchange}_{year}` 行情库 | scraper 年库通用 DDL；对 `binance_2026` / `okx_2026` 这类库分别执行一次 |
+
+手工执行顺序示例：
+
+```bash
+psql -h <host> -U <admin_user> -d postgres -v ON_ERROR_STOP=1 \
+  -f db/generated/00_create_databases.psql
+psql -h <host> -U <admin_user> -d portfolio -v ON_ERROR_STOP=1 \
+  -f db/generated/portfolio.sql
+psql -h <host> -U <admin_user> -d order -v ON_ERROR_STOP=1 \
+  -f db/generated/order.sql
+psql -h <host> -U <admin_user> -d control_panel -v ON_ERROR_STOP=1 \
+  -f db/generated/control_panel.sql
+psql -h <host> -U <admin_user> -d binance_2026 -v ON_ERROR_STOP=1 \
+  -f db/generated/market_data_year.sql
+psql -h <host> -U <admin_user> -d okx_2026 -v ON_ERROR_STOP=1 \
+  -f db/generated/market_data_year.sql
+```
+
+注意：这些 bundle 会在每段 migration 后写入 `schema_migrations`，所以手工执行后仍然可以再跑 `make ensure-dbs` 做兜底检查。它们只适合 fresh DB 或审阅；历史 hard-cut migration 中存在 `DROP TABLE`，不要对带业务数据的半迁移库直接执行整包。
 
 PG 连接信息通过标准环境变量:
 
@@ -38,42 +75,45 @@ PG 连接信息通过标准环境变量:
 
 | 数据库 | 归属服务 | 作用 | 迁移路径 |
 |---|---|---|---|
-| `account` | `core-service` | 用户/账号/策略/会话/对账（Phase D2 后不再持有市场数据控制面） | [core-service/internal/storage/migrations/](../core-service/internal/storage/migrations/) |
+| `portfolio` | `core-service` | 用户/portfolio/策略/会话/对账（Phase D2 后不再持有市场数据控制面） | [core-service/internal/storage/migrations/](../core-service/internal/storage/migrations/) |
 | `order`   | `core-service/order module`   | 订单四层执行域 (intent / attempt / order / fill) | [core-service/internal/order/storage/migrations/](../core-service/internal/order/storage/migrations/) |
 | `control_panel` | `control-panel-service` | Phase D1 runtime 控制面 + Phase D2 市场数据控制面 + Phase D3 RuntimeChannel 凭证/路由/数据投递；回测分页读取也从这里做代理 | [control-panel-service/internal/storage/migrations/](../control-panel-service/internal/storage/migrations/) |
 | `{exchange}_{year}` | `scraper` | 行情数据年库族，例如 `binance_2026` / `okx_2026`；K 线 / orderbook / funding / OI 都按事件时间路由到对应年份库 | [scraper/internal/storage/migrations/](../scraper/internal/storage/migrations/) |
 
-> `strategy-service` / `strategy-runtime` 不持有自己的表。当前 RuntimeChannel 生产路径下，runtime 通过 platform proxy 调 core-service 写 `account` / `order`，通过 control-panel-service 读取 market data；不再把回测数据集整包推给 runtime，也不再让 RuntimeChannel runtime 直接读行情库。
+> `strategy-service` / `strategy-runtime` 不持有自己的表。当前 RuntimeChannel 生产路径下，runtime 通过 platform proxy 调 core-service 写 `portfolio` / `order`，通过 control-panel-service 读取 market data；不再把回测数据集整包推给 runtime，也不再让 RuntimeChannel runtime 直接读行情库。
 
 ## 当前代码读写摘要
 
 - **回测行情读取**：`strategy-service` 调 `marketdata.FetchBacktestPage`，由 `control-panel-service` 从 `{exchange}_{year}` 行情库按页读取，固定 page size 为 `8192`。分页游标使用最后一根 K 线的 `open_time`，下一页从 `open_time + interval` 开始；runtime 只流式消费，不保存 dataset 表。
 - **demo/live 行情投递**：`control_panel.session_market_data_subscriptions` 记录 session 订阅，`stream_delivery_leases` 记录投递 worker 租约和 offset 进度；runtime 本地用双队列串行消费，`order_update` 会在下一根 K 线前优先处理。
 - **demo/live 慢消费处理**：market data 按滞后时间丢弃，不按数量无限堆积。发生丢弃时 runtime 通过 RuntimeChannel 上报 `DATA_BACKPRESSURE`，control-panel-service 发通知；同一 `(session_id, stream_key)` 丢弃达到阈值后 runtime 发送 status patch，把 session 标记为 `failed`。
-- **session 状态权威来源**：session 创建后，`account.strategy_sessions` 是 UI 查询的持久化权威。backtest 详情直接读 DB；demo/live 在 runtime 查询超时或不可用时，quant-handler 会返回 DB 中的持久状态并附带 `status_stale/status_refresh_error`。
+- **session 状态权威来源**：session 创建后，`portfolio.strategy_sessions` 是 UI 查询的持久化权威。backtest 详情直接读 DB；demo/live 在 runtime 查询超时或不可用时，quant-handler 会返回 DB 中的持久状态并附带 `status_stale/status_refresh_error`。
+- **策略自定义指标**：用户策略通过 `MyStrategy.INDICATORS` 声明图表指标，runtime 在每根 K 线后把当前 bar 的指标值按 1024 bar chunk 写入 `portfolio.strategy_indicator_*` 表；Session Chart 按 `session_id + stream_key` 读取定义和 chunk，不重新计算用户指标。
 - **recoverable 语义**：策略主体已经跑完，但 `strategy_end` snapshot、回测 wallet restore、或 stop 回写失败时，不再把 session 伪装成 `finished/running`，而是写成 `recoverable`，允许用户查看历史并显式 resume / 新开 session。
 
 ## 表清单 (按数据库分组)
 
-### `account` (core-service)
+### `portfolio` (core-service)
 
 | 表 | 作用 | 首次引入 migration |
 |---|---|---|
 | `schema_migrations` | 服务运行时迁移记录表 | `0000_create_schema_migrations.sql` |
-| `users` | 登录用户 + bcrypt 口令；`plan_code` 字段供 control-panel-service 读取（Phase D1） | `0005_add_user_ownership.sql`, `0011_add_user_plan_code.sql` |
-| `accounts` | portfolio / trading context；`environment=0/1/2` 表示 backtest/demo/live | `0019_portfolio_venue_hard_cut.sql` |
-| `venues` | account 下的 exchange / market / environment 交易场所；凭证、margin/position mode 挂在 venue 层 | `0019_portfolio_venue_hard_cut.sql` |
-| `venue_wallet_states` | venue 级当前 wallet state；backtest venue 可游离持有 wallet，绑定后才进入 account portfolio 汇总 | `0019_portfolio_venue_hard_cut.sql`, `0027_allow_unbound_venue_wallet_states.sql` |
+| `users` | 登录用户 + bcrypt 口令；`plan_code` 字段供 control-panel-service 读取（Phase D1）；`0036` 会为 hard-cut 后已存在业务行但缺失 profile 的历史 `user_id` 补最小 recovered 用户行 | `0005_add_user_ownership.sql`, `0011_add_user_plan_code.sql`, `0036_backfill_missing_user_rows.sql` |
+| `portfolios` | portfolio / trading context；`environment=0/1/2` 表示 backtest/demo/live | `0019_portfolio_venue_hard_cut.sql` |
+| `venues` | portfolio 下的 exchange / market / environment 交易场所；凭证、margin/position mode 挂在 venue 层 | `0019_portfolio_venue_hard_cut.sql` |
+| `venue_wallet_states` | venue 级当前 wallet state；backtest venue 可游离持有 wallet，绑定后才进入 portfolio 汇总 | `0019_portfolio_venue_hard_cut.sql`, `0027_allow_unbound_venue_wallet_states.sql` |
 | `venue_events` | venue bind / release / archive 审计事件 | `0019_portfolio_venue_hard_cut.sql` |
 | `session_venues` | session 启动时捕获的 active venue 路由快照 | `0019_portfolio_venue_hard_cut.sql` |
-| `current_portfolio_snapshots` | 当前 portfolio snapshot 只读视图；Phase 2 hard-cut 后统一从 accounts 当前状态映射账号级 portfolio snapshot | `0021_portfolio_snapshot_hard_cut.sql` |
-| `account_snapshots` | 钱包快照 hypertable, 写入触发原因追溯；允许同一 account/market time 下多 session 审计快照并按 session 查询 | `0002_create_account_snapshots.sql`, `0028_account_snapshots_allow_same_market_time.sql` |
-| `strategies` | 策略定义 (name+version unique, immutable)；保存时记录 runtime_version/runtime_profile，供后续 runtime 版本兼容检查 | `0003_create_strategies.sql`, runtime metadata 于 `0017_strategy_runtime_debug_metadata.sql` |
-| `strategy_sessions` | 策略运行 session (backtest/demo/live/debugging), Phase D 起持久化 owning runtime (`runtime_id` / source / runtime_name)；`error_code` / `error_message` / `error_detail_json` 保存 preflight 和结构化失败原因；`recoverable` 表示主体流程结束但最终状态/快照持久化异常，可恢复且不占用 account active guard；`stop_failed` 表示 stop-and-close 或停止动作本身失败；`session_type` 区分 backtest/demo/debugging；`leverage` 保存启动策略时的会话级杠杆配置，供订单风控在空仓缺少 exchange risk metadata 时使用 | `0004_create_strategy_sessions.sql`, runtime binding 于 `0013` + `0015` rename, active guardrails 于 `0014` / `0030_strategy_session_active_index_excludes_recoverable.sql`, debug metadata 于 `0017_strategy_runtime_debug_metadata.sql`, structured preflight errors 于 `0023_strategy_session_preflight_errors.sql`, session leverage 于 `0031_strategy_session_leverage.sql`, stop failed status 于 `0032_strategy_session_stop_failed_status.sql` |
-| `account_strategies` | 账号-策略挂载/激活关系 | `0003_create_strategies.sql` |
+| `current_portfolio_snapshots` | 当前 portfolio snapshot 只读视图；Phase 2 hard-cut 后统一从 portfolios 当前状态映射账号级 portfolio snapshot | `0021_portfolio_snapshot_hard_cut.sql` |
+| `portfolio_snapshots` | 钱包快照 hypertable, 写入触发原因追溯；允许同一 portfolio/market time 下多 session 审计快照并按 session 查询 | `0002_create_portfolio_snapshots.sql`, `0028_portfolio_snapshots_allow_same_market_time.sql` |
+| `strategies` | 策略定义 (name+version unique, immutable)；保存时记录 runtime_version/runtime_profile，供后续 runtime 版本兼容检查；归属由认证后的 JWT `user_id` 和 API 鉴权保证，不再要求本地 `users(id)` 外键 | `0003_create_strategies.sql`, runtime metadata 于 `0017_strategy_runtime_debug_metadata.sql`, `0035_drop_strategy_user_foreign_key.sql` |
+| `strategy_sessions` | 策略运行 session (backtest/demo/live/debugging), Phase D 起持久化 owning runtime (`runtime_id` / source / runtime_name)；`error_code` / `error_message` / `error_detail_json` 保存 preflight 和结构化失败原因；`recoverable` 表示主体流程结束但最终状态/快照持久化异常，可恢复且不占用 portfolio active guard；`stop_failed` 表示 stop-and-close 或停止动作本身失败；`session_type` 区分 backtest/demo/debugging；`leverage` 保存启动策略时的会话级杠杆配置，供订单风控在空仓缺少 exchange risk metadata 时使用 | `0004_create_strategy_sessions.sql`, runtime binding 于 `0013` + `0015` rename, active guardrails 于 `0014` / `0030_strategy_session_active_index_excludes_recoverable.sql`, debug metadata 于 `0017_strategy_runtime_debug_metadata.sql`, structured preflight errors 于 `0023_strategy_session_preflight_errors.sql`, session leverage 于 `0031_strategy_session_leverage.sql`, stop failed status 于 `0032_strategy_session_stop_failed_status.sql` |
+| `strategy_indicator_definitions` | session 图表自定义指标声明；按 `(session_id, stream_key, indicator_key)` 保存名称、类型 (`line/histogram/marker`)、pane、颜色、单位和 JSON 配置 | `0033_strategy_indicator_chunks.sql` |
+| `strategy_indicator_chunks` | session 图表自定义指标数据 chunk；每条记录保存一个 indicator 的 1024 bar 左右的值或 marker JSON，按 `start_time_ms + offset * interval_ms` 对齐 K 线 | `0033_strategy_indicator_chunks.sql` |
+| `portfolio_strategies` | portfolio-策略挂载/激活关系 | `0003_create_strategies.sql` |
 | `reconciliation_runs` | Phase C 对账 diff 审计 hypertable | `0007_create_reconciliation_runs.sql`, pk 调整于 `0008` |
-| `notification_settings` | 用户级通知总开关、分类偏好和最新发送诊断；不保存消息正文 | `0016_create_notification_management.sql`, `0029_notification_settings_user_enabled.sql` |
-| `notification_channels` | 通用通知通道绑定表；当前只允许 `channel=telegram`，但字段使用 target_id/type/label 以承载后续 WhatsApp/Discord 等通道 | `0016_create_notification_management.sql` |
+| `notification_settings` | 用户级通知总开关、分类偏好和最新发送诊断；不保存消息正文；归属由认证后的 JWT `user_id` 和 API 鉴权保证，不再要求本地 `users(id)` 外键 | `0016_create_notification_management.sql`, `0029_notification_settings_user_enabled.sql`, `0034_drop_notification_user_foreign_keys.sql` |
+| `notification_channels` | 通用通知通道绑定表；当前只允许 `channel=telegram`，但字段使用 target_id/type/label 以承载后续 WhatsApp/Discord 等通道；归属同样不依赖本地 `users(id)` 外键 | `0016_create_notification_management.sql`, `0034_drop_notification_user_foreign_keys.sql` |
 | `notification_plans` | core-service 拥有的通知 plan 配置；复用 `users.plan_code`，不读取 control-panel-service runtime plan | `0016_create_notification_management.sql` |
 
 > Phase D2 (2026-05-06): 市场数据控制面（`market_data_streams` / `market_data_requests` / `market_data_leases` / `market_data_history_requests`）已迁出本库，搬到了下面 `control_panel` section；historical migrations `0009_create_market_data_control_plane.sql` 和 `0010_create_market_data_history_requests.sql` 在同次提交中被删除，新增的 `0012_drop_market_data_control_plane.sql` 仅做 `DROP TABLE IF EXISTS … CASCADE` 让旧库平滑退掉这 4 张表。
@@ -86,8 +126,8 @@ DB 内部保存为 `SMALLINT`，gRPC/HTTP 对外统一返回字符串：
 |---:|---|---|
 | 1 | `pending` | session 已创建但尚未进入 preflight / running |
 | 2 | `preflight` | 启动前检查中 |
-| 3 | `running` | 正在执行；占用 account active guard |
-| 4 | `stopping` | 停止流程进行中；占用 account active guard |
+| 3 | `running` | 正在执行；占用 portfolio active guard |
+| 4 | `stopping` | 停止流程进行中；占用 portfolio active guard |
 | 5 | `recoverable` | 运行主体或停止恢复已收束，但最终快照/状态回写异常；不占用 active guard |
 | 6 | `finished` | 正常结束；legacy `completed` 会映射到这个状态 |
 | 7 | `stopped` | 用户主动停止且已收束 |
@@ -112,7 +152,7 @@ DB 内部保存为 `SMALLINT`，gRPC/HTTP 对外统一返回字符串：
 |---|---|---|
 | `schema_migrations` | 服务运行时迁移记录表 | `0000_create_schema_migrations.sql` |
 | `runtime_registry` | 平台已知的所有 strategy-runtime；`source=hosted/self_hosted/bare`，其中 `bare` 只用于 debug 部署的临时裸机接入；`role=executor/debugger`；status 状态机当前为 `paired/active/unhealthy/ended`；hosted 的 token_hash；self_hosted 行记录 credential_key_id 便于吊销；非 ended 行要求一个 credential_key_id 只能绑定一个 runtime；同一 user 的 `name` 全生命周期唯一；runtime 选择只以 `runtime_id` 为准，`name` 只是不可变展示名；connection owner 字段记录当前 RuntimeChannel owner instance；cleanup 字段记录 hosted deprovision 成败或 self-hosted 用户自管容器边界；debug workspace 字段记录 self-hosted debugger 的模板准备状态 | `0001_create_runtime_registry.sql`, `0008_add_runtime_registry_credential_key_id.sql`, `0010_unique_active_runtime_credential.sql`, `0011_allow_multiple_selected_runtimes_per_service.sql`, `0012_unique_active_hosted_runtime_slot.sql`, lifecycle rename 于 `0013_runtime_identity_lifecycle.sql`, role/owner 于 `0014_runtime_identity_role_owner.sql`, cleanup state 于 `0023_runtime_cleanup_state.sql`, debug workspace 于 `0026_runtime_debug_state.sql`, bare source 于 `0028_allow_bare_runtime_source.sql` |
-| `market_data_streams` | 每条物理流的聚合状态 (desired/actual + live delivery) — **Phase D2 从 account 库迁入** | `0003_create_market_data_streams.sql` |
+| `market_data_streams` | 每条物理流的聚合状态 (desired/actual + live delivery) — **Phase D2 从 portfolio 库迁入** | `0003_create_market_data_streams.sql` |
 | `market_data_requests` | 用户声明的 kline 流需求 (demand-driven control plane) — Phase D2 迁入 | `0004_create_market_data_requests.sql` |
 | `market_data_leases` | 活跃 demo/live-data session 的 TTL 占用 — Phase D2 迁入 | `0005_create_market_data_leases.sql` |
 | `market_data_history_requests` | 有限时间窗口历史数据请求/回填状态 — Phase D2 迁入 | `0006_create_market_data_history_requests.sql` |
@@ -129,7 +169,7 @@ DB 内部保存为 `SMALLINT`，gRPC/HTTP 对外统一返回字符串：
 
 > D3 删除了 D1 forward-compat pairing scaffold：`runtime_pairings` 会在历史迁移 `0002` 创建后由 `0009_drop_runtime_pairings.sql` 幂等删除；`PairRuntime` RPC 和 `RegisterRuntime(source=self_hosted)` 分支也已移除/拒绝。真实 self-hosted UX 是 `runtime_credentials` + RuntimeChannel。
 
-> Phase D1 还在 `account` 库的 `users` 表加了 `plan_code TEXT NOT NULL DEFAULT 'pro'`（见上面 account section），control-panel-service 通过 `core-service.GetUser` gRPC 读取，不做跨库 FK。
+> Phase D1 还在 `portfolio` 库的 `users` 表加了 `plan_code TEXT NOT NULL DEFAULT 'pro'`（见上面 portfolio section），control-panel-service 通过 `core-service.GetUser` gRPC 读取，不做跨库 FK。
 
 ### `{exchange}_{year}` (scraper)
 
@@ -148,9 +188,9 @@ DB 内部保存为 `SMALLINT`，gRPC/HTTP 对外统一返回字符串：
 
 ## 依赖顺序
 
-`account` 必须先于其他 DB 创建,因为:
+`portfolio` 必须先于其他 DB 创建,因为:
 
-- core-service 内的 order module 通过进程内 adapter 读取 account/session meta 做下单前校验 (不再通过 gRPC 回连 core-service)
+- core-service 内的 order module 通过进程内 adapter 读取 portfolio/session meta 做下单前校验 (不再通过 gRPC 回连 core-service)
 - 实际 DB 层没有跨库外键,但控制面 demo/live-data 启动要求流就绪,而流是由 scraper 写的 —— 所以:
   - `control_panel` DB 必须能接受新的 market-data request / stream / lease
   - scraper 的 `{exchange}_{year}` 年库必须能接受 collector 写入

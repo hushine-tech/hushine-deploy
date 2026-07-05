@@ -15,12 +15,29 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "→ core-service (database: account)"
+order_db_env=()
+uses_pg_env=false
+for pg_var in PGHOST PGPORT PGUSER PGPASSWORD; do
+	if [[ -n "${!pg_var:-}" ]]; then
+		uses_pg_env=true
+	fi
+done
+
+if [[ -z "${ORDER_TIMESCALEDB_DSN:-}" && "$uses_pg_env" == true ]]; then
+	[[ -n "${PGHOST:-}" && -z "${ORDER_DATABASE_HOST:-}" ]] && order_db_env+=("ORDER_DATABASE_HOST=${PGHOST}")
+	[[ -n "${PGPORT:-}" && -z "${ORDER_DATABASE_PORT:-}" ]] && order_db_env+=("ORDER_DATABASE_PORT=${PGPORT}")
+	[[ -n "${PGUSER:-}" && -z "${ORDER_DATABASE_USER:-}" ]] && order_db_env+=("ORDER_DATABASE_USER=${PGUSER}")
+	[[ -n "${PGPASSWORD:-}" && -z "${ORDER_DATABASE_PASSWORD:-}" ]] && order_db_env+=("ORDER_DATABASE_PASSWORD=${PGPASSWORD}")
+	[[ -z "${ORDER_DATABASE_DBNAME:-}" ]] && order_db_env+=("ORDER_DATABASE_DBNAME=order")
+	[[ -z "${ORDER_DATABASE_SSLMODE:-}" ]] && order_db_env+=("ORDER_DATABASE_SSLMODE=disable")
+fi
+
+echo "→ core-service (database: portfolio)"
 make -C "$ROOT_DIR/core-service" ensure-db
 
 echo ""
 echo "→ core-service order module (database: order)"
-make -C "$ROOT_DIR/core-service" ensure-order-db
+env "${order_db_env[@]}" make -C "$ROOT_DIR/core-service" ensure-order-db
 
 echo ""
 echo "→ control-panel-service (database: control_panel)"

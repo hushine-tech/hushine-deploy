@@ -46,7 +46,7 @@ make local-start
 上线前逐个确认：
 
 - `core-service/config.yaml`
-  - `database` 指向 account DB
+  - `database` 指向 portfolio DB
   - `order_database` 或 order module DSN 指向 order DB
   - `notification.kafka.brokers` 指向 Kafka
   - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_BOT_USERNAME` 通过环境变量注入，不提交到仓库
@@ -150,8 +150,8 @@ bash scripts/e2e_full_flow.sh
 - session 终态为 `finished` 或 `completed`
 - `bars_processed = 200`
 - `order_fills` 有订单
-- `strategy_id` / `account_id` / `user_id` / `session_id` 归属正确
-- `account_snapshots` 写入成功
+- `strategy_id` / `portfolio_id` / `user_id` / `session_id` 归属正确
+- `portfolio_snapshots` 写入成功
 
 ## 7. Tracing / ELK 验收
 
