@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ── E2E 全链路测试 ──────────────────────────────────────────────────────────────
-# 从创建帐号 → 创建策略 → 挂载激活 → 运行回测 → 验证订单写入
+# 从创建 Portfolio/Venue → 创建策略 → 挂载激活 → 运行回测 → 验证订单写入
 # 用法: bash scripts/e2e_full_flow.sh
 set -euo pipefail
 
@@ -14,13 +14,13 @@ else
 fi
 PYTHON="${PYTHON:-/opt/anaconda3/bin/python3}"
 DB_HOST="${E2E_DB_HOST:-192.168.88.10}"
-ACCOUNT_DB_NAME="${E2E_ACCOUNT_DB:-account}"
+PORTFOLIO_DB_NAME="${E2E_PORTFOLIO_DB:-portfolio}"
 ORDER_DB_NAME="${E2E_ORDER_DB:-order}"
 TIMESCALE_DB_PATTERN="${E2E_TIMESCALE_DB_PATTERN:-binance_{year}}"
 
 # ── 端口配置（独立端口，避免冲突）──────────────────────────────────────────────
-ACCT_HTTP=18080
-ACCT_GRPC=18051
+CORE_HTTP=18080
+CORE_GRPC=18051
 CP_HTTP=18082
 CP_GRPC=18054
 CP_RUNTIME_GRPC=18055
@@ -94,14 +94,14 @@ chmod 600 "${CERT_DIR}"/*.key
 
 # core-service
 cd "$ROOT/core-service"
-TIMESCALEDB_DSN="host=${DB_HOST} port=5432 user=postgres password=postgres dbname=${ACCOUNT_DB_NAME} sslmode=disable" \
+TIMESCALEDB_DSN="host=${DB_HOST} port=5432 user=postgres password=postgres dbname=${PORTFOLIO_DB_NAME} sslmode=disable" \
 ORDER_TIMESCALEDB_DSN="host=${DB_HOST} port=5432 user=postgres password=postgres dbname=${ORDER_DB_NAME} sslmode=disable" \
 MOCK_BINANCE=1 \
-HTTP_ADDR=":${ACCT_HTTP}" \
-GRPC_ADDR=":${ACCT_GRPC}" \
-"$ROOT/.e2e-build/core-service" > /tmp/e2e-account.log 2>&1 &
+HTTP_ADDR=":${CORE_HTTP}" \
+GRPC_ADDR=":${CORE_GRPC}" \
+"$ROOT/.e2e-build/core-service" > /tmp/e2e-core.log 2>&1 &
 PIDS+=($!)
-echo "  core-service  PID=$! → HTTP:${ACCT_HTTP} gRPC:${ACCT_GRPC} (account.v1 + order.v1)"
+echo "  core-service  PID=$! → HTTP:${CORE_HTTP} gRPC:${CORE_GRPC} (portfolio.v1 + order.v1)"
 
 # control-panel-service
 cat > "${CP_CONFIG}" <<EOF
@@ -136,8 +136,8 @@ market_data:
   sslmode: "disable"
 
 dependencies:
-  account_service_grpc: "127.0.0.1:${ACCT_GRPC}"
-  order_service_grpc: "127.0.0.1:${ACCT_GRPC}"
+  portfolio_service_grpc: "127.0.0.1:${CORE_GRPC}"
+  order_service_grpc: "127.0.0.1:${CORE_GRPC}"
 
 provisioning:
   backend: "docker"
@@ -169,15 +169,15 @@ log:
 EOF
 
 cd "$ROOT/control-panel-service"
-CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
-ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
+CORE_SERVICE_GRPC_ADDR="127.0.0.1:${CORE_GRPC}" \
+ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${CORE_GRPC}" \
 "$ROOT/.e2e-build/control-panel-service" -config "${CP_CONFIG}" > /tmp/e2e-control-panel.log 2>&1 &
 PIDS+=($!)
 echo "  control-panel    PID=$! → HTTP:${CP_HTTP} gRPC:${CP_GRPC} RuntimeChannel:${CP_RUNTIME_GRPC}"
 
 # quant-handler
 cd "$ROOT/gateway/quant-handler"
-CORE_SERVICE_GRPC_ADDR="127.0.0.1:${ACCT_GRPC}" \
+CORE_SERVICE_GRPC_ADDR="127.0.0.1:${CORE_GRPC}" \
 CONTROL_PANEL_SERVICE_GRPC_ADDR="127.0.0.1:${CP_GRPC}" \
 QUANT_HANDLER_JWT_SECRET="${JWT_SECRET}" \
 HTTP_ADDR=":${HANDLER_HTTP}" \
@@ -195,7 +195,7 @@ for i in $(seq 1 30); do
     fi
     if [ "$i" -eq 30 ]; then
         fail "Services did not start within 30s"
-        echo "--- core-service log ---"; tail -20 /tmp/e2e-account.log 2>/dev/null
+        echo "--- core-service log ---"; tail -20 /tmp/e2e-core.log 2>/dev/null
         echo "--- control-panel log ---"; tail -20 /tmp/e2e-control-panel.log 2>/dev/null
         echo "--- quant-handler log ---";   tail -20 /tmp/e2e-handler.log 2>/dev/null
         exit 1
@@ -213,7 +213,7 @@ for i in $(seq 1 15); do
         -H 'Content-Type: application/json' \
         -d "{\"username\":\"${LOGIN_USER}\",\"password\":\"${LOGIN_PASS}\"}")
     TEMP_TOKEN=$(echo "$LOGIN_RESP" | jq -r '.token // empty')
-    PROBE=$(curl -s "${API}/api/accounts" -H "Authorization: Bearer ${TEMP_TOKEN}" 2>/dev/null)
+    PROBE=$(curl -s "${API}/api/portfolios" -H "Authorization: Bearer ${TEMP_TOKEN}" 2>/dev/null)
     if echo "$PROBE" | jq -e 'type == "array"' > /dev/null 2>&1; then
         pass "All services ready (gRPC verified)"
         break
@@ -246,91 +246,49 @@ AUTH="Authorization: Bearer ${TOKEN}"
 pass "Login OK (user_id=${USER_ID}, token=${TOKEN:0:20}...)"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 4: Create account + backtest venue wallet
+# Step 4: Create Portfolio + backtest Venue
 # ══════════════════════════════════════════════════════════════════════════════
-info "Step 4: Create account context + verify default backtest venue"
-ACCOUNT_RESP=$(curl -s -X POST "${API}/api/accounts" \
+info "Step 4: Create Portfolio context + backtest Venue"
+PORTFOLIO_RESP=$(curl -s -X POST "${API}/api/portfolios" \
     -H "$AUTH" -H 'Content-Type: application/json' \
-    -d '{
-  "name": "e2e-full-flow",
-  "description": "E2E portfolio context",
-  "environment": 0
-}')
-ACCOUNT_ID=$(echo "$ACCOUNT_RESP" | jq -r '.account_id')
-if [ -z "$ACCOUNT_ID" ] || [ "$ACCOUNT_ID" = "null" ]; then
-    fail "Create account failed: $ACCOUNT_RESP"
+    -d '{"name":"e2e-full-flow","description":"E2E portfolio context","environment":0}')
+PORTFOLIO_ID=$(echo "$PORTFOLIO_RESP" | jq -r '.portfolio_id')
+if [ -z "$PORTFOLIO_ID" ] || [ "$PORTFOLIO_ID" = "null" ]; then
+    fail "Create Portfolio failed: $PORTFOLIO_RESP"
     exit 1
 fi
-pass "Account created: ID=${ACCOUNT_ID}"
+pass "Portfolio created: ID=${PORTFOLIO_ID}"
 
-VENUE_RESP=$(curl -s "${API}/api/accounts/${ACCOUNT_ID}/venues" -H "$AUTH")
-VENUE_ID=$(echo "$VENUE_RESP" | jq -r '.items[] | select(.exchange_label=="binance" and .market_label=="perpetual_futures" and .environment_label=="backtest" and .status_label=="active") | .venue_id' | head -1)
+VENUE_RESP=$(curl -s -X POST "${API}/api/venues" \
+    -H "$AUTH" -H 'Content-Type: application/json' \
+    -d "{
+  \"portfolio_id\": ${PORTFOLIO_ID},
+  \"exchange\": \"binance\",
+  \"market\": \"perpetual_futures\",
+  \"environment\": \"backtest\",
+  \"status\": \"active\",
+  \"display_name\": \"e2e-binance-futures\",
+  \"margin_mode\": \"cross\",
+  \"position_mode\": \"one_way\",
+  \"futures\": {
+    \"margin_mode\": \"cross\",
+    \"position_mode\": \"one_way\",
+    \"initial_balance\": 10000,
+    \"positions\": [{
+      \"symbol\": \"TESTUSDT\",
+      \"direction\": 0,
+      \"initial_balance\": 10000,
+      \"leverage\": 20,
+      \"fee_rate\": 0.0004
+    }]
+  }
+}")
+VENUE_ID=$(echo "$VENUE_RESP" | jq -r '.venue_id')
 if [ -z "$VENUE_ID" ] || [ "$VENUE_ID" = "null" ]; then
-    fail "Default backtest venue missing: $VENUE_RESP"
+    fail "Create backtest Venue failed: $VENUE_RESP"
     exit 1
 fi
-pass "Default backtest venue ready: ID=${VENUE_ID}"
-
-ACCOUNT_ID="${ACCOUNT_ID}" USER_ID="${USER_ID}" ACCT_GRPC="${ACCT_GRPC}" \
-PYTHONPATH="${ROOT}/strategy-service:${ROOT}/strategy-library" \
-"${PYTHON}" - <<'PY'
-import os
-
-import grpc
-
-from strategy_service.gen import account_service_pb2 as pb
-from strategy_service.gen import account_service_pb2_grpc as pb_grpc
-
-account_id = int(os.environ["ACCOUNT_ID"])
-user_id = int(os.environ["USER_ID"])
-addr = f"127.0.0.1:{os.environ['ACCT_GRPC']}"
-
-channel = grpc.insecure_channel(addr)
-stub = pb_grpc.AccountServiceStub(channel)
-resp = stub.UpdateAccountWalletState(pb.UpdateAccountWalletStateRequest(
-    account_id=account_id,
-    user_id=user_id,
-    total_value=10000.0,
-    wallet_balance=10000.0,
-    available_balance=10000.0,
-    futures=pb.FuturesWallet(
-        margin_mode="cross",
-        position_mode="one_way",
-        initial_balance=10000.0,
-        wallet_balance=10000.0,
-        available_balance=10000.0,
-        margin_balance=10000.0,
-        total_margin_balance=10000.0,
-        total_cross_wallet_balance=10000.0,
-        positions=[
-            pb.FuturesPosition(
-                symbol="TESTUSDT",
-                direction=0,
-                initial_balance=10000.0,
-                leverage=20.0,
-                fee_rate=0.0004,
-                mark_price=100.0,
-                position_side="BOTH",
-                margin_type="cross",
-                margin_mode="cross",
-            )
-        ],
-        risk_metadata=[
-            pb.FuturesRiskMetadata(
-                symbol="TESTUSDT",
-                configured_leverage=20.0,
-                configured_margin_mode="cross",
-                price_precision=2,
-                quantity_precision=3,
-                tick_size=0.01,
-                step_size=0.001,
-            )
-        ],
-    ),
-))
-wallet = resp.wallet
-print(f"  Backtest wallet initialized: margin_balance={wallet.futures.margin_balance} available_balance={wallet.futures.available_balance}")
-PY
+pass "Backtest Venue created and bound: ID=${VENUE_ID}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 5: Create strategy
@@ -359,16 +317,16 @@ pass "Strategy created: ID=${STRATEGY_ID}"
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 6: Mount + Activate
 # ══════════════════════════════════════════════════════════════════════════════
-info "Step 6: Mount + Activate strategy on account"
-MOUNT_RESP=$(curl -s -X POST "${API}/api/accounts/${ACCOUNT_ID}/strategies/${STRATEGY_ID}" -H "$AUTH")
+info "Step 6: Mount + Activate strategy on Portfolio"
+MOUNT_RESP=$(curl -s -X POST "${API}/api/portfolios/${PORTFOLIO_ID}/strategies/${STRATEGY_ID}" -H "$AUTH")
 echo "  Mount: $MOUNT_RESP"
 
-ACTIVATE_RESP=$(curl -s -X POST "${API}/api/accounts/${ACCOUNT_ID}/strategies/${STRATEGY_ID}/activate" -H "$AUTH")
+ACTIVATE_RESP=$(curl -s -X POST "${API}/api/portfolios/${PORTFOLIO_ID}/strategies/${STRATEGY_ID}/activate" -H "$AUTH")
 echo "  Activate: $ACTIVATE_RESP"
 
 # Verify active
-ACCT_STRATS=$(curl -s "${API}/api/accounts/${ACCOUNT_ID}/strategies" -H "$AUTH")
-ACTIVE_COUNT=$(echo "$ACCT_STRATS" | jq '[.[] | select(.active==true)] | length')
+PORTFOLIO_STRATEGIES=$(curl -s "${API}/api/portfolios/${PORTFOLIO_ID}/strategies" -H "$AUTH")
+ACTIVE_COUNT=$(echo "$PORTFOLIO_STRATEGIES" | jq '[.[] | select(.active==true)] | length')
 if [ "$ACTIVE_COUNT" -eq 1 ]; then
     pass "Strategy mounted and activated"
 else
@@ -411,7 +369,7 @@ pass "Hosted runtime active: ${RUNTIME_ID}"
 info "Step 8: Run backtest (200 bars, 1m interval, TESTUSDT)"
 # start_time_ms = 2025-01-01T00:00:00Z = 1735689600000
 # end_time_ms   = 2025-01-01T03:20:00Z = 1735701600000
-RUN_RESP=$(curl -s -X POST "${API}/api/accounts/${ACCOUNT_ID}/run-strategy" \
+RUN_RESP=$(curl -s -X POST "${API}/api/portfolios/${PORTFOLIO_ID}/run-strategy" \
     -H "$AUTH" -H 'Content-Type: application/json' \
     -d "{
   \"strategy_path\": \"\",
@@ -478,18 +436,18 @@ import psycopg2, json
 conn = psycopg2.connect('host=${DB_HOST} port=5432 dbname=${ORDER_DB_NAME} user=postgres password=postgres sslmode=disable')
 cur = conn.cursor()
 cur.execute('''
-    SELECT f.order_id, i.account_id, i.user_id, i.symbol, i.side, f.qty, f.fill_price,
+    SELECT f.order_id, i.portfolio_id, i.user_id, i.symbol, i.side, f.qty, f.fill_price,
            f.status, COALESCE(i.strategy_id, 0), i.market, COALESCE(i.session_id, '')
     FROM order_fills f
     JOIN order_intents i ON i.intent_id = f.intent_id
-    WHERE i.user_id = %s AND i.account_id = %s
+    WHERE i.user_id = %s AND i.portfolio_id = %s
     ORDER BY f.time
-''', (${USER_ID}, ${ACCOUNT_ID}))
+''', (${USER_ID}, ${PORTFOLIO_ID}))
 rows = cur.fetchall()
 side_labels = {1: 'BUY', 2: 'SELL'}
 market_labels = {1: 'spot', 2: 'perpetual_futures', 3: 'delivery_futures'}
 print(json.dumps([{
-    'order_id': r[0], 'account_id': r[1], 'user_id': r[2], 'symbol': r[3], 'side': side_labels.get(r[4], str(r[4])), 'qty': float(r[5]),
+    'order_id': r[0], 'portfolio_id': r[1], 'user_id': r[2], 'symbol': r[3], 'side': side_labels.get(r[4], str(r[4])), 'qty': float(r[5]),
     'fill_price': float(r[6]), 'status': r[7],
     'strategy_id': r[8], 'market': market_labels.get(r[9], str(r[9])), 'session_id': r[10]
 } for r in rows]))
@@ -499,7 +457,7 @@ conn.close()
 
 ORDER_COUNT=$(echo "$ORDER_RESULT" | jq 'length')
 echo "  order_fills count: ${ORDER_COUNT}"
-echo "$ORDER_RESULT" | jq -r '.[] | "    user=\(.user_id) acct=\(.account_id) session=\(.session_id) \(.side) \(.qty) \(.symbol) @ \(.fill_price) | strategy_id=\(.strategy_id) market=\(.market)"'
+echo "$ORDER_RESULT" | jq -r '.[] | "    user=\(.user_id) portfolio=\(.portfolio_id) session=\(.session_id) \(.side) \(.qty) \(.symbol) @ \(.fill_price) | strategy_id=\(.strategy_id) market=\(.market)"'
 
 if [ "$ORDER_COUNT" -ge 2 ]; then
     pass "order_fills: ${ORDER_COUNT} trades recorded"
@@ -523,12 +481,12 @@ else
     fail "Not all order_fills have market='perpetual_futures' (${MARKET_SET}/${ORDER_COUNT})"
 fi
 
-# Check account_id is preserved
-ACCOUNT_ID_SET=$(echo "$ORDER_RESULT" | jq "[.[] | select(.account_id == ${ACCOUNT_ID})] | length")
-if [ "$ACCOUNT_ID_SET" = "$ORDER_COUNT" ]; then
-    pass "All order_fills have correct account_id=${ACCOUNT_ID}"
+# Check portfolio_id is preserved
+PORTFOLIO_ID_SET=$(echo "$ORDER_RESULT" | jq "[.[] | select(.portfolio_id == ${PORTFOLIO_ID})] | length")
+if [ "$PORTFOLIO_ID_SET" = "$ORDER_COUNT" ]; then
+    pass "All order_fills have correct portfolio_id=${PORTFOLIO_ID}"
 else
-    fail "Not all order_fills have account_id=${ACCOUNT_ID} (${ACCOUNT_ID_SET}/${ORDER_COUNT})"
+    fail "Not all order_fills have portfolio_id=${PORTFOLIO_ID} (${PORTFOLIO_ID_SET}/${ORDER_COUNT})"
 fi
 
 # Check user_id is preserved
@@ -547,41 +505,41 @@ else
     fail "Not all order_fills have session_id=${SESSION_ID} (${SESSION_ID_SET}/${ORDER_COUNT})"
 fi
 
-# 9c. account_snapshots with strategy_id
-info "  Querying account_snapshots..."
+# 9c. portfolio_snapshots with strategy_id
+info "  Querying portfolio_snapshots..."
 SNAPSHOT_RESULT=$($PYTHON -c "
 import psycopg2
-conn = psycopg2.connect('host=${DB_HOST} port=5432 dbname=${ACCOUNT_DB_NAME} user=postgres password=postgres sslmode=disable')
+conn = psycopg2.connect('host=${DB_HOST} port=5432 dbname=${PORTFOLIO_DB_NAME} user=postgres password=postgres sslmode=disable')
 cur = conn.cursor()
 cur.execute('''
-    SELECT COUNT(*) FROM account_snapshots
-    WHERE account_id = %s AND strategy_id = %s AND session_id = %s
-''', (${ACCOUNT_ID}, ${STRATEGY_ID}, '${SESSION_ID}'))
+    SELECT COUNT(*) FROM portfolio_snapshots
+    WHERE portfolio_id = %s AND strategy_id = %s AND session_id = %s
+''', (${PORTFOLIO_ID}, ${STRATEGY_ID}, '${SESSION_ID}'))
 print(cur.fetchone()[0])
 cur.close()
 conn.close()
 ")
 
 if [ "$SNAPSHOT_RESULT" -ge 1 ]; then
-    pass "account_snapshots: ${SNAPSHOT_RESULT} snapshots with strategy_id=${STRATEGY_ID} session_id=${SESSION_ID}"
+    pass "portfolio_snapshots: ${SNAPSHOT_RESULT} snapshots with strategy_id=${STRATEGY_ID} session_id=${SESSION_ID}"
 else
-    fail "No account_snapshots with strategy_id=${STRATEGY_ID} session_id=${SESSION_ID}"
+    fail "No portfolio_snapshots with strategy_id=${STRATEGY_ID} session_id=${SESSION_ID}"
 fi
 
-# 9d. strategy_sessions row carries account_id + strategy_id + completed status
+# 9d. strategy_sessions row carries portfolio_id + strategy_id + completed status
 info "  Querying strategy_sessions..."
 SESSION_ROW=$($PYTHON -c "
 import psycopg2, json
-conn = psycopg2.connect('host=${DB_HOST} port=5432 dbname=${ACCOUNT_DB_NAME} user=postgres password=postgres sslmode=disable')
+conn = psycopg2.connect('host=${DB_HOST} port=5432 dbname=${PORTFOLIO_DB_NAME} user=postgres password=postgres sslmode=disable')
 cur = conn.cursor()
 cur.execute('''
-    SELECT account_id, strategy_id, status, bars_processed
+    SELECT portfolio_id, strategy_id, status, bars_processed
     FROM strategy_sessions
     WHERE session_id = %s
 ''', ('${SESSION_ID}',))
 row = cur.fetchone()
 print(json.dumps({
-    'account_id': row[0],
+    'portfolio_id': row[0],
     'strategy_id': row[1],
     'status': row[2],
     'bars_processed': row[3],
@@ -593,12 +551,12 @@ conn.close()
 if [ "$SESSION_ROW" = "null" ]; then
     fail "strategy_sessions row missing for session_id=${SESSION_ID}"
 else
-    SESSION_ACCOUNT_ID=$(echo "$SESSION_ROW" | jq -r '.account_id')
+    SESSION_PORTFOLIO_ID=$(echo "$SESSION_ROW" | jq -r '.portfolio_id')
     SESSION_STRATEGY_ID=$(echo "$SESSION_ROW" | jq -r '.strategy_id')
     SESSION_STATUS=$(echo "$SESSION_ROW" | jq -r '.status')
     SESSION_BARS=$(echo "$SESSION_ROW" | jq -r '.bars_processed')
 
-    [ "$SESSION_ACCOUNT_ID" = "$ACCOUNT_ID" ] && pass "strategy_sessions account_id matches ${ACCOUNT_ID}" || fail "strategy_sessions account_id=${SESSION_ACCOUNT_ID}, expected ${ACCOUNT_ID}"
+    [ "$SESSION_PORTFOLIO_ID" = "$PORTFOLIO_ID" ] && pass "strategy_sessions portfolio_id matches ${PORTFOLIO_ID}" || fail "strategy_sessions portfolio_id=${SESSION_PORTFOLIO_ID}, expected ${PORTFOLIO_ID}"
     [ "$SESSION_STRATEGY_ID" = "$STRATEGY_ID" ] && pass "strategy_sessions strategy_id matches ${STRATEGY_ID}" || fail "strategy_sessions strategy_id=${SESSION_STRATEGY_ID}, expected ${STRATEGY_ID}"
     if [ "$SESSION_STATUS" = "completed" ] || [ "$SESSION_STATUS" = "finished" ] || [ "$SESSION_STATUS" = "6" ]; then
         pass "strategy_sessions status=${SESSION_STATUS}"
