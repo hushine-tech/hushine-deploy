@@ -20,6 +20,7 @@ git clone git@github.com:hushine-tech/quant-frontend.git gateway/quant-frontend
 git clone git@github.com:hushine-tech/scraper.git scraper
 git clone git@github.com:hushine-tech/strategy-service.git strategy-service
 git clone git@github.com:hushine-tech/strategy-library.git strategy-library
+git clone git@github.com:hushine-tech/strategy-debugger-cli.git strategy-debugger-cli
 git clone git@github.com:hushine-tech/golang-lib.git golang-lib
 ```
 
@@ -41,6 +42,7 @@ hushine/
   scraper/
   strategy-service/
   strategy-library/
+  strategy-debugger-cli/
   golang-lib/
 ```
 
@@ -48,13 +50,14 @@ hushine/
 
 | Directory | GitHub repo | Language | Port(s) |
 |---|---|---|---|
-| `core-service` | `hushine-tech/core-service` | Go | HTTP `:18080` when started by `restart.sh`, gRPC `:50051`; serves `account.v1` and `order.v1` |
-| `control-panel-service` | `hushine-tech/control-panel-service` | Go | gRPC `:50054`, HTTP `:8082` |
+| `core-service` | `hushine-tech/core-service` | Go | HTTP `:18080` under `restart.sh`, gRPC `:50051`; serves `portfolio.v1` and `order.v1` |
+| `control-panel-service` | `hushine-tech/control-panel-service` | Go | control gRPC `:50054`, RuntimeChannel `:50055`, HTTP `:8082` |
 | `gateway/quant-handler` | `hushine-tech/quant-handler` | Go | HTTP `:8090` |
 | `gateway/quant-frontend` | `hushine-tech/quant-frontend` | React | `:5173` |
 | `scraper` | `hushine-tech/scraper` | Go | market-data collector |
-| `strategy-service` | `hushine-tech/strategy-service` | Python + Go proto stubs | gRPC `:50053` |
+| `strategy-service` | `hushine-tech/strategy-service` | Go runtime-agent + Python session worker | connects outbound to RuntimeChannel `:50055`; no product listener |
 | `strategy-library` | `hushine-tech/strategy-library` | Python | shared strategy utilities |
+| `strategy-debugger-cli` | `hushine-tech/strategy-debugger-cli` | Python | local offline strategy import/replay and IDE debugging |
 | `golang-lib` | `hushine-tech/golang-lib` | Go | shared logging/middleware |
 
 ## Quick Start
@@ -112,7 +115,9 @@ make clean
 - Local machine overrides should use `config.local.yaml`, `.env.local`, or
   environment variables; local configs are intentionally git-ignored by service
   repositories.
-- Log, Kafka, and tracing settings live under each service's `log:` section.
+- Normal Go services keep log, Kafka, and tracing settings under the `log:`
+  section in `config.yaml`. Scraper still uses `config.yaml` plus a separate
+  `log-config.json`.
 - `order.v1` is served by `core-service` on gRPC `:50051`;
   there is no independent order-service in the deployment.
 
