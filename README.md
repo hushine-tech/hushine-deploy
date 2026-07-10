@@ -125,7 +125,6 @@ make clean
 
 - Schema inventory: [db/README.md](db/README.md)
 - Production deploy checklist: [docs/production-deploy-checklist.md](docs/production-deploy-checklist.md)
-- Chrome DevTools UI smoke runbook: [docs/chrome-devtools-smoke-test.md](docs/chrome-devtools-smoke-test.md)
 - Local Docker infra: [deploy/local/docker-compose.yml](deploy/local/docker-compose.yml)
 - Tracing verification: `bash scripts/verify_tracing.sh`
 - Full local flow smoke: `bash scripts/e2e_full_flow.sh`

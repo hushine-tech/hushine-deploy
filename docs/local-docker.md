@@ -1,6 +1,6 @@
 # Local Docker Environment
 
-目标：把开发环境从 `192.168.66.13` 切到本机 Docker，业务服务仍从源码本机运行。
+目标：把开发环境从默认共享依赖 `192.168.88.10` 切到本机 Docker，业务服务仍从源码本机运行。
 
 ## 组件
 
@@ -36,7 +36,7 @@ make local-infra-down
 本机应用服务启动后，runtime 统一从 control-panel 管理：
 
 ```bash
-USER_ID=<account.users.id> make smoke-hosted-runtime
+USER_ID=<users.id> make smoke-hosted-runtime
 ```
 
 自定义 runtime 只走 RuntimeChannel，不需要也不应该拿到
@@ -48,8 +48,15 @@ RUNTIME_CHANNEL_ADDR=host.docker.internal:50055 \
 make smoke-self-hosted-runtime
 ```
 
-远端 Docker 主机模拟用户机器时，把 `RUNTIME_CHANNEL_ADDR` 换成本机 Mac
-在局域网中的可达地址，并设置 `REMOTE_HOST` / `REMOTE_USER`。
+远端 Docker 主机模拟用户机器时：
+
+```bash
+CREDENTIAL_FILE=$HOME/.hushine/runtime.cred \
+REMOTE_HOST=<docker-host> \
+REMOTE_USER=<ssh-user> \
+RUNTIME_CHANNEL_ADDR=$MAC_LAN_IP:50055 \
+make smoke-self-hosted-runtime
+```
 
 清空本地 Docker 数据：
 

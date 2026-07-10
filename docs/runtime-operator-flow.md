@@ -29,7 +29,7 @@ terminal 状态，新建会返回冲突错误，提示先结束旧 runtime。
    CREDENTIAL_FILE=$HOME/.hushine/runtime.cred \
    REMOTE_HOST=<docker-host> \
    REMOTE_USER=<ssh-user> \
-   RUNTIME_CHANNEL_ADDR=<mac-lan-ip>:50055 \
+   RUNTIME_CHANNEL_ADDR=$MAC_LAN_IP:50055 \
    make smoke-self-hosted-runtime
    ```
 
@@ -40,7 +40,7 @@ core-service、core-service 承载的 order.v1、Kafka 或数据库地址。
 
 1. runtime 心跳过期或被停止后，control-panel 会把该 runtime 拥有的
    active session 标记为 `recoverable`。
-2. `Account Detail` / `Session Detail` 会显示 `recoverable`、失败原因和
+2. `Portfolio Detail` / `Session Detail` 会显示 `recoverable`、失败原因和
    原 runtime 链接。
 3. 用户必须在页面选择一个当前可路由的 runtime，然后点击
    `Resume With New Session`。

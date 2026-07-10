@@ -74,7 +74,7 @@ make ensure-dbs
 
 成功标准：
 
-- `account` migrations 全部 applied/skipped
+- `portfolio` migrations 全部 applied/skipped
 - `order` migrations 全部 applied/skipped
 - `control_panel` migrations 全部 applied/skipped
 - `binance_YYYY` / `okx_YYYY` 或指定年库 migrations 全部 applied/skipped
@@ -92,7 +92,7 @@ make start
 
 ```bash
 lsof -nP \
-  -iTCP:50051 -iTCP:50053 -iTCP:50054 -iTCP:50055 \
+  -iTCP:50051 -iTCP:50054 -iTCP:50055 \
   -iTCP:8090 -iTCP:5173 -iTCP:18080 -iTCP:8082 \
   -sTCP:LISTEN
 ```
@@ -101,15 +101,12 @@ lsof -nP \
 
 - `core-service`: `:50051`，`restart.sh` 启动时为 `:18080`
 - `control-panel-service`: `:50054`, `:50055`, `:8082`
-- `strategy-service`: `:50053`
 - `quant-handler`: `:8090`
 - `quant-frontend`: `:5173`
 
 ## 6. 核心 Smoke
 
-UI 冒烟测试以 Chrome DevTools 真实页面操作为准。完整流程见
-[Chrome DevTools 冒烟测试流程](chrome-devtools-smoke-test.md)。下面命令行
-检查只作为前置探测和交叉验证，不能单独替代 UI smoke。
+UI smoke must cover the current Portfolio flow: login, Portfolio and Venue creation/binding, Strategy activation, executor Runtime selection, backtest start, Session Detail, Orders, Reconciliation, Market Data, and Notification Management. Record IDs and trace evidence using the current code-census session runbook; the command probes below are prerequisites, not a substitute for UI smoke.
 
 ### 6.1 前端/API
 
@@ -145,7 +142,7 @@ USER_ID=<users.id> PROFILE=small IMAGE_TAG=dev make smoke-hosted-runtime
 bash scripts/e2e_full_flow.sh
 ```
 
-该脚本会启动独立端口的 account/control-panel/strategy/handler，创建 hosted runtime，运行 mode=0 回测，并检查：
+该脚本会启动独立端口的 portfolio/control-panel/runtime/handler，创建 Portfolio 和 Venue、创建 hosted runtime、运行 mode=0 回测，并检查：
 
 - session 终态为 `finished` 或 `completed`
 - `bars_processed = 200`
@@ -213,7 +210,7 @@ make stop
 
 ```bash
 lsof -nP \
-  -iTCP:50051 -iTCP:50053 -iTCP:50054 -iTCP:50055 \
+  -iTCP:50051 -iTCP:50054 -iTCP:50055 \
   -iTCP:8090 -iTCP:5173 -iTCP:18080 -iTCP:8082 \
   -sTCP:LISTEN || true
 ```

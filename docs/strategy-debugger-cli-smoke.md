@@ -37,7 +37,8 @@ cat > strategy.py <<'PY'
 import requests
 
 class MyStrategy:
-    INPUTS = [{"market": "futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    INPUTS = [{"exchange": "binance", "market": "perpetual_futures", "symbol": "BTCUSDT", "interval": "1m"}]
+    ORDER_TARGETS = []
 
     def on_market_data(self, data, wallet):
         return None
@@ -50,8 +51,8 @@ Expected: validation fails with `forbidden_import`.
 ## Platform debug package replay
 
 1. Open the frontend and log in.
-2. Open Account Management.
-3. Open a backtest account.
+2. Open Portfolio Management.
+3. Open a backtest Portfolio.
 4. Open the Local Debug tab.
 5. Choose `symbol`, `interval`, `start`, and `end`.
 6. Click Generate Debug Package and save the zip.
@@ -66,6 +67,17 @@ hushine-debug replay
 ```
 
 Expected output contains `bars_processed=<positive number>`.
+
+## Guarded internal bare runtime
+
+The platform-connected bare/debugger path is an internal capability. Start it
+through the current Go runtime-agent launcher:
+
+```bash
+cd strategy-service
+make build
+DEBUG_WAIT=0 scripts/start-bare-runtime-debugpy.sh --user-id "$USER_ID" --platform-host "$PLATFORM_HOST"
+```
 
 ## Cleanup
 

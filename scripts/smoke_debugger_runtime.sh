@@ -3,14 +3,14 @@
 #
 # Required env:
 #   TOKEN=<jwt>
-#   ACCOUNT_ID=<account id>
+#   PORTFOLIO_ID=<portfolio id>
 #   RUNTIME_ID=<self-hosted debugger runtime id>
 #   START_TIME_MS=<inclusive start epoch ms>
 #   END_TIME_MS=<exclusive end epoch ms>
 #
 # Optional env:
 #   BASE_URL=http://localhost:8090
-#   MARKET=futures
+#   MARKET=perpetual_futures
 #   SYMBOL=ETHUSDT
 #   INTERVAL=1m
 #   CONTAINER_PATH=/workspace
@@ -18,11 +18,11 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:8090}"
 TOKEN="${TOKEN:?TOKEN is required}"
-ACCOUNT_ID="${ACCOUNT_ID:?ACCOUNT_ID is required}"
+PORTFOLIO_ID="${PORTFOLIO_ID:?PORTFOLIO_ID is required}"
 RUNTIME_ID="${RUNTIME_ID:?RUNTIME_ID is required}"
 START_TIME_MS="${START_TIME_MS:?START_TIME_MS is required}"
 END_TIME_MS="${END_TIME_MS:?END_TIME_MS is required}"
-MARKET="${MARKET:-futures}"
+MARKET="${MARKET:-perpetual_futures}"
 SYMBOL="${SYMBOL:-ETHUSDT}"
 INTERVAL="${INTERVAL:-1m}"
 CONTAINER_PATH="${CONTAINER_PATH:-/workspace}"
@@ -39,7 +39,7 @@ echo
 echo "Loading debug dataset ${MARKET}/${SYMBOL}/${INTERVAL} ${START_TIME_MS}-${END_TIME_MS}"
 curl -fsS \
   "${auth_header[@]}" \
-  -X POST "${BASE_URL}/api/accounts/${ACCOUNT_ID}/debug-dataset" \
+  -X POST "${BASE_URL}/api/portfolios/${PORTFOLIO_ID}/debug-dataset" \
   -d "$(printf '{"runtime_id":"%s","market":"%s","symbol":"%s","interval":"%s","start_time_ms":%s,"end_time_ms":%s}' \
     "${RUNTIME_ID}" "${MARKET}" "${SYMBOL}" "${INTERVAL}" "${START_TIME_MS}" "${END_TIME_MS}")"
 

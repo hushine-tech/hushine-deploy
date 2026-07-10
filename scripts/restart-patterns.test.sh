@@ -35,7 +35,7 @@ required_literals=(
   'RUNTIME_CHANNEL_SERVER_TLS_CLIENT_CA_KEY_FILE'
   'RUNTIME_CHANNEL_SERVER_TLS_SERVER_NAME'
   'RUNTIME_PLATFORM_BARE_BOOTSTRAP_IP_ALLOWLIST'
-  'Bare local: cd strategy-service && RUNTIME_CHANNEL_TLS_ENABLED=true RUNTIME_CHANNEL_TLS_ROOT_CERT_FILE=${DEPLOY_ROOT}/certs/runtime-channel-server.pem RUNTIME_CHANNEL_TLS_SERVER_NAME=runtime-channel.local uv run hushine-runtime start --config config.local.yaml --control-panel-addr 127.0.0.1:50054 --runtime-channel-addr 127.0.0.1:50055 --user-id <account.users.id>'
+  'Bare local: cd strategy-service && make build && DEBUG_WAIT=0 scripts/start-bare-runtime-debugpy.sh --user-id <users.id> --platform-host 127.0.0.1'
 )
 
 forbidden_literals=(
