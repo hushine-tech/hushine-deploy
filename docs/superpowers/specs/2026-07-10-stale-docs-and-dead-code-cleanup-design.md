@@ -101,10 +101,10 @@ Hushine 当前工作区由多个独立 Git 仓库组成，根目录本身不是 
 1. 根 `AGENTS.md` 与 `hushine-deploy/AGENTS.md`：删除过时的 Stage/C3 快照，改为当前 Portfolio/Venue、RuntimeChannel、Go runtime-agent/Python worker、离线 CLI 和已落地 order recovery 的简明说明。
 2. `hushine-deploy/README.md`：改为 `portfolio.v1`、RuntimeChannel/Go agent，单独说明 scraper 仍使用 `log-config.json`。
 3. `gateway/quant-frontend/README.md`：从 trading account/未来 TradingView 改为当前 Portfolio/Venue/Runtime/Session/Order/Notification UI 和现有 session chart。
-4. `scraper/README.md`：区分支持能力与默认启用配置；修正 funding REST、控制面当前托管范围、日志默认值和不存在的 compose 命令。
+4. `scraper/README.md`：区分支持能力与默认启用配置；修正 funding REST、控制面当前托管范围和日志默认值；保留现有 compose 启动入口并补充其 external network 等前置条件。
 5. `strategy-library/README.md`：补齐公开 `hushine_strategy` SDK、validator、replay、wallet 能力，删除“真实订单服务待开发”的旧结论。
 6. `golang-lib/README.md`：使用实际存在的 HTTP/gRPC API 和当前 Go 版本。
-7. `docs/user-runbook.md`、`docs/runtime-operator-flow.md`、`docs/local-docker.md`、coverage audit 配置和 deploy checklist：将已删除的 `hushine-runtime` 命令替换为 runtime-agent 或 bare debugpy 启动方式，将 self-hosted 地址修正为 RuntimeChannel `:50055`。
+7. `docs/user-runbook.md`、`docs/runtime-operator-flow.md`、`docs/local-docker.md` 和 deploy checklist：将已删除的 `hushine-runtime` 命令替换为 runtime-agent 或 bare debugpy 启动方式，将 self-hosted 地址修正为 RuntimeChannel `:50055`。`scripts/audit/census/config.yaml` 暂不做字符串替换：现有 coverage 生成器按 Python service 包装命令，需先独立支持 Go agent + Python worker 的 hybrid coverage。
 8. `core-service/config.yaml`：只更新已过时注释，不改变配置值。
 
 根目录与 `hushine-deploy` 存在同名分叉脚本。本轮不直接删除任一套；`hushine-deploy` 是版本化部署真相源，根目录入口继续作为工作区 wrapper。仍被根 wrapper 调用的旧 E2E/debugger 脚本必须更新，而不能直接删除。
@@ -177,5 +177,7 @@ OpenSpec                    strict validation
 2. direct `StrategyService.ValidateStrategyCode` 与 `GetLiveConsumptionDiagnostics` RPC。
 3. `BacktestDataLoop` / `LiveDataLoop` 兼容导出与旧 session hook。
 4. control-panel `StartDebugReplay` 兼容链路。
+5. `hushine-deploy` 自己的旧 `audit` target：它和根旧 audit 一样引用已删除测试，但不在本轮已批准的根入口删除范围内。
+6. code-census 的 Go runtime-agent + Python session worker hybrid runtime coverage 支持；完成前保留现有 census 配置，不写入无法被 Python coverage wrapper 执行的 Go 命令。
 
 这些候选应分别确认外部客户端、Notion 产品语义、生成代码同步和替代入口后，再设计独立的契约下线变更。
