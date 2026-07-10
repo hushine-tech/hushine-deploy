@@ -15,18 +15,18 @@ DEV_NO_PROXY_HOSTS ?= 127.0.0.1,localhost,::1,192.168.88.10,host.docker.internal
 DEV_NO_PROXY := NO_PROXY=$(DEV_NO_PROXY_HOSTS),$${NO_PROXY} no_proxy=$(DEV_NO_PROXY_HOSTS),$${no_proxy}
 LOCAL_NO_PROXY := $(DEV_NO_PROXY)
 
-.PHONY: build dev start stop clean test audit help ensure-dbs local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted
+.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted
 
 help:
 	@echo "Targets:"
 	@echo "  ensure-dbs — create all databases + apply migrations (fresh deploy first step)"
+	@echo "  db-schema-bundle — render versioned fresh-bootstrap SQL bundles"
 	@echo "  build      — compile all Go services"
 	@echo "  dev        — run all services in foreground (Ctrl+C to stop)"
 	@echo "  start      — build and start all services in background"
 	@echo "  stop       — stop background services"
 	@echo "  clean      — remove binaries and PID files"
 	@echo "  test       — run tests in all services"
-	@echo "  audit      — run hardening audit gate across compatibility / wallet / optional e2e"
 	@echo "  local-infra-up     — start local Docker infra (TimescaleDB/Kafka/ELK/Jaeger)"
 	@echo "  local-bootstrap    — start local infra, wait for DB, and apply migrations"
 	@echo "  local-ensure-dbs   — create local databases + migrations"
@@ -42,6 +42,9 @@ help:
 ensure-dbs:
 	@bash scripts/ensure-all-dbs.sh
 
+db-schema-bundle:
+	@bash scripts/db/render-schema-bundle.sh
+
 build:
 	@for svc in $(SERVICES); do \
 		echo "── Building $$svc ──"; \
@@ -54,9 +57,6 @@ test:
 		echo "── Testing $$svc ──"; \
 		$(MAKE) -C $$svc test || exit 1; \
 	done
-
-audit:
-	@bash scripts/audit/run_audit.sh all
 
 dev:
 	@echo "Starting all services in dev mode (Ctrl+C to stop)..."

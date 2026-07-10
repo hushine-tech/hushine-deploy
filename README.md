@@ -92,6 +92,7 @@ Details: [docs/local-docker.md](docs/local-docker.md).
 
 ```bash
 make ensure-dbs
+make db-schema-bundle  # refresh review/manual-bootstrap SQL bundles
 make build
 make start
 make stop

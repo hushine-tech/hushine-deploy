@@ -8,10 +8,13 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 fake_make="${tmpdir}/make"
 capture="${tmpdir}/order-env"
+make_calls="${tmpdir}/make-calls"
 
 cat >"$fake_make" <<'FAKE_MAKE'
 #!/usr/bin/env bash
 set -euo pipefail
+
+printf '%s\n' "$*" >>"${MAKE_CALL_CAPTURE}"
 
 if [[ "$*" == *"ensure-order-db"* ]]; then
   {
@@ -28,12 +31,22 @@ chmod +x "$fake_make"
 
 PATH="${tmpdir}:${PATH}" \
 ORDER_ENV_CAPTURE="$capture" \
+MAKE_CALL_CAPTURE="$make_calls" \
 PGHOST=127.0.0.1 \
 PGPORT=5432 \
 PGUSER=postgres \
 PGPASSWORD=postgres \
 PGDATABASE_ADMIN=postgres \
   bash scripts/ensure-all-dbs.sh >/dev/null
+
+expected_root="$(cd .. && pwd)"
+for repo in core-service control-panel-service scraper; do
+  if ! grep -Fq -- "-C ${expected_root}/${repo}" "$make_calls"; then
+    echo "service invocation did not use sibling source root: ${repo}" >&2
+    cat "$make_calls" >&2
+    exit 1
+  fi
+done
 
 required_order_env=(
   'ORDER_DATABASE_HOST=127.0.0.1'
@@ -55,6 +68,7 @@ done
 
 PATH="${tmpdir}:${PATH}" \
 ORDER_ENV_CAPTURE="$capture" \
+MAKE_CALL_CAPTURE="$make_calls" \
 PGHOST=127.0.0.1 \
 PGPORT=5432 \
 PGUSER=postgres \
@@ -82,6 +96,28 @@ for literal in "${explicit_order_env[@]}"; do
     echo "explicit order database env was not preserved: $literal" >&2
     echo "captured order env:" >&2
     cat "$capture" >&2
+    exit 1
+  fi
+done
+
+override_root="${tmpdir}/source-root"
+mkdir -p "$override_root/core-service" "$override_root/control-panel-service" "$override_root/scraper"
+: >"$make_calls"
+PATH="${tmpdir}:${PATH}" \
+ORDER_ENV_CAPTURE="$capture" \
+MAKE_CALL_CAPTURE="$make_calls" \
+HUSHINE_SOURCE_ROOT="$override_root" \
+PGHOST=127.0.0.1 \
+PGPORT=5432 \
+PGUSER=postgres \
+PGPASSWORD=postgres \
+PGDATABASE_ADMIN=postgres \
+  bash scripts/ensure-all-dbs.sh >/dev/null
+
+for repo in core-service control-panel-service scraper; do
+  if ! grep -Fq -- "-C ${override_root}/${repo}" "$make_calls"; then
+    echo "service invocation ignored HUSHINE_SOURCE_ROOT: ${repo}" >&2
+    cat "$make_calls" >&2
     exit 1
   fi
 done

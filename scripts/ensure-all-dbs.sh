@@ -13,7 +13,15 @@
 #   make ensure-dbs
 set -euo pipefail
 
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+DEPLOY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+SOURCE_ROOT="${HUSHINE_SOURCE_ROOT:-$(cd -- "${DEPLOY_ROOT}/.." && pwd)}"
+
+for required_repo in core-service control-panel-service scraper; do
+	if [[ ! -d "${SOURCE_ROOT}/${required_repo}" ]]; then
+		echo "missing required repository: ${SOURCE_ROOT}/${required_repo}" >&2
+		exit 1
+	fi
+done
 
 order_db_env=()
 uses_pg_env=false
@@ -33,19 +41,19 @@ if [[ -z "${ORDER_TIMESCALEDB_DSN:-}" && "$uses_pg_env" == true ]]; then
 fi
 
 echo "→ core-service (database: portfolio)"
-make -C "$ROOT_DIR/core-service" ensure-db
+make -C "$SOURCE_ROOT/core-service" ensure-db
 
 echo ""
 echo "→ core-service order module (database: order)"
-env "${order_db_env[@]}" make -C "$ROOT_DIR/core-service" ensure-order-db
+env "${order_db_env[@]}" make -C "$SOURCE_ROOT/core-service" ensure-order-db
 
 echo ""
 echo "→ control-panel-service (database: control_panel)"
-make -C "$ROOT_DIR/control-panel-service" ensure-db
+make -C "$SOURCE_ROOT/control-panel-service" ensure-db
 
 echo ""
 echo "→ scraper (databases: {exchange}_{year}; defaults to current-year binance/okx)"
-make -C "$ROOT_DIR/scraper" ensure-db
+make -C "$SOURCE_ROOT/scraper" ensure-db
 
 echo ""
 echo "✓ all databases ready"
