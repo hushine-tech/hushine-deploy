@@ -89,6 +89,8 @@ services:
     restart: unless-stopped
 
   kafka-es-bridge:
+    build:
+      context: ../../../golang-lib/elk/kafka-es-bridge
     image: elk-kafka-es-bridge:latest
     environment:
       KAFKA_BROKERS: kafka:29092
