@@ -1031,11 +1031,13 @@ Expected: no accidental staged files; every change maps to an approved task or t
 Report:
 
 1. Deleted files/directories and the evidence that made each deletion safe.
-2. Documentation rewritten and the current architecture it now describes.
-3. Notion-defined features explicitly preserved.
-4. Repository test/build commands with actual pass counts and any unchanged baseline failure.
-5. Commits created per repository.
-6. Root non-Git files changed.
-7. Deferred candidates: four RPC surfaces, old DataLoop exports, StartDebugReplay compatibility, deploy-local audit target, and hybrid code-census coverage.
+2. A per-file deletion ledger with three numeric columns: whole-file lines deleted, lines removed from retained files, and total removed lines.
+3. A grand total of removed lines. Compute Git-repository counts only from this cleanup's implementation commits (`git show --numstat`); compute root non-Git counts from the captured pre-edit contents versus final contents. Exclude pre-existing dirty hunks, generated caches, design/plan additions, and newly added documentation lines.
+4. Documentation rewritten and the current architecture it now describes.
+5. Notion-defined features explicitly preserved.
+6. Repository test/build commands with actual pass counts and any unchanged baseline failure.
+7. Commits created per repository.
+8. Root non-Git files changed.
+9. Deferred candidates: four RPC surfaces, old DataLoop exports, StartDebugReplay compatibility, deploy-local audit target, and hybrid code-census coverage.
 
 Do not claim the cleanup is complete until every required local gate above has an observed result.
