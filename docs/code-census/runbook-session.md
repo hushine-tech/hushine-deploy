@@ -28,7 +28,7 @@ census-runs/<run-id>/manual-scenarios.md
 
 - 测试人
 - 页面/API
-- account_id
+- portfolio_id
 - runtime_id
 - session_id
 - trace_id 样例
@@ -47,4 +47,3 @@ make code-census-session-stop RUN_ID=<run-id>
 - `coverage/session-coverage-summary.json`
 - `observability/endpoint-activity.json`
 - `summary.md`
-

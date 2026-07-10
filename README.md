@@ -132,7 +132,7 @@ make clean
 ## Runtime Smoke
 
 ```bash
-USER_ID=<account.users.id> make smoke-hosted-runtime
+USER_ID=<users.id> make smoke-hosted-runtime
 ```
 
 Self-hosted runtime:

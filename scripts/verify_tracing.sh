@@ -7,7 +7,7 @@
 #
 # Defaults cover the minimum chain (quant-handler → core-service) via a
 # signup call. Set RUN_E2E=1 to cover the full chain including strategy-service
-# and core-service/order.v1 (requires a populated account + mounted strategy — see
+# and core-service/order.v1 (requires a populated portfolio + mounted strategy — see
 # strategy-service/scripts/seed_test_strategies.py + bootstrap docs).
 #
 # Env vars:
@@ -68,11 +68,11 @@ if [ "$RUN_E2E" = "1" ]; then
     if [ -z "$TOKEN" ]; then
         fail "login did not return a token; full-chain test aborted"
     fi
-    # The caller is responsible for having a mounted strategy + account ready;
+    # The caller is responsible for having a mounted strategy + portfolio ready;
     # this probe just reaches an endpoint that cascades to strategy-service.
-    # A lightweight cascading call: list accounts (handler → account) is
+    # A lightweight cascading call: list portfolios (handler → portfolio) is
     # already covered by signup. The RunStrategy-specific cascade needs
-    # operator-supplied account/strategy IDs, deferred.
+    # operator-supplied portfolio/strategy IDs, deferred.
     info "  NOTE: full runStrategy cascade needs seeded fixtures; skipping deep path"
 fi
 

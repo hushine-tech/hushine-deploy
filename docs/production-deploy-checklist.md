@@ -142,7 +142,7 @@ USER_ID=<users.id> PROFILE=small IMAGE_TAG=dev make smoke-hosted-runtime
 bash scripts/e2e_full_flow.sh
 ```
 
-该脚本会启动独立端口的 portfolio/control-panel/runtime/handler，创建 Portfolio 和 Venue、创建 hosted runtime、运行 mode=0 回测，并检查：
+该脚本会启动独立端口的 portfolio/control-panel/runtime/handler，创建 Portfolio 和 Venue、创建 hosted runtime、运行 backtest 回测，并检查：
 
 - session 终态为 `finished` 或 `completed`
 - `bars_processed = 200`

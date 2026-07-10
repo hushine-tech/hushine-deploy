@@ -25,8 +25,8 @@ IMAGE_TAG="${IMAGE_TAG:-dev}"
 CONTROL_PANEL_ADDR="${CONTROL_PANEL_ADDR:-127.0.0.1:50054}"
 
 if [[ -z "${USER_ID}" ]]; then
-  echo "usage: USER_ID=<account.users.id> $0"
-  echo "   or: $0 <account.users.id>"
+  echo "usage: USER_ID=<users.id> $0"
+  echo "   or: $0 <users.id>"
   exit 2
 fi
 
