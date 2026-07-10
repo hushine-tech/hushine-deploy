@@ -16,7 +16,10 @@ PYTHON="${PYTHON:-/opt/anaconda3/bin/python3}"
 DB_HOST="${E2E_DB_HOST:-192.168.88.10}"
 PORTFOLIO_DB_NAME="${E2E_PORTFOLIO_DB:-portfolio}"
 ORDER_DB_NAME="${E2E_ORDER_DB:-order}"
-TIMESCALE_DB_PATTERN="${E2E_TIMESCALE_DB_PATTERN:-binance_{year}}"
+TIMESCALE_DB_PATTERN="${E2E_TIMESCALE_DB_PATTERN:-}"
+if [ -z "${TIMESCALE_DB_PATTERN}" ]; then
+    TIMESCALE_DB_PATTERN='binance_{year}'
+fi
 
 # ── 端口配置（独立端口，避免冲突）──────────────────────────────────────────────
 CORE_HTTP=18080
@@ -63,7 +66,20 @@ trap cleanup EXIT
 # Step 0: Seed test data
 # ══════════════════════════════════════════════════════════════════════════════
 info "Step 0: Seeding TESTUSDT test data (200 bars)"
+cd "$ROOT/scraper"
+PGHOST="${DB_HOST}" \
+PGPORT=5432 \
+PGUSER=postgres \
+PGPASSWORD=postgres \
+PGDATABASE_ADMIN=postgres \
+SCRAPER_DBS=binance_2025 \
+go run ./cmd/ensure-scraper-db >/tmp/e2e-ensure-scraper.log 2>&1
 cd "$ROOT/strategy-service"
+TIMESCALE_HOST="${DB_HOST}" \
+TIMESCALE_PORT=5432 \
+TIMESCALE_DB=binance_2025 \
+TIMESCALE_USER=postgres \
+TIMESCALE_PASSWORD=postgres \
 $PYTHON scripts/seed_test_data.py 2>&1 | tail -3
 pass "Test data seeded"
 
@@ -171,6 +187,12 @@ EOF
 cd "$ROOT/control-panel-service"
 CORE_SERVICE_GRPC_ADDR="127.0.0.1:${CORE_GRPC}" \
 ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${CORE_GRPC}" \
+MARKET_DATA_DB_HOST="${DB_HOST}" \
+MARKET_DATA_DB_PORT=5432 \
+MARKET_DATA_DB_USER=postgres \
+MARKET_DATA_DB_PASSWORD=postgres \
+MARKET_DATA_DB_DATABASE="${TIMESCALE_DB_PATTERN}" \
+MARKET_DATA_DB_SSLMODE=disable \
 "$ROOT/.e2e-build/control-panel-service" -config "${CP_CONFIG}" > /tmp/e2e-control-panel.log 2>&1 &
 PIDS+=($!)
 echo "  control-panel    PID=$! → HTTP:${CP_HTTP} gRPC:${CP_GRPC} RuntimeChannel:${CP_RUNTIME_GRPC}"
@@ -233,7 +255,7 @@ LOGIN_RESP=$(curl -s -X POST "${API}/api/auth/login" \
     -H 'Content-Type: application/json' \
     -d "{\"username\":\"${LOGIN_USER}\",\"password\":\"${LOGIN_PASS}\"}")
 TOKEN=$(echo "$LOGIN_RESP" | jq -r '.token')
-USER_ID=$(echo "$LOGIN_RESP" | jq -r '.user.id')
+USER_ID=$(echo "$LOGIN_RESP" | jq -r '.user.user_id // .user.id')
 if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
     fail "Login failed: $LOGIN_RESP"
     exit 1
@@ -276,6 +298,12 @@ VENUE_RESP=$(curl -s -X POST "${API}/api/venues" \
     \"initial_balance\": 10000,
     \"positions\": [{
       \"symbol\": \"TESTUSDT\",
+      \"direction\": 0,
+      \"initial_balance\": 10000,
+      \"leverage\": 20,
+      \"fee_rate\": 0.0004
+    }, {
+      \"symbol\": \"ALTUSDT\",
       \"direction\": 0,
       \"initial_balance\": 10000,
       \"leverage\": 20,
@@ -564,6 +592,68 @@ else
         fail "strategy_sessions status=${SESSION_STATUS}, expected completed/finished/6"
     fi
     [ "$SESSION_BARS" = "$BARS" ] && pass "strategy_sessions bars_processed=${BARS}" || fail "strategy_sessions bars_processed=${SESSION_BARS}, expected ${BARS}"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Step 11: Verify one strategy can replay independent symbols and intervals
+# ══════════════════════════════════════════════════════════════════════════════
+info "Step 11: Run multi-stream backtest (TESTUSDT 1m + TESTUSDT 5m + ALTUSDT 1m)"
+curl -s -X POST "${API}/api/portfolios/${PORTFOLIO_ID}/strategies/${STRATEGY_ID}/deactivate" -H "$AUTH" >/dev/null
+
+MULTI_STRATEGY_CODE=$(cat "$ROOT/strategy-service/tests/strategies/test_multi_stream_full_flow.py")
+MULTI_STRATEGY_CODE_JSON=$(echo "$MULTI_STRATEGY_CODE" | $PYTHON -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
+MULTI_STRATEGY_RESP=$(curl -s -X POST "${API}/api/strategies" \
+    -H "$AUTH" -H 'Content-Type: application/json' \
+    -d "{
+  \"name\": \"e2e-multi-stream-${E2E_TS}\",
+  \"version\": \"1.0.0\",
+  \"description\": \"E2E test: same symbol different intervals plus second symbol\",
+  \"code\": ${MULTI_STRATEGY_CODE_JSON}
+}")
+MULTI_STRATEGY_ID=$(echo "$MULTI_STRATEGY_RESP" | jq -r '.strategy_id')
+if [ -z "$MULTI_STRATEGY_ID" ] || [ "$MULTI_STRATEGY_ID" = "null" ]; then
+    fail "Create multi-stream strategy failed: $MULTI_STRATEGY_RESP"
+    exit 1
+fi
+curl -s -X POST "${API}/api/portfolios/${PORTFOLIO_ID}/strategies/${MULTI_STRATEGY_ID}" -H "$AUTH" >/dev/null
+curl -s -X POST "${API}/api/portfolios/${PORTFOLIO_ID}/strategies/${MULTI_STRATEGY_ID}/activate" -H "$AUTH" >/dev/null
+
+MULTI_RUN_RESP=$(curl -s -X POST "${API}/api/portfolios/${PORTFOLIO_ID}/run-strategy" \
+    -H "$AUTH" -H 'Content-Type: application/json' \
+    -d "{
+  \"strategy_path\": \"\",
+  \"interval\": \"1m\",
+  \"start_time_ms\": 1735689600000,
+  \"end_time_ms\": 1735701600000,
+  \"runtime_id\": \"${RUNTIME_ID}\"
+}")
+MULTI_SESSION_ID=$(echo "$MULTI_RUN_RESP" | jq -r '.session_id')
+if [ -z "$MULTI_SESSION_ID" ] || [ "$MULTI_SESSION_ID" = "null" ]; then
+    fail "Run multi-stream backtest failed: $MULTI_RUN_RESP"
+    exit 1
+fi
+
+MULTI_STATUS=""
+MULTI_BARS="0"
+for i in $(seq 1 30); do
+    MULTI_STATUS_RESP=$(curl -s "${API}/api/strategy-sessions/${MULTI_SESSION_ID}" -H "$AUTH" 2>/dev/null || echo '{"status":"error"}')
+    MULTI_STATUS=$(echo "$MULTI_STATUS_RESP" | jq -r '.status')
+    MULTI_BARS=$(echo "$MULTI_STATUS_RESP" | jq -r '.bars_processed')
+    if [ "$MULTI_STATUS" = "completed" ] || [ "$MULTI_STATUS" = "finished" ]; then
+        break
+    elif [ "$MULTI_STATUS" = "failed" ]; then
+        fail "Multi-stream backtest failed: $(echo "$MULTI_STATUS_RESP" | jq -r '.error')"
+        exit 1
+    fi
+    sleep 2
+done
+
+if [ "$MULTI_STATUS" != "completed" ] && [ "$MULTI_STATUS" != "finished" ]; then
+    fail "Multi-stream backtest did not complete within 60s (status=${MULTI_STATUS})"
+elif [ "$MULTI_BARS" = "440" ]; then
+    pass "Multi-stream replay kept all three streams independent: bars_processed=440"
+else
+    fail "Expected 440 merged bars (200 + 40 + 200), got ${MULTI_BARS}"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════

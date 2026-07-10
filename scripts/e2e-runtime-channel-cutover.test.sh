@@ -16,6 +16,9 @@ required_literals=(
   'portfolio_service_grpc:'
   'portfolio_snapshots'
   'i.portfolio_id'
+  "TIMESCALE_DB_PATTERN='binance_{year}'"
+  'tests/strategies/test_multi_stream_full_flow.py'
+  'Expected 440 merged bars (200 + 40 + 200)'
 )
 
 for literal in "${required_literals[@]}"; do
@@ -40,3 +43,8 @@ for forbidden in \
     exit 1
   fi
 done
+
+if grep -Fq -- 'E2E_TIMESCALE_DB_PATTERN:-binance_{year}' "$script"; then
+  echo "brace-bearing database pattern must not be embedded in parameter-expansion default" >&2
+  exit 1
+fi
