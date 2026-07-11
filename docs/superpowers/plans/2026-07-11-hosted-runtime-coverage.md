@@ -119,7 +119,7 @@ Run:
 
 ```bash
 go test ./internal/runtimeagent -count=1
-GOOS=windows GOARCH=amd64 go test ./internal/runtimeagent -run '^$'
+GOOS=windows GOARCH=amd64 go test -c ./internal/runtimeagent -o /tmp/runtimeagent-windows.test.exe
 ```
 
 Expected: PASS; Windows package compiles without POSIX symbols.
