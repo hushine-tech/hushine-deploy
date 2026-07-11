@@ -63,7 +63,7 @@ type Config struct {
 
 - Removes: `Config.ControlPanelAddr`, `dependencies.control_panel_service_grpc`, generic `elog.Config`, and `LOG_TRACING_*` overrides.
 
-- [ ] **Step 1: Write strict-decoder RED tests**
+- [x] **Step 1: Write strict-decoder RED tests**
 
 Replace the valid config fixture so it contains only the RuntimeChannel dependency and local output directory:
 
@@ -203,7 +203,7 @@ func TestRuntimeObservabilityKeepsW3CPropagationWithoutExporter(t *testing.T) {
 
 Add the required `context`, `go.opentelemetry.io/otel`, `propagation`, and `trace` imports to `observability_test.go`.
 
-- [ ] **Step 2: Run RED config tests**
+- [x] **Step 2: Run RED config tests**
 
 Run:
 
@@ -214,7 +214,7 @@ go test ./internal/runtimeagent -run 'TestLoadConfig|TestRuntime(LocalLogBackend
 
 Expected: compile FAIL until `WorkerStateRoot`, the Runtime-only log type, and `RuntimeLocalLogBackendConfig` exist; after the test compiles, forbidden fields still FAIL because `yaml.Unmarshal` ignores unknown fields.
 
-- [ ] **Step 3: Implement strict Runtime config**
+- [x] **Step 3: Implement strict Runtime config**
 
 In `config.go`, remove the `elog` import, add `bytes` and `io`, and replace the generic log/control-panel fields with the interfaces above. Use this exact decoder helper:
 
@@ -323,7 +323,7 @@ shutdownObservability, err := runtimeagent.InitObservability(ctx, cfg.Log)
 
 and rename the defer variable accordingly. Keep the ignored `--control-panel-addr` flag in this task so the checked-in Bare launcher remains runnable until Task 4 changes both sides together.
 
-- [ ] **Step 4: Run GREEN config tests**
+- [x] **Step 4: Run GREEN config tests**
 
 Run:
 
@@ -334,7 +334,7 @@ go test ./cmd/runtime-agent -count=1
 
 Expected: PASS; every forbidden YAML field returns a strict parser error and no Runtime config path can instantiate Kafka, Elasticsearch, or OTLP clients.
 
-- [ ] **Step 5: Commit Task 1 in strategy-service**
+- [x] **Step 5: Commit Task 1 in strategy-service**
 
 ```bash
 git add internal/runtimeagent/config.go internal/runtimeagent/config_test.go internal/runtimeagent/observability.go internal/runtimeagent/observability_test.go cmd/runtime-agent/main.go config.yaml
@@ -361,7 +361,7 @@ git commit -m "refactor: restrict runtime configuration and logging"
 - Preserves: `func (d *DockerProvisioner) Provision(context.Context, Plan) (string, error)`
 - Removes: forwarding of every operator-supplied `provisioning.docker.runtime_env` item; an absent, `null`, or empty map is equivalent to no legacy input, while every non-empty map fails closed.
 
-- [ ] **Step 1: Write RED config and provisioner tests**
+- [x] **Step 1: Write RED config and provisioner tests**
 
 Add to `internal/config/config_test.go`:
 
@@ -433,7 +433,7 @@ for key := range gotEnvKeys {
 
 Add a test helper that walks each `-e KEY=VALUE` pair, splits it with `strings.Cut`, and returns `map[string]struct{}`. Credential and TLS tests continue to assert their separately modeled `RUNTIME_CREDENTIAL_JSON` and `RUNTIME_CHANNEL_TLS_*` fields.
 
-- [ ] **Step 2: Run RED control-panel tests**
+- [x] **Step 2: Run RED control-panel tests**
 
 Run:
 
@@ -444,7 +444,7 @@ go test ./internal/config ./internal/provision -run 'TestLoadRejectsHostedRuntim
 
 Expected: FAIL because config accepts `runtime_env`, Provision calls Docker, and current tests/code forward CORE/Kafka.
 
-- [ ] **Step 3: Implement fail-closed provisioning validation**
+- [x] **Step 3: Implement fail-closed provisioning validation**
 
 Keep `RuntimeEnv` temporarily as a deprecated parse-only field so stale local YAML produces a useful error. Empty/nil maps are harmless and treated as unset; every non-empty map is rejected. Add to `internal/config/config.go`:
 
@@ -487,7 +487,7 @@ Remove the dead `Plan.ControlPanelGRPC` field from `internal/provision/provision
 
 Remove the entire `runtime_env` map from tracked `config.yaml`. Replace the README example with explicit `runtime_channel_dial_addr` only and state that Kafka/DB/core/order addresses are platform-side and never Runtime inputs. Correct the claim that ignored `config.local.yaml` is already populated: tell operators to create/update it locally, and explicitly require removal of any stale `provisioning.docker.runtime_env` before restart.
 
-- [ ] **Step 4: Run GREEN provisioning tests**
+- [x] **Step 4: Run GREEN provisioning tests**
 
 Run:
 
@@ -497,7 +497,7 @@ go test ./internal/config ./internal/provision ./internal/runtime -count=1
 
 Expected: PASS; invalid `runtime_env` fails before `CommandRunner.Run`.
 
-- [ ] **Step 5: Commit Task 2 in control-panel-service**
+- [x] **Step 5: Commit Task 2 in control-panel-service**
 
 ```bash
 git add internal/config/config.go internal/config/config_test.go internal/provision/docker.go internal/provision/docker_test.go internal/provision/provision.go internal/runtime/service.go config.yaml README.md
@@ -550,7 +550,7 @@ func buildWorkerEnvironment(
 - Preserves: `StartSessionWorker(ctx, sessionID, extraEnv)`; `extraEnv` now accepts only `HUSHINE_RUNTIME_ID`, `HUSHINE_RUNTIME_SOURCE`, and `HUSHINE_RUNTIME_NAME`.
 - Removes: the free-form `WorkerStartSpec.Env` slice; worker protocol variables are generated only from typed `WorkerStartSpec` fields.
 
-- [ ] **Step 1: Write RED environment unit tests**
+- [x] **Step 1: Write RED environment unit tests**
 
 Create `worker_environment_test.go` with:
 
@@ -644,7 +644,7 @@ Path(%q).write_text("\n".join([
 
 Set `DATABASE_PASSWORD=parent-canary-secret` in the parent test process. Configure manager with `WorkDir: dir`, `StateRoot: filepath.Join(dir, "state")`, and `PythonPath: []string{dir}`; pass only `HUSHINE_RUNTIME_ID=rt-test` as extra env. Update the canceled-worker test with the same temp `WorkDir`/`StateRoot`/`PythonPath` pattern. Assert the fifth output line equals exactly `DATABASE_PASSWORD=`, proving the real Python process did not inherit the canary without losing the empty value to `TrimSpace`.
 
-- [ ] **Step 2: Run RED environment tests**
+- [x] **Step 2: Run RED environment tests**
 
 Run:
 
@@ -655,7 +655,7 @@ go test ./internal/runtimeagent -run 'Test(BuildWorkerEnvironment|WorkerManagerS
 
 Expected: compile FAIL because the builder and `StateRoot`/`PythonPath` config fields do not exist. This RED run covers both the focused builder contract and the real child-process canary before production code changes.
 
-- [ ] **Step 3: Implement the focused environment builder**
+- [x] **Step 3: Implement the focused environment builder**
 
 Create `worker_environment.go`. It must:
 
@@ -745,7 +745,7 @@ PythonPath: []string{
 
 Add `.hushine-worker-state/` to `strategy-service/.gitignore`.
 
-- [ ] **Step 4: Run GREEN worker tests**
+- [x] **Step 4: Run GREEN worker tests**
 
 Run:
 
@@ -756,7 +756,7 @@ go test ./cmd/runtime-agent -count=1
 
 Expected: PASS; real Python worker starts with required facts but no parent secret.
 
-- [ ] **Step 5: Commit Task 3 in strategy-service**
+- [x] **Step 5: Commit Task 3 in strategy-service**
 
 ```bash
 git add internal/runtimeagent/worker_environment.go internal/runtimeagent/worker_environment_posix.go internal/runtimeagent/worker_environment_windows.go internal/runtimeagent/worker_environment_test.go internal/runtimeagent/worker_manager.go internal/runtimeagent/worker_manager_test.go cmd/runtime-agent/main.go .gitignore go.mod go.sum
@@ -780,7 +780,7 @@ git commit -m "fix: isolate runtime worker environment"
 - Preserves: `--runtime-channel-addr`, RuntimeChannel TLS files, runtime identity, local control URL, debugpy, and restart state file.
 - Removes: core/order/market-data flags/exports/state, agent control-panel export/flag, direct tracing endpoint, and inherited platform proxy variables.
 
-- [ ] **Step 1: Reverse the tracked shell contract to RED**
+- [x] **Step 1: Reverse the tracked shell contract to RED**
 
 Retain unrelated launcher contract assertions, remove assertions for the fields being deleted, and ensure `required_literals` contains:
 
@@ -894,7 +894,7 @@ if [[ "${state_keys}" != "${expected_state_keys}" ]]; then
 fi
 ```
 
-- [ ] **Step 2: Run RED shell contract**
+- [x] **Step 2: Run RED shell contract**
 
 Run:
 
@@ -904,7 +904,7 @@ bash scripts/start-bare-runtime-debugpy.test.sh
 
 Expected: FAIL on existing core/control/tracing literals and because runtime-agent currently inherits the parent environment.
 
-- [ ] **Step 3: Implement the clean Bare launch boundary**
+- [x] **Step 3: Implement the clean Bare launch boundary**
 
 In `start-bare-runtime-debugpy.sh`:
 
@@ -957,7 +957,7 @@ exec env -i "${agent_env[@]}" "${RUNTIME_AGENT_START_SCRIPT}" -- \
 
 Update README commands: remove `--core-service-addr`; describe `--control-panel-addr` as certificate bootstrap only; state that runtime-agent/worker never receive core/order/Kafka/DB/tracing endpoints.
 
-- [ ] **Step 4: Run GREEN shell and launcher tests**
+- [x] **Step 4: Run GREEN shell and launcher tests**
 
 Run:
 
@@ -969,7 +969,7 @@ go test ./cmd/runtime-agent -count=1
 
 Expected: PASS; canary platform secrets are absent from fake runtime-agent environment.
 
-- [ ] **Step 5: Commit Task 4 in strategy-service**
+- [x] **Step 5: Commit Task 4 in strategy-service**
 
 ```bash
 git add cmd/runtime-agent/main.go scripts/start-bare-runtime-debugpy.sh scripts/start-bare-runtime-debugpy.test.sh README.md
@@ -987,7 +987,7 @@ git commit -m "fix: isolate bare runtime launcher"
 **Interfaces:**
 - Verifies the phase as a unit; does not introduce production behavior.
 
-- [ ] **Step 1: Search for forbidden Runtime exposure**
+- [x] **Step 1: Search for forbidden Runtime exposure**
 
 Run:
 
@@ -1021,7 +1021,7 @@ fi
 
 Expected: no production Runtime exposure. Test fixtures may contain canary forbidden names only inside negative assertions.
 
-- [ ] **Step 2: Run complete affected-repository verification**
+- [x] **Step 2: Run complete affected-repository verification**
 
 Run:
 
@@ -1053,7 +1053,7 @@ go vet ./...
 
 Expected: both commands exit 0.
 
-- [ ] **Step 3: Build the official Runtime image and inspect its environment**
+- [x] **Step 3: Build the official Runtime image and inspect its environment**
 
 Run the tracked image build and official container-only smoke, then assert the image and actual container environments:
 
