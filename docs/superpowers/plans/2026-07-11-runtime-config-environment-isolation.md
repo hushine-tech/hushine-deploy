@@ -1137,7 +1137,7 @@ grep -F 'runtime channel stopped:' <<<"$startup_output"
 
 Expected: the official import/help smoke passes; the image and actual container contain no forbidden environment key; the real agent reaches RuntimeChannel startup and exits non-zero only because the deliberately closed `127.0.0.1:1` endpoint refuses the connection. Record exact output in the implementation handoff.
 
-- [ ] **Step 4: Update plan checkboxes and commit the plan status**
+- [x] **Step 4: Update plan checkboxes and commit the plan status**
 
 Mark completed steps `[x]`, then:
 
@@ -1148,7 +1148,7 @@ git diff --cached --check
 git commit -m "docs: record runtime isolation implementation"
 ```
 
-- [ ] **Step 5: Push all affected repositories and prove synchronization**
+- [x] **Step 5: Push all affected repositories and prove synchronization**
 
 For `strategy-service`, `control-panel-service`, and `hushine-deploy`:
 
