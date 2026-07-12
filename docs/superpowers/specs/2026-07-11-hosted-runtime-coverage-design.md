@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-11
 
-**Status:** Approved; implementation contract amended 2026-07-12
+**Status:** Approved; implementation contract amended through 2026-07-13
 
 ## Goal
 
@@ -149,8 +149,30 @@ python -m coverage run --parallel-mode \
 SIGTERM handling is enabled by the coverage image's `.coveragerc`, where
 `sigterm = true`; it is not a `coverage run` command-line option.
 
-Normal strategy completion follows the existing final-status acknowledgement
-flow and exits normally. Worker restart changes from immediate kill to:
+Successful `StopStrategy` and one-shot Preview responses use coverage-flush
+barriers. After a worker returns `StopStrategy(stopped=true)`, the Agent does not
+forward that response until the corresponding worker has completed natural
+process exit and managed session-root cleanup. A one-shot `PreviewRunStrategy`
+with `ok=true` uses the same natural managed-cleanup barrier before returning.
+Neither wait sends a process signal, and each is bounded by the request/frame's
+remaining timeout.
+
+Every validated terminal `FinalStatus` marks its worker `draining` before
+indicator finalization and before any terminal or recoverable platform state is
+published. `StopAll` gives a draining worker a bounded natural-exit and managed-
+cleanup window. If that window expires, one per-worker stop owner sends TERM;
+if the worker still does not finish, that owner force-kills it. The same owner
+completes process reap and managed cleanup in either case. Concurrent followers
+only await the shared result and never signal the worker again. Under the
+production shared deadline, after natural draining expires the TERM phase is
+capped at no more than half of the remaining shared time so force, reap, and
+managed cleanup retain a budget. The shared runtime-agent shutdown deadline
+remains 10 seconds and does not extend the control-panel/Docker 10-second
+coverage stop grace. Deadline-free draining keeps the configured TERM timeout,
+and non-draining behavior is unchanged.
+
+For other owned stop paths, including worker replacement, the bounded fallback
+sequence is:
 
 1. request termination with SIGTERM on POSIX;
 2. wait for the configured bounded timeout;
@@ -228,10 +250,20 @@ go tool cover -func
 Python output is converted using:
 
 ```text
-coverage combine
-coverage report
-coverage json
+COVERAGE_FILE=<raw .coverage* shard> uv run --frozen --extra coverage coverage debug data
+uv run --frozen --extra coverage coverage combine --keep
+uv run --frozen --extra coverage coverage report --keep-combined
+uv run --frozen --extra coverage coverage json --keep-combined
 ```
+
+Before combine or report, every raw `.coverage*` shard is independently
+validated with locked `uv run --frozen --extra coverage coverage debug data`.
+A zero exit from `coverage combine` is not sufficient because coverage.py can
+warn and skip a malformed shard. One invalid shard makes the runtime's Python
+status `error` and its per-runtime overall status `error`, leaves the broader
+coverage result incomplete, excludes that runtime from combined reports, and
+retains the raw shard and validation evidence. The strict reusable smoke applies
+the same per-shard gate with the same locked tooling.
 
 The census run records `coverage-manifest.json` per runtime and preserves the
 ordered `hosted-runtime-coverage-summary.json`. Missing, running, malformed,
@@ -283,17 +315,23 @@ runtime IDs with safe reasons. Raw per-runtime Go and Python shards are retained
 - assert EndRuntime rejects the active session with `AlreadyExists`;
 - stop the session with `STOP_ACTION_STOP_ONLY`, require exact `stopped` state,
   then run a second session with a different ID to prove worker recreation;
-- require Preview profile exactly `backtest`, exactly one declared input, no
-  failures, and both support/readiness flags;
+- require Preview `profile=backtest`, `supported=true`, `ok=true`, zero failures,
+  and exactly one declared input;
 - stop the second session, then EndRuntime and require an exact complete schema-1
   marker plus ordered Docker `kill(signal=15) -> die(exitCode=0) -> destroy`;
-- verify valid Go and Python reports can be generated from mounted output;
+- independently validate every raw Python shard, then verify valid Go and Python
+  reports can be generated from mounted output;
 - verify the complete hosted path still registers and communicates solely over
   RuntimeChannel.
 
-### Current manual census
+### Operational status and Task 13 gates
 
-After implementation, build the coverage image, restart the already
-instrumented local control-panel with this run's output directory, create a new
-hosted runtime from the UI, and verify both language outputs before the user
-continues broad manual coverage testing.
+The previous hosted smoke exposed a malformed Python shard that `coverage
+combine` warned about and skipped while still exiting zero. That observation
+drove the lifecycle flush barriers and fail-closed shard validation above; it is
+evidence of the prior defect, not a successful current acceptance run.
+
+Task 13 still requires a fresh-image hosted smoke against the corrected
+revisions and an isolated real Census `session-stop` that verifies the current-
+run two-label boundary and resulting per-runtime and combined reports. Neither
+gate is claimed as passed here.

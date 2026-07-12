@@ -15,31 +15,59 @@
 - Existing `executor` and `default` images remain uninstrumented and do not contain coverage.py.
 - Hosted runtimes continue to receive only RuntimeChannel identity, credential, TLS, and explicit coverage settings; legacy `runtime_env` remains rejected.
 - Runtime coverage output is retained after worker restart and container deletion.
-- Shutdown is bounded: TERM/stop first, forced kill/removal only after timeout.
+- Shutdown is bounded: successful Stop/Preview completion uses wait-only natural
+  cleanup barriers; non-draining owned stops are TERM-first, while draining
+  `StopAll` waits for natural cleanup before the same fallback.
 - Runtime IDs may never escape the configured coverage root.
 - All implementation uses the existing `cleanup/medium-baseline-20260710` worktree and preserves unrelated dirty work.
 
-## Current Contract Correction (2026-07-12)
+## Current Contract Correction (2026-07-13)
 
 This is a dated implementation plan. The following contract supersedes earlier
 intermediate snippets below where they differ:
 
+- A successful `StopStrategy(stopped=true)` response is not forwarded until its
+  worker naturally exits and managed session-root cleanup completes. A one-shot
+  `PreviewRunStrategy(ok=true)` has the same barrier. Both waits are signal-free
+  and use the request/frame's remaining bounded timeout.
+- Every validated terminal `FinalStatus` marks its worker `draining` before
+  indicator finalization or terminal/recoverable platform publication.
+  `StopAll` gives that worker bounded natural-exit/managed-cleanup grace, then
+  one per-worker stop owner controls TERM, any required force, and the eventual
+  reap/cleanup; followers only wait for the shared result and never signal again.
+- Under the production shared deadline, the TERM phase after expired natural
+  draining is capped at no more than half the remaining shared time, reserving
+  the rest for force, reap, and managed cleanup. Deadline-free draining and
+  non-draining semantics remain unchanged. The runtime-agent shutdown deadline
+  remains 10 seconds and does not extend the control-panel/Docker 10-second
+  coverage stop grace.
 - runtime-agent writes a fresh schema-1 `finalization.json` in `running` state
   immediately after the trusted coverage root and runtime identity are known;
-- shutdown order is worker admission close/drain, bounded concurrent worker
-  stop/reap, Go snapshot, final marker, then bounded worker-IPC shutdown;
+  shutdown order remains worker admission close/drain, bounded concurrent worker
+  stop/reap, Go snapshot, final marker, then bounded worker-IPC shutdown.
 - `complete` requires worker shutdown `ok`, `forced_workers=0`, and Go snapshot
-  `ok`; missing/running/malformed/incomplete evidence is never reported `ok`;
+  `ok`; missing/running/malformed/incomplete evidence is never reported `ok`.
 - control-panel decides stop-first cleanup from the actual container label and
-  keeps inspect/stop/remove failures visible within its declared cleanup bound;
+  keeps inspect/stop/remove failures visible within its declared cleanup bound.
 - Census stops only coverage containers with the active run's exact two labels,
   never removes them, writes a per-runtime manifest, and combines only runtimes
-  whose finalization, Go, and Python statuses are all `ok`;
-- combined output lives under `coverage/runtime-agent/combined/`, with inclusion
+  whose finalization, Go, and Python statuses are all `ok`.
+- Before combine/report, every raw `.coverage*` shard is independently validated
+  with locked `uv run --frozen --extra coverage coverage debug data`. Combine
+  exit zero alone is not accepted: one invalid shard sets both Python and the
+  per-runtime overall status to `error`, leaves the broader result incomplete,
+  excludes the runtime from combined reports, and leaves raw evidence intact.
+- Combined output lives under `coverage/runtime-agent/combined/`, with inclusion
   and exclusion reasons in
-  `hosted-runtime-coverage-combined-summary.json`;
-- the strict smoke requires exact backtest Preview semantics, a complete marker,
-  and ordered `kill(15) -> die(0) -> destroy` lifecycle evidence.
+  `hosted-runtime-coverage-combined-summary.json`.
+- The strict reusable smoke applies the same per-shard gate and still requires
+  locked `uv run --frozen --extra coverage` tooling, Preview `profile=backtest`,
+  `supported=true`, `ok=true`, zero failures, exactly one declared input, a
+  complete marker, and ordered
+  `kill(15) -> die(0) -> destroy` lifecycle evidence.
+- The previous smoke exposed the invalid shard and drove these corrections. A
+  fresh-image smoke and an isolated real Census `session-stop` remain Task 13
+  gates; neither is recorded as passed by this plan.
 
 ---
 
@@ -47,7 +75,8 @@ intermediate snippets below where they differ:
 
 ### strategy-service
 
-- `internal/runtimeagent/worker_manager.go`: bounded TERM-first worker shutdown and StopAll lifecycle.
+- `internal/runtimeagent/worker_manager.go`: bounded natural-drain and
+  single-owner TERM/force worker shutdown lifecycle.
 - `internal/runtimeagent/worker_signal_unix.go`: POSIX SIGTERM implementation.
 - `internal/runtimeagent/worker_signal_windows.go`: Windows-compatible forced-stop fallback.
 - `internal/runtimeagent/coverage.go`: trusted coverage configuration and Go counter snapshot seam.
@@ -70,7 +99,8 @@ intermediate snippets below where they differ:
 
 - `scripts/audit/census/census/coverage.py`: discover and merge hosted runtime Go/Python output.
 - `scripts/audit/census/config.yaml`: model runtime-agent as a Go subject instead of the removed Python runtime CLI.
-- `scripts/audit/census/tests/test_coverage.py`: merge and missing-output tests.
+- `scripts/audit/census/tests/test_coverage.py`: merge, missing-output, and
+  malformed-shard tests.
 - `scripts/audit/census/start_instrumented_stack.sh`: pass the active run output to control-panel.
 - `hushine-deploy/scripts/smoke_hosted_runtime_coverage.sh`: real container stop-and-report smoke.
 
@@ -87,7 +117,8 @@ intermediate snippets below where they differ:
 **Interfaces:**
 - Produces: `func (m *WorkerManager) StopAll(ctx context.Context, timeout time.Duration) error`
 - Produces: `func requestWorkerStop(process *os.Process) (forced bool, err error)`, selected by platform build tags.
-- Preserves: `StopSessionWorker(ctx, sessionID, timeout)` semantics, adding TERM-first behavior and force-kill fallback.
+- Preserves: `StopSessionWorker(ctx, sessionID, timeout)` semantics, with
+  single-owner TERM-first behavior for non-draining workers and force fallback.
 
 - [ ] **Step 1: Add failing lifecycle tests**
 
@@ -135,11 +166,19 @@ func requestWorkerStop(process *os.Process) (bool, error) {
 }
 ```
 
-Change `StopSessionWorker` to request stop, wait up to the supplied timeout,
-then call `Kill` and wait only within the remaining bound. Implement `StopAll`
-by taking a snapshot of active worker-generation pointers, deduplicating aliases
-by pointer, stopping unique generations concurrently on one shared context, and
-joining errors with `errors.Join`. Numeric PID is never a lifetime identity.
+For a non-draining worker, one stop owner requests TERM on POSIX, waits up to the
+configured bound, then owns any force, reap, and managed cleanup fallback. A
+draining worker first receives a bounded natural-exit/managed-cleanup window;
+only after it expires does the same owner enter the signal fallback. Concurrent
+followers only await the shared result. Under a shared deadline, the draining
+worker's TERM phase is capped at no more than half the time remaining after
+natural grace; deadline-free draining retains the configured TERM bound and the
+non-draining path is unchanged.
+
+Implement `StopAll` by taking a snapshot of active worker-generation pointers,
+deduplicating aliases by pointer, stopping unique generations concurrently on
+one shared context, and joining errors with `errors.Join`. Numeric PID is never
+a lifetime identity.
 
 - [ ] **Step 4: Run focused and cross-platform tests**
 
@@ -402,8 +441,11 @@ runtime/Go/Python directories with `0700`. Add a single `--mount` argument and
 only the two platform-owned coverage environment variables. Choose the coverage
 image only when enabled.
 
-In coverage mode, `Deprovision` calls `docker stop` with the configured timeout,
-then always calls `docker rm -f`; join errors only when removal also fails.
+`Deprovision` inspects the actual container label. A coverage label, or a
+conservative fallback when inspect fails, causes `docker stop` with the
+configured timeout; removal is always attempted with `docker rm -f`. Inspect,
+stop, and removal failures remain visible through the joined result, including
+when stop fails but removal succeeds.
 
 - [ ] **Step 4: Run provisioner and full control-panel verification**
 
@@ -441,8 +483,11 @@ git commit -m "feat: persist hosted runtime coverage"
 - [ ] **Step 1: Add failing merge/missing-output tests**
 
 Use temporary fake runtime directories and injectable command runners. Assert
-valid subjects run Go covdata and Python combine commands, while empty/missing
-language directories produce explicit `status: missing` entries.
+valid subjects run Go covdata and Python report commands, while empty/missing
+language directories produce explicit `status: missing` entries. Add a malformed
+Python shard regression that requires independent `coverage debug data`
+validation to fail before combine, marks Python and per-runtime overall status
+`error`, retains the raw shard, and excludes the runtime from combined reports.
 
 ```python
 def test_hosted_runtime_missing_python_is_reported(tmp_path):
@@ -462,8 +507,12 @@ Expected: FAIL because hosted runtime discovery/merge does not exist.
 
 Model runtime-agent as a Go subject in census config. Add deterministic discovery,
 schema-1 finalization gating, active-run container stop, per-runtime manifests,
-and language-specific/per-run combined collectors. Update the instrumented stack
-launcher to set:
+and language-specific/per-run combined collectors. Before combine/report, run
+locked `COVERAGE_FILE=<shard> uv run --frozen --extra coverage coverage debug
+data` independently for every raw `.coverage*` shard. Route combine, report, and
+JSON through the same locked prefix. Do not accept combine exit zero as
+validation because coverage.py can warn and skip a malformed shard. Update the
+instrumented stack launcher to set:
 
 ```text
 RUNTIME_COVERAGE_ENABLED=true
@@ -510,14 +559,17 @@ paths in the smoke report rather than staging unrelated repositories.
 The script must require an absolute output directory, verify the coverage image,
 create a unique runtime output directory, start a coverage container with a
 real RuntimeChannel credential supplied by the existing smoke harness, require
-a strict Preview result (`profile=backtest`, supported/ok, no failures, exactly
-one declared input), run an active worker, prove EndRuntime rejects that
-active session with `AlreadyExists`, stop it with `STOP_ACTION_STOP_ONLY` and
-require exact `stopped` state, then run and stop a second distinct session to
-prove worker recreation. End the runtime through control-panel, require exact
-`cancelled` state, exact complete schema-1 finalization, and ordered Docker
-SIGTERM, exit 0, and destroy events before executing Go/Python report commands.
-It must trap ownership-checked cleanup and redact credentials.
+a strict Preview result (`profile=backtest`, `supported=true`, `ok=true`, zero
+failures, exactly one declared input), run an active worker, prove EndRuntime
+rejects that active session with `AlreadyExists`, stop it with
+`STOP_ACTION_STOP_ONLY`, require exact `stopped` state, then run and stop a
+second distinct session to prove worker recreation. End the runtime through
+control-panel, require exact `cancelled` state, exact complete schema-1
+finalization, and ordered Docker
+SIGTERM, exit 0, and destroy events before independently validating every raw
+Python shard with the locked `coverage debug data` command and executing
+Go/Python report commands. It must trap ownership-checked cleanup and redact
+credentials.
 
 - [ ] **Step 2: Run repository-level verification before Docker**
 
@@ -559,8 +611,10 @@ Expected: runtime registers through RuntimeChannel; strict Preview succeeds;
 EndRuntime rejects the first active session; both `STOP_ACTION_STOP_ONLY`
 requests persist exact `stopped` sessions; the second session has a new ID;
 final runtime state is exactly `cancelled`; finalization is exactly complete;
-the runtime container records ordered SIGTERM, exit 0, and destroy; Go `covdata textfmt` succeeds; Python `coverage
-combine` succeeds; and Docker has no leftover smoke container.
+the runtime container records ordered SIGTERM, exit 0, and destroy; Go `covdata
+textfmt` succeeds; every raw Python shard independently passes locked `coverage
+debug data` before Python combine/report; and Docker has no leftover smoke
+container.
 
 - [ ] **Step 5: Verify the manual testing stack remains ready**
 
@@ -574,6 +628,12 @@ container ID, and generated report paths in the smoke report without secrets.
 git add scripts/smoke_hosted_runtime_coverage.sh scripts/smoke_hosted_runtime_coverage.go scripts/smoke_hosted_runtime_coverage_test.go scripts/smoke_hosted_runtime_coverage.test.sh .superpowers/sdd/hosted-runtime-coverage-smoke.md
 git commit -m "test: verify hosted runtime coverage"
 ```
+
+Operational status: the previous smoke exposed an invalid Python shard for which
+`coverage combine` warned and skipped input while exiting zero. That observation
+drove the lifecycle and validation corrections, but it is not a successful
+current acceptance run. A fresh-image smoke and an isolated real Census
+`session-stop` remain Task 13 gates and are not claimed as passed here.
 
 ### Task 8: Final review and branch handoff
 
