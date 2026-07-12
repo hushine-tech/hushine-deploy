@@ -395,6 +395,17 @@ PYTHON_RC="${RUNTIME_ROOT}/python-report.coveragerc"
 } >"${PYTHON_RC}"
 export COVERAGE_FILE="${PYTHON_DIR}/.coverage"
 export COVERAGE_RCFILE="${PYTHON_RC}"
+PYTHON_VALIDATION_LOG="${RUNTIME_ROOT}/python-data-validation-output.txt"
+: >"${PYTHON_VALIDATION_LOG}"
+while IFS= read -r -d '' shard; do
+  if ! (
+    cd "${SOURCE_ROOT}/strategy-service"
+    COVERAGE_FILE="${shard}" uv run --frozen --extra coverage coverage debug data
+  ) >>"${PYTHON_VALIDATION_LOG}" 2>&1; then
+    echo "invalid Python coverage shard: $(basename "${shard}")" >&2
+    exit 1
+  fi
+done < <(find "${PYTHON_DIR}" -maxdepth 1 -name '.coverage*' -type f -print0)
 (
   cd "${SOURCE_ROOT}/strategy-service"
   uv run --frozen --extra coverage coverage combine --keep "${PYTHON_DIR}"

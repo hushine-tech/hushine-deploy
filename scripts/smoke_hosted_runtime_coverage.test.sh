@@ -150,6 +150,8 @@ fi
 # Reports use locked project tooling and RPC failures expose only operation and
 # status code, never server details that could contain credentials.
 require_literal "${SCRIPT}" 'uv run --frozen --extra coverage coverage combine --keep'
+require_literal "${SCRIPT}" 'coverage debug data'
+require_literal "${SCRIPT}" 'invalid Python coverage shard'
 require_literal "${HELPER}" 'fatalf("%s failed: code=%s", operation, grpcStatus.Code())'
 for literal in \
   'StopAction_STOP_ACTION_CANCEL' \
