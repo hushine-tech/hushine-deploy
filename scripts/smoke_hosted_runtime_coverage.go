@@ -110,7 +110,7 @@ func main() {
 		}
 		resp, err := controlClient.StopStrategy(ctx, &strategyv1.StopStrategyRequest{
 			SessionId:  strings.TrimSpace(*sessionID),
-			StopAction: strategyv1.StopAction_STOP_ACTION_CANCEL,
+			StopAction: strategyv1.StopAction_STOP_ACTION_STOP_ONLY,
 			UserId:     *userID,
 			RuntimeId:  strings.TrimSpace(*runtimeID),
 		})
