@@ -23,6 +23,8 @@ func main() {
 	userID := flag.Int64("user", 0, "runtime owner user ID")
 	runtimeID := flag.String("runtime", "", "runtime ID")
 	portfolioID := flag.Int64("portfolio", 0, "portfolio ID; zero selects the first owned portfolio with an active strategy")
+	startTimeMs := flag.Int64("start-time-ms", 1735689600000, "preview backtest start time")
+	endTimeMs := flag.Int64("end-time-ms", 1735701600000, "preview backtest end time")
 	timeout := flag.Duration("timeout", 30*time.Second, "RPC timeout")
 	flag.Parse()
 
@@ -46,9 +48,21 @@ func main() {
 			PortfolioId: selected,
 			UserId:      *userID,
 			RuntimeId:   strings.TrimSpace(*runtimeID),
+			StartTimeMs: *startTimeMs,
+			EndTimeMs:   *endTimeMs,
 		})
 		if err != nil {
 			fatalRPC("PreviewRunStrategy", err)
+		}
+		if !resp.GetSupported() || !resp.GetOk() || len(resp.GetFailures()) != 0 || len(resp.GetDeclaredInputs()) == 0 {
+			fatalf(
+				"PreviewRunStrategy preflight was not ready: profile=%s supported=%t ok=%t failure_count=%d declared_input_count=%d",
+				resp.GetProfile(),
+				resp.GetSupported(),
+				resp.GetOk(),
+				len(resp.GetFailures()),
+				len(resp.GetDeclaredInputs()),
+			)
 		}
 		fmt.Printf(
 			"portfolio_id=%d profile=%s supported=%t ok=%t failure_count=%d declared_input_count=%d\n",
@@ -70,6 +84,14 @@ func main() {
 		runtime := resp.GetRuntime()
 		if runtime == nil {
 			fatalf("EndRuntime returned no runtime")
+		}
+		if runtime.GetRuntimeId() != strings.TrimSpace(*runtimeID) || runtime.GetSource() != "hosted" || runtime.GetCleanupStatus() != "succeeded" {
+			fatalf(
+				"EndRuntime returned unexpected state: runtime_id=%s source=%s cleanup_status=%s",
+				runtime.GetRuntimeId(),
+				runtime.GetSource(),
+				runtime.GetCleanupStatus(),
+			)
 		}
 		fmt.Printf(
 			"runtime_id=%s status=%s source=%s cleanup_status=%s\n",
@@ -137,9 +159,9 @@ func hasActiveStrategy(ctx context.Context, client portfoliov1.PortfolioServiceC
 
 func fatalRPC(operation string, err error) {
 	if grpcStatus, ok := status.FromError(err); ok {
-		fatalf("%s failed: code=%s message=%s", operation, grpcStatus.Code(), grpcStatus.Message())
+		fatalf("%s failed: code=%s", operation, grpcStatus.Code())
 	}
-	fatalf("%s failed: %v", operation, err)
+	fatalf("%s failed", operation)
 }
 
 func fatalf(format string, args ...any) {

@@ -32,6 +32,8 @@ PROFILE="${PROFILE:-small}"
 CONTROL_PANEL_ADDR="${CONTROL_PANEL_ADDR:-127.0.0.1:50054}"
 PORTFOLIO_ADDR="${PORTFOLIO_ADDR:-127.0.0.1:50051}"
 COVERAGE_IMAGE="${COVERAGE_IMAGE:-hushine/strategy-runtime:executor-coverage}"
+PREVIEW_START_TIME_MS="${PREVIEW_START_TIME_MS:-1735689600000}"
+PREVIEW_END_TIME_MS="${PREVIEW_END_TIME_MS:-1735701600000}"
 
 if [[ ! "${USER_ID}" =~ ^[1-9][0-9]*$ ]]; then
   echo "USER_ID must be a positive integer" >&2
@@ -65,7 +67,7 @@ end_runtime() {
   if [[ -z "${RUNTIME_ID}" || "${RUNTIME_ENDED}" -eq 1 ]]; then
     return 0
   fi
-  (
+  if ! (
     cd "${SOURCE_ROOT}/control-panel-service"
     go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
       -action end \
@@ -73,16 +75,30 @@ end_runtime() {
       -user "${USER_ID}" \
       -runtime "${RUNTIME_ID}" \
       -timeout 45s
-  )
+  ); then
+    return 1
+  fi
   RUNTIME_ENDED=1
 }
 
 cleanup() {
   local rc="$?"
+  local cleanup_failed=0
   trap - EXIT
   if [[ -n "${RUNTIME_ID}" && "${RUNTIME_ENDED}" -eq 0 ]]; then
     echo "→ cleanup: EndRuntime ${RUNTIME_ID}" >&2
-    end_runtime >&2 || true
+    if ! end_runtime >&2; then
+      cleanup_failed=1
+    fi
+  fi
+  if [[ -n "${CONTAINER_NAME}" ]] && docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+    cleanup_failed=1
+  fi
+  if [[ "${cleanup_failed}" -ne 0 ]]; then
+    echo "cleanup failed; owned runtime may require operator intervention: ${RUNTIME_ID}" >&2
+    if [[ "${rc}" -eq 0 ]]; then
+      rc=1
+    fi
   fi
   exit "${rc}"
 }
@@ -104,7 +120,6 @@ ENSURE_RC="$?"
 set -e
 if [[ "${ENSURE_RC}" -ne 0 ]]; then
   echo "EnsureHostedRuntime failed with exit ${ENSURE_RC}" >&2
-  echo "${ENSURE_OUTPUT}" | sed -E 's/(credential|token|password|secret|private_key)([^, ]*)/\1=<redacted>/Ig' >&2
   exit "${ENSURE_RC}"
 fi
 RUNTIME_ID="$(sed -n 's/.*runtime_id=\([^[:space:]]*\).*/\1/p' <<<"${ENSURE_OUTPUT}" | head -1)"
@@ -112,18 +127,31 @@ if [[ -z "${RUNTIME_ID}" || "${ENSURE_OUTPUT}" != *"provisioned=true"* ]]; then
   echo "EnsureHostedRuntime did not provision a unique runtime" >&2
   exit 1
 fi
+if [[ ! "${RUNTIME_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "runtime_id has unsafe characters" >&2
+  exit 1
+fi
 echo "runtime_id=${RUNTIME_ID} provisioned=true"
 
 CONTAINER_NAME="hushine-runtime-${RUNTIME_ID}"
-RUNTIME_ROOT="${OUTPUT_ROOT}/runtimes/${RUNTIME_ID}"
+RUNTIMES_ROOT="${OUTPUT_ROOT}/runtimes"
+RUNTIME_ROOT="${RUNTIMES_ROOT}/${RUNTIME_ID}"
 GO_DIR="${RUNTIME_ROOT}/go"
 PYTHON_DIR="${RUNTIME_ROOT}/python"
-for directory in "${RUNTIME_ROOT}" "${GO_DIR}" "${PYTHON_DIR}"; do
+for directory in "${RUNTIMES_ROOT}" "${RUNTIME_ROOT}" "${GO_DIR}" "${PYTHON_DIR}"; do
   if [[ ! -d "${directory}" || -L "${directory}" ]]; then
     echo "expected safe coverage directory missing: ${directory}" >&2
     exit 1
   fi
 done
+RUNTIMES_ROOT="$(cd "${RUNTIMES_ROOT}" && pwd -P)"
+RUNTIME_ROOT="$(cd "${RUNTIME_ROOT}" && pwd -P)"
+if [[ "${RUNTIME_ROOT}" != "${RUNTIMES_ROOT}/${RUNTIME_ID}" ]]; then
+  echo "runtime coverage path escapes output root" >&2
+  exit 1
+fi
+GO_DIR="${RUNTIME_ROOT}/go"
+PYTHON_DIR="${RUNTIME_ROOT}/python"
 
 CONTAINER_ID="$(docker container inspect --format '{{.Id}}' "${CONTAINER_NAME}")"
 CONTAINER_IMAGE_ID="$(docker container inspect --format '{{.Image}}' "${CONTAINER_NAME}")"
@@ -131,7 +159,11 @@ COVERAGE_LABEL="$(docker container inspect --format '{{index .Config.Labels "hus
 RUN_LABEL="$(docker container inspect --format '{{index .Config.Labels "hushine.runtime.coverage_run_id"}}' "${CONTAINER_NAME}")"
 MOUNT_SOURCE="$(docker container inspect "${CONTAINER_NAME}" | jq -r '.[0].Mounts[] | select(.Destination == "/coverage") | .Source')"
 ENV_NAMES="$(docker container inspect "${CONTAINER_NAME}" | jq -r '.[0].Config.Env | map(split("=")[0]) | .[]')"
-if [[ "${CONTAINER_IMAGE_ID}" != "${IMAGE_ID}" || "${COVERAGE_LABEL}" != "true" || "${MOUNT_SOURCE}" != "${RUNTIME_ROOT}" ]]; then
+EXPECTED_RUN_LABEL="$(basename "${OUTPUT_ROOT}")"
+if [[ "${EXPECTED_RUN_LABEL}" == "runtime-agent" && "$(basename "$(dirname "${OUTPUT_ROOT}")")" == "coverage" ]]; then
+  EXPECTED_RUN_LABEL="$(basename "$(dirname "$(dirname "${OUTPUT_ROOT}")")")"
+fi
+if [[ "${CONTAINER_IMAGE_ID}" != "${IMAGE_ID}" || "${COVERAGE_LABEL}" != "true" || "${RUN_LABEL}" != "${EXPECTED_RUN_LABEL}" || "${MOUNT_SOURCE}" != "${RUNTIME_ROOT}" ]]; then
   echo "coverage container image/label/mount validation failed" >&2
   exit 1
 fi
@@ -153,6 +185,8 @@ echo "→ PreviewRunStrategy through RuntimeChannel (one-shot Python worker)"
     -user "${USER_ID}" \
     -runtime "${RUNTIME_ID}" \
     -portfolio "${PORTFOLIO_ID}" \
+    -start-time-ms "${PREVIEW_START_TIME_MS}" \
+    -end-time-ms "${PREVIEW_END_TIME_MS}" \
     -timeout 45s
 )
 
@@ -205,9 +239,9 @@ export COVERAGE_FILE="${PYTHON_DIR}/.coverage"
 export COVERAGE_RCFILE="${PYTHON_RC}"
 (
   cd "${SOURCE_ROOT}/strategy-service"
-  uv run --with coverage coverage combine --keep "${PYTHON_DIR}"
-  uv run --with coverage coverage report --keep-combined >"${RUNTIME_ROOT}/python-report.txt"
-  uv run --with coverage coverage json --keep-combined -o "${RUNTIME_ROOT}/python-coverage.json"
+  uv run --frozen --extra coverage coverage combine --keep "${PYTHON_DIR}"
+  uv run --frozen --extra coverage coverage report --keep-combined >"${RUNTIME_ROOT}/python-report.txt"
+  uv run --frozen --extra coverage coverage json --keep-combined -o "${RUNTIME_ROOT}/python-coverage.json"
 )
 
 for report in \
