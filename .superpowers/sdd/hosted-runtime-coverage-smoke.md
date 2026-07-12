@@ -10,10 +10,10 @@ Result: **PASS** for revision-bound runtime
 `rt-a909e69e54a2871f21b29397` using deploy smoke revision
 `be0cc5dfda66ae519e635017e1487ab125f8da6e`.
 
-No credential, private key, TLS bundle, bearer token, password, raw RPC error
-detail, or raw Docker environment was printed or recorded. Docker evidence is
-restricted to IDs, image, platform-owned labels, mount source, environment
-variable names, and lifecycle events.
+This evidence includes no credential, private key, TLS bundle, bearer token,
+password, raw RPC error detail, or raw Docker environment. Smoke diagnostics
+are restricted to IDs, image, platform-owned labels, mount source, environment
+variable names, RPC status codes, and lifecycle events.
 
 ## Revisions and pre-smoke verification
 
@@ -187,8 +187,9 @@ Runtime root:
 | `python-coverage.json` | 455261 | `706dae2ceb28942f8c71d19cd52623adc7ce2f4e9025b46af4616c408d786ef1` |
 
 Go total: 15.1% statements. Python total: 2537/7433 lines,
-34.13157540696892%. Raw inputs contain three Go covdata files and four Python
-coverage data files, covering Preview plus both active worker processes.
+34.13157540696892%. Inputs contain three Go covdata files and three parallel
+Python shards (Preview plus both active workers); the collector also retains
+the combined Python data file.
 
 The updated census collector was invoked programmatically with a manually
 constructed `RunContext`, so the live run manifest and frontend CDP collector
