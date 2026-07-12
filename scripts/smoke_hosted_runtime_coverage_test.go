@@ -1,8 +1,10 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 
+	portfoliov1 "github.com/hushine-tech/core-service/gen/portfoliov1"
 	strategyv1 "github.com/hushine-tech/strategy-service/gen/strategyv1"
 )
 
@@ -65,5 +67,19 @@ func TestTerminalRuntimeStatusRequiresCancelled(t *testing.T) {
 		if terminalRuntimeStatus(status) {
 			t.Errorf("%q must not satisfy a successful EndRuntime assertion", status)
 		}
+	}
+}
+
+func TestRunningSessionIDsAreSafeDeterministicAndUnique(t *testing.T) {
+	got := runningSessionIDs([]*portfoliov1.StrategySessionEntry{
+		{SessionId: " session-b "},
+		nil,
+		{SessionId: "session-a"},
+		{SessionId: ""},
+		{SessionId: "session-b"},
+	})
+	want := []string{"session-a", "session-b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("runningSessionIDs() = %q, want %q", got, want)
 	}
 }

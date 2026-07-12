@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,7 +19,7 @@ import (
 )
 
 func main() {
-	action := flag.String("action", "", "preview, run, expect-end-blocked, stop, or end")
+	action := flag.String("action", "", "preview, run, expect-end-blocked, stop, stop-running, or end")
 	controlPanelAddr := flag.String("control-panel-addr", "127.0.0.1:50054", "control-panel gRPC address")
 	portfolioAddr := flag.String("portfolio-addr", "127.0.0.1:50051", "portfolio.v1 gRPC address")
 	userID := flag.Int64("user", 0, "runtime owner user ID")
@@ -122,6 +123,9 @@ func main() {
 		}
 		terminal := waitSessionTerminal(ctx, *portfolioAddr, *userID, strings.TrimSpace(*sessionID))
 		fmt.Printf("session_id=%s status=%s stopped=true\n", strings.TrimSpace(*sessionID), terminal)
+	case "stop-running":
+		count := stopRunningSessions(ctx, *portfolioAddr, *userID, strings.TrimSpace(*runtimeID), controlClient)
+		fmt.Printf("runtime_id=%s running_sessions_stopped=%d\n", strings.TrimSpace(*runtimeID), count)
 	case "end":
 		resp, err := controlClient.EndRuntime(ctx, &controlpanelv1.EndRuntimeRequest{
 			UserId:    *userID,
@@ -161,7 +165,7 @@ func main() {
 			runtime.GetCleanupStatus(),
 		)
 	default:
-		fatalf("-action must be preview, run, expect-end-blocked, stop, or end")
+		fatalf("-action must be preview, run, expect-end-blocked, stop, stop-running, or end")
 	}
 }
 
@@ -201,6 +205,72 @@ func waitSessionTerminal(ctx context.Context, addr string, userID int64, session
 		case <-ticker.C:
 		}
 	}
+}
+
+func stopRunningSessions(
+	ctx context.Context,
+	portfolioAddr string,
+	userID int64,
+	runtimeID string,
+	controlClient controlpanelv1.ControlPanelServiceClient,
+) int {
+	conn, err := grpc.NewClient(portfolioAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fatalRPC("dial portfolio.v1", err)
+	}
+	defer conn.Close()
+	portfolioClient := portfoliov1.NewPortfolioServiceClient(conn)
+	stopped := make(map[string]struct{})
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		response, err := portfolioClient.ListRunningSessions(ctx, &portfoliov1.ListRunningSessionsRequest{
+			RuntimeId: runtimeID,
+		})
+		if err != nil {
+			fatalRPC("ListRunningSessions", err)
+		}
+		ids := runningSessionIDs(response.GetSessions())
+		if len(ids) == 0 {
+			return len(stopped)
+		}
+		for _, id := range ids {
+			response, err := controlClient.StopStrategy(ctx, &strategyv1.StopStrategyRequest{
+				SessionId:  id,
+				StopAction: strategyv1.StopAction_STOP_ACTION_STOP_ONLY,
+				UserId:     userID,
+				RuntimeId:  runtimeID,
+			})
+			if err == nil && response.GetStopped() {
+				stopped[id] = struct{}{}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			fatalf("runtime sessions did not become terminal")
+		case <-ticker.C:
+		}
+	}
+}
+
+func runningSessionIDs(sessions []*portfoliov1.StrategySessionEntry) []string {
+	unique := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		id := strings.TrimSpace(session.GetSessionId())
+		if id != "" {
+			unique[id] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(unique))
+	for id := range unique {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func terminalSessionStatus(value string) bool {
