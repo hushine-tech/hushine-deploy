@@ -538,7 +538,7 @@ container ID, and generated report paths in the smoke report without secrets.
 - [ ] **Step 6: Commit deploy tooling and report**
 
 ```bash
-git add scripts/smoke_hosted_runtime_coverage.sh scripts/smoke_hosted_runtime_coverage.go scripts/smoke_hosted_runtime_coverage.test.sh .superpowers/sdd/hosted-runtime-coverage-smoke.md
+git add scripts/smoke_hosted_runtime_coverage.sh scripts/smoke_hosted_runtime_coverage.go scripts/smoke_hosted_runtime_coverage_test.go scripts/smoke_hosted_runtime_coverage.test.sh .superpowers/sdd/hosted-runtime-coverage-smoke.md
 git commit -m "test: verify hosted runtime coverage"
 ```
 
