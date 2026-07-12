@@ -465,6 +465,7 @@ paths in the smoke report rather than staging unrelated repositories.
 **Files:**
 - Create: `hushine-deploy/scripts/smoke_hosted_runtime_coverage.sh`
 - Create: `hushine-deploy/scripts/smoke_hosted_runtime_coverage.go`
+- Create: `hushine-deploy/scripts/smoke_hosted_runtime_coverage_test.go`
 - Create: `hushine-deploy/scripts/smoke_hosted_runtime_coverage.test.sh`
 - Create: `hushine-deploy/.superpowers/sdd/hosted-runtime-coverage-smoke.md`
 

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SCRIPT="${ROOT}/scripts/smoke_hosted_runtime_coverage.sh"
 HELPER="${ROOT}/scripts/smoke_hosted_runtime_coverage.go"
+HELPER_TEST="${ROOT}/scripts/smoke_hosted_runtime_coverage_test.go"
 
 fail() {
   echo "hosted runtime coverage smoke contract failed: $*" >&2
@@ -25,6 +26,7 @@ forbid_literal() {
 
 test -x "${SCRIPT}" || fail "smoke script is not executable"
 test -f "${HELPER}" || fail "Go helper is missing"
+test -f "${HELPER_TEST}" || fail "Go helper strict-status test is missing"
 bash -n "${SCRIPT}"
 
 # Coverage identity, trusted mount, and canonical path containment.
@@ -65,8 +67,10 @@ for literal in \
   'end_runtime_active_session=blocked code=AlreadyExists' \
   'StopAction_STOP_ACTION_STOP_ONLY' \
   'terminal := waitSessionTerminal' \
+  'return value == "stopped"' \
   'runtime.GetRuntimeId() != strings.TrimSpace(*runtimeID)' \
   'runtime.GetSource() != "hosted"' \
+  'return strings.TrimSpace(value) == "cancelled"' \
   'runtime.GetCleanupStatus() != "succeeded"'; do
   require_literal "${HELPER}" "${literal}"
 done
@@ -103,5 +107,10 @@ if USER_ID=127 "${SCRIPT}" relative/path >"${relative_output}" 2>&1; then
 fi
 grep -Fq 'output directory must be absolute' "${relative_output}" \
   || fail "relative output rejection was not explicit"
+
+(
+  cd "${ROOT}/../control-panel-service"
+  go test "${HELPER}" "${HELPER_TEST}"
+)
 
 echo 'hosted runtime coverage smoke contract: PASS'

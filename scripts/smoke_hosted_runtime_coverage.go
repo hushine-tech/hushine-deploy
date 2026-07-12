@@ -183,6 +183,9 @@ func waitSessionTerminal(ctx context.Context, addr string, userID int64, session
 		if terminalSessionStatus(value) {
 			return value
 		}
+		if knownTerminalSessionStatus(value) {
+			fatalf("session reached an unexpected terminal status after StopStrategy: status=%s", value)
+		}
 		select {
 		case <-ctx.Done():
 			fatalf("session did not become terminal after StopStrategy")
@@ -192,8 +195,12 @@ func waitSessionTerminal(ctx context.Context, addr string, userID int64, session
 }
 
 func terminalSessionStatus(value string) bool {
+	return value == "stopped"
+}
+
+func knownTerminalSessionStatus(value string) bool {
 	switch value {
-	case "completed", "finished", "failed", "stopped", "stop_failed", "recoverable":
+	case "completed", "finished", "failed", "stopped", "stop_failed", "recoverable", "preflight_failed":
 		return true
 	default:
 		return false
@@ -201,12 +208,7 @@ func terminalSessionStatus(value string) bool {
 }
 
 func terminalRuntimeStatus(value string) bool {
-	switch strings.TrimSpace(value) {
-	case "ended", "cancelled", "failed", "heartbeat_stale":
-		return true
-	default:
-		return false
-	}
+	return strings.TrimSpace(value) == "cancelled"
 }
 
 func selectPortfolio(ctx context.Context, addr string, userID, requestedID int64) int64 {
