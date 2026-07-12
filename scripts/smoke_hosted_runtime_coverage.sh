@@ -97,6 +97,7 @@ owned_smoke_container() {
 }
 
 fallback_cleanup_container() {
+  local fallback_failed=0
   if ! docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     return 0
   fi
@@ -106,12 +107,13 @@ fallback_cleanup_container() {
   fi
   if ! docker stop --time 10 "${CONTAINER_NAME}" >/dev/null; then
     echo "fallback docker stop failed for owned smoke container" >&2
-    return 1
+    fallback_failed=1
   fi
   if ! docker rm -f "${CONTAINER_NAME}" >/dev/null; then
     echo "fallback docker removal failed for owned smoke container" >&2
-    return 1
+    fallback_failed=1
   fi
+  return "${fallback_failed}"
 }
 
 cleanup() {

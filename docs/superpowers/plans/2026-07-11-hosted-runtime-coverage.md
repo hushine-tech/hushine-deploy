@@ -150,7 +150,7 @@ git commit -m "fix: gracefully stop runtime workers"
 func TestCoverageConfigPythonArgs(t *testing.T) {
     cfg := runtimeagent.CoverageConfig{RootDir: "/coverage"}
     got := cfg.PythonArgsPrefix()
-    want := []string{"-m", "coverage", "run", "--parallel-mode", "--sigterm", "--data-file=/coverage/python/.coverage", "--source=strategy_service"}
+    want := []string{"-m", "coverage", "run", "--parallel-mode", "--data-file=/coverage/python/.coverage", "--source=strategy_service"}
     if diff := cmp.Diff(want, got); diff != "" { t.Fatal(diff) }
 }
 
@@ -174,7 +174,8 @@ Read `HUSHINE_RUNTIME_COVERAGE_DIR` once in `main.go`. When non-empty, require
 an absolute cleaned path, create `go` and `python` children, append
 `CoverageConfig.PythonArgsPrefix()` before the worker module, and use the Go
 child for snapshots. Do not pass arbitrary inherited coverage variables into
-the worker environment.
+the worker environment. SIGTERM handling comes from the coverage image's
+`.coveragerc` (`sigterm = true`); `coverage run` has no `--sigterm` option.
 
 On context cancellation:
 
@@ -463,6 +464,8 @@ paths in the smoke report rather than staging unrelated repositories.
 
 **Files:**
 - Create: `hushine-deploy/scripts/smoke_hosted_runtime_coverage.sh`
+- Create: `hushine-deploy/scripts/smoke_hosted_runtime_coverage.go`
+- Create: `hushine-deploy/scripts/smoke_hosted_runtime_coverage.test.sh`
 - Create: `hushine-deploy/.superpowers/sdd/hosted-runtime-coverage-smoke.md`
 
 **Interfaces:**
@@ -473,9 +476,13 @@ paths in the smoke report rather than staging unrelated repositories.
 
 The script must require an absolute output directory, verify the coverage image,
 create a unique runtime output directory, start a coverage container with a
-real RuntimeChannel credential supplied by the existing smoke harness, run one
-worker-backed strategy action, stop the container, and execute Go/Python report
-commands. It must trap cleanup and redact credentials.
+real RuntimeChannel credential supplied by the existing smoke harness, require
+a strict Preview result, run an active worker, prove EndRuntime rejects that
+active session with `AlreadyExists`, stop it with `STOP_ACTION_STOP_ONLY`, then
+run and stop a second distinct session to prove worker recreation. End the
+runtime through control-panel and require Docker SIGTERM, exit 0, and destroy
+events before executing Go/Python report commands. It must trap ownership-
+checked cleanup and redact credentials.
 
 - [ ] **Step 2: Run repository-level verification before Docker**
 
@@ -513,9 +520,12 @@ hushine-deploy/scripts/smoke_hosted_runtime_coverage.sh \
   /Users/xdy/Workplace/hushine-worktrees/medium-cleanup/census-runs/manual-coverage-20260711-230823/coverage/runtime-agent
 ```
 
-Expected: runtime registers through RuntimeChannel, Python worker executes,
-container stops cleanly, Go `covdata textfmt` succeeds, Python `coverage combine`
-succeeds, and Docker has no leftover smoke container.
+Expected: runtime registers through RuntimeChannel; strict Preview succeeds;
+EndRuntime rejects the first active session; both `STOP_ACTION_STOP_ONLY`
+requests persist terminal sessions; the second session has a new ID; the
+runtime container records SIGTERM, exit 0, and destroy; Go `covdata textfmt`
+succeeds; Python `coverage combine` succeeds; and Docker has no leftover smoke
+container.
 
 - [ ] **Step 5: Verify the manual testing stack remains ready**
 
@@ -526,7 +536,7 @@ container ID, and generated report paths in the smoke report without secrets.
 - [ ] **Step 6: Commit deploy tooling and report**
 
 ```bash
-git add scripts/smoke_hosted_runtime_coverage.sh .superpowers/sdd/hosted-runtime-coverage-smoke.md
+git add scripts/smoke_hosted_runtime_coverage.sh scripts/smoke_hosted_runtime_coverage.go scripts/smoke_hosted_runtime_coverage.test.sh .superpowers/sdd/hosted-runtime-coverage-smoke.md
 git commit -m "test: verify hosted runtime coverage"
 ```
 

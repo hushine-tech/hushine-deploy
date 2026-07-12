@@ -243,8 +243,11 @@ silently treated as zero execution.
 - confirm normal image lacks coverage instrumentation;
 - start a coverage runtime with a temporary bind mount;
 - run a real hosted session that creates a Python worker;
-- exercise normal completion and worker restart;
-- stop the container while a worker is connected;
+- assert EndRuntime rejects the active session with `AlreadyExists`;
+- stop the session with `STOP_ACTION_STOP_ONLY`, wait for its terminal state,
+  then run a second session with a different ID to prove worker recreation;
+- stop the second session, then EndRuntime and require Docker SIGTERM, exit 0,
+  and destroy events;
 - verify valid Go and Python reports can be generated from mounted output;
 - verify the complete hosted path still registers and communicates solely over
   RuntimeChannel.
