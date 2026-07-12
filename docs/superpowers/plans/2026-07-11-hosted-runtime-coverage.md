@@ -479,11 +479,12 @@ The script must require an absolute output directory, verify the coverage image,
 create a unique runtime output directory, start a coverage container with a
 real RuntimeChannel credential supplied by the existing smoke harness, require
 a strict Preview result, run an active worker, prove EndRuntime rejects that
-active session with `AlreadyExists`, stop it with `STOP_ACTION_STOP_ONLY`, then
-run and stop a second distinct session to prove worker recreation. End the
-runtime through control-panel and require Docker SIGTERM, exit 0, and destroy
-events before executing Go/Python report commands. It must trap ownership-
-checked cleanup and redact credentials.
+active session with `AlreadyExists`, stop it with `STOP_ACTION_STOP_ONLY` and
+require exact `stopped` state, then run and stop a second distinct session to
+prove worker recreation. End the runtime through control-panel, require exact
+`cancelled` state plus Docker SIGTERM, exit 0, and destroy events before
+executing Go/Python report commands. It must trap ownership-checked cleanup and
+redact credentials.
 
 - [ ] **Step 2: Run repository-level verification before Docker**
 
@@ -523,10 +524,10 @@ hushine-deploy/scripts/smoke_hosted_runtime_coverage.sh \
 
 Expected: runtime registers through RuntimeChannel; strict Preview succeeds;
 EndRuntime rejects the first active session; both `STOP_ACTION_STOP_ONLY`
-requests persist terminal sessions; the second session has a new ID; the
-runtime container records SIGTERM, exit 0, and destroy; Go `covdata textfmt`
-succeeds; Python `coverage combine` succeeds; and Docker has no leftover smoke
-container.
+requests persist exact `stopped` sessions; the second session has a new ID;
+final runtime state is exactly `cancelled`; the runtime container records
+SIGTERM, exit 0, and destroy; Go `covdata textfmt` succeeds; Python `coverage
+combine` succeeds; and Docker has no leftover smoke container.
 
 - [ ] **Step 5: Verify the manual testing stack remains ready**
 

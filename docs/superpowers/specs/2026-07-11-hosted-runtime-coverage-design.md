@@ -244,7 +244,7 @@ silently treated as zero execution.
 - start a coverage runtime with a temporary bind mount;
 - run a real hosted session that creates a Python worker;
 - assert EndRuntime rejects the active session with `AlreadyExists`;
-- stop the session with `STOP_ACTION_STOP_ONLY`, wait for its terminal state,
+- stop the session with `STOP_ACTION_STOP_ONLY`, require exact `stopped` state,
   then run a second session with a different ID to prove worker recreation;
 - stop the second session, then EndRuntime and require Docker SIGTERM, exit 0,
   and destroy events;

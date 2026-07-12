@@ -7,8 +7,8 @@ Run: `manual-coverage-20260711-230823`
 Source root: `/Users/xdy/Workplace/hushine-worktrees/medium-cleanup`
 
 Result: **PASS** for revision-bound runtime
-`rt-a909e69e54a2871f21b29397` using deploy smoke revision
-`be0cc5dfda66ae519e635017e1487ab125f8da6e`.
+`rt-bb3e9973ee09c8a8888b6fce` using deploy smoke revision
+`4df721fd8e8a65e4169e8364e41b962e19601b73`.
 
 This evidence includes no credential, private key, TLS bundle, bearer token,
 password, raw RPC error detail, or raw Docker environment. Smoke diagnostics
@@ -21,7 +21,7 @@ Relevant commits:
 
 - strategy-service `4dfd4f2` — `fix: use coverage sigterm config`;
 - control-panel-service `642869f` — `chore: log hosted coverage settings`;
-- hushine-deploy `9d93fca..be0cc5d` — initial smoke, failure-path
+- hushine-deploy `9d93fca..4df721f` — initial smoke, failure-path
   hardening, strict lifecycle assertions, tracked contract, and corrected
   plan/design semantics.
 
@@ -39,8 +39,8 @@ because strategy-service has no `test` extra. The repository-owned command from
 | control-panel-service | `go test ./...` | 0 | all packages passed |
 | control-panel-service | `go vet ./...` | 0 | no findings |
 | hushine-deploy | `./scripts/smoke_hosted_runtime_coverage.test.sh` | 0 | tracked contract passed |
-| smoke helper | `go test ../hushine-deploy/scripts/smoke_hosted_runtime_coverage.go` | 0 | compiled |
-| smoke helper | `go vet ../hushine-deploy/scripts/smoke_hosted_runtime_coverage.go` | 0 | no findings |
+| smoke helper | `go test ../hushine-deploy/scripts/smoke_hosted_runtime_coverage.go ../hushine-deploy/scripts/smoke_hosted_runtime_coverage_test.go` | 0 | two strict-status tests passed |
+| smoke helper | `go vet ../hushine-deploy/scripts/smoke_hosted_runtime_coverage.go ../hushine-deploy/scripts/smoke_hosted_runtime_coverage_test.go` | 0 | no findings |
 
 The tracked deploy contract verifies coverage run labels, canonical path and
 symlink containment, ownership-checked fallback cleanup, forced-removal
@@ -107,6 +107,11 @@ semantics:
 - Docker can publish `destroy` one second after container disappearance, so
   event capture waits on a bounded future timestamp rather than dropping the
   final record.
+- an independent review found that accepting any terminal status could hide a
+  fast worker failure. RED tests proved the prior helper accepted
+  `completed`/`failed`/`recoverable` sessions and `failed`/stale runtimes; the
+  final helper requires exactly `stopped` after STOP_ONLY and exactly
+  `cancelled` after EndRuntime.
 
 Every failed iteration was reconciled to a terminal runtime, and its exact
 ownership-verified container was removed. The retained pre-fix runtime remains
@@ -120,7 +125,7 @@ Coverage image ID:
 sha256:f57c325294da83cb145fc9ae869d8ca5ddd012611901b9a18c42a616667d897c
 ```
 
-Exact command from deploy commit `be0cc5d`:
+Exact command from deploy commit `4df721f`:
 
 ```text
 USER_ID=127 ./scripts/smoke_hosted_runtime_coverage.sh \
@@ -131,8 +136,8 @@ Exit: 0.
 
 Identity and containment facts:
 
-- runtime ID `rt-a909e69e54a2871f21b29397`;
-- container ID `e7dc30b99f7e8aa251887813f7c7b6969a4372fe61658d63be13f69331081646`;
+- runtime ID `rt-bb3e9973ee09c8a8888b6fce`;
+- container ID `6f853f4174eebffde8ffa86d590b8695d9b6ad766f3e097248fdfdc9a2821264`;
 - user `127`, selected owned portfolio `79`;
 - image ID matched the inspected coverage image;
 - `hushine.runtime.coverage=true`;
@@ -146,13 +151,13 @@ Runtime and worker lifecycle facts:
 1. `PreviewRunStrategy` executed the one-shot Python worker and returned
    `profile=backtest`, `supported=true`, `ok=true`, zero failures, and one
    declared input.
-2. `RunStrategy` created session `beed4a08541a48698eafaa478fd2b365`.
+2. `RunStrategy` created session `b9737252e3144954be310dbf36680991`.
 3. EndRuntime while that session was active returned the required
    `AlreadyExists` guard.
 4. `STOP_ACTION_STOP_ONLY` returned `stopped=true`; portfolio.v1 then reported
    the first session `stopped`.
 5. A second RunStrategy created distinct session
-   `dc0feed1a24848448ec0443075cafc27`.
+   `9152d4dbfd2c4f6a81613b67f02455d4`.
 6. `STOP_ACTION_STOP_ONLY` returned `stopped=true`; portfolio.v1 reported the
    second session `stopped`.
 7. EndRuntime then reported runtime status `cancelled`, source `hosted`, and
@@ -167,16 +172,17 @@ The preserved `docker-events.jsonl` records:
 create -> start -> kill(signal=15) -> stop -> die(exitCode=0) -> destroy
 ```
 
-The `destroy` event is timestamped one second after `die`, proving the bounded
-future capture fixed an observation race rather than weakening graceful-stop
-requirements. No coverage-labeled runtime container remains.
+The complete sequence was captured without weakening any graceful-stop
+requirement. An earlier retained diagnostic recorded `destroy` one second after
+`die`, which is why the collector uses the bounded future event boundary. No
+coverage-labeled runtime container remains.
 
 ## Generated reports and census merge
 
 Runtime root:
 
 ```text
-/Users/xdy/Workplace/hushine-worktrees/medium-cleanup/census-runs/manual-coverage-20260711-230823/coverage/runtime-agent/runtimes/rt-a909e69e54a2871f21b29397
+/Users/xdy/Workplace/hushine-worktrees/medium-cleanup/census-runs/manual-coverage-20260711-230823/coverage/runtime-agent/runtimes/rt-bb3e9973ee09c8a8888b6fce
 ```
 
 | Report | Bytes | SHA-256 |
@@ -184,7 +190,7 @@ Runtime root:
 | `go.cover.out` | 709639 | `d1dbdbab4fece70f067735f15e5abba66448f1e1e15e1a9a710beb625580aeb1` |
 | `go-functions.txt` | 285009 | `b1260086dee8811f1235d6a5bd82e3b50cffa759dfcfe5bf1717177e4f152b4b` |
 | `python-report.txt` | 3801 | `31b1266d91c828cac7b97b33971d7635862288afe2f75259ce6bab59dcbd79ab` |
-| `python-coverage.json` | 455261 | `706dae2ceb28942f8c71d19cd52623adc7ce2f4e9025b46af4616c408d786ef1` |
+| `python-coverage.json` | 455261 | `258b8a12dd4d2dcde3f606dbb83ac4679a7bb3c6d084168770361c40a2003834` |
 
 Go total: 15.1% statements. Python total: 2537/7433 lines,
 34.13157540696892%. Inputs contain three Go covdata files and three parallel
@@ -212,7 +218,7 @@ run directory.
 | graceful events | three `jq -e` selections over `$RT_ROOT/docker-events.jsonl` for kill/signal 15, die/exit 0, and destroy | 0 |
 | four reports are nonempty | `test -s` chained for `go.cover.out`, `go-functions.txt`, `python-report.txt`, and `python-coverage.json` | 0 |
 | census collection | programmatic collector command below | 0 |
-| final collector status | `jq -e '.[] | select(.runtime_id=="rt-a909e69e54a2871f21b29397" and .status=="ok" and .go.status=="ok" and .python.status=="ok")' "$SUMMARY"` | 0 |
+| final collector status | `jq -e '.[] | select(.runtime_id=="rt-bb3e9973ee09c8a8888b6fce" and .status=="ok" and .go.status=="ok" and .python.status=="ok")' "$SUMMARY"` | 0 |
 | frontend listener | `lsof -nP -iTCP:5173 -sTCP:LISTEN` | 0 |
 | application/CDP HTTP | `curl -fsS` chained for control-panel `/readyz`, quant-handler `/healthz`, `http://localhost:5173`, and CDP `/json/version` | 0 |
 | scraper, Chrome, collector | `ps -p 70710,91773,91793` | 0 |
@@ -220,7 +226,7 @@ run directory.
 Concrete lifecycle and report checks:
 
 ```bash
-RT_ROOT=/Users/xdy/Workplace/hushine-worktrees/medium-cleanup/census-runs/manual-coverage-20260711-230823/coverage/runtime-agent/runtimes/rt-a909e69e54a2871f21b29397
+RT_ROOT=/Users/xdy/Workplace/hushine-worktrees/medium-cleanup/census-runs/manual-coverage-20260711-230823/coverage/runtime-agent/runtimes/rt-bb3e9973ee09c8a8888b6fce
 jq -e 'select(.action == "kill" and .signal == "15")' "$RT_ROOT/docker-events.jsonl" >/dev/null \
   && jq -e 'select(.action == "die" and .exitCode == "0")' "$RT_ROOT/docker-events.jsonl" >/dev/null \
   && jq -e 'select(.action == "destroy")' "$RT_ROOT/docker-events.jsonl" >/dev/null
