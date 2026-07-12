@@ -138,11 +138,14 @@ so coverage variables are not inherited implicitly. Coverage mode is represented
 as a trusted WorkerManager configuration. Workers start with the equivalent of:
 
 ```text
-python -m coverage run --parallel-mode --sigterm \
+python -m coverage run --parallel-mode \
   --data-file=/coverage/python/.coverage \
   --source=strategy_service \
   -m strategy_service.session_worker_entry
 ```
+
+SIGTERM handling is enabled by the coverage image's `.coveragerc`, where
+`sigterm = true`; it is not a `coverage run` command-line option.
 
 Normal strategy completion follows the existing final-status acknowledgement
 flow and exits normally. Worker restart changes from immediate kill to:

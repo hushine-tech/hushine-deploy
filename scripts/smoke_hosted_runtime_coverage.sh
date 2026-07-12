@@ -32,8 +32,8 @@ PROFILE="${PROFILE:-small}"
 CONTROL_PANEL_ADDR="${CONTROL_PANEL_ADDR:-127.0.0.1:50054}"
 PORTFOLIO_ADDR="${PORTFOLIO_ADDR:-127.0.0.1:50051}"
 COVERAGE_IMAGE="${COVERAGE_IMAGE:-hushine/strategy-runtime:executor-coverage}"
-PREVIEW_START_TIME_MS="${PREVIEW_START_TIME_MS:-1735689600000}"
-PREVIEW_END_TIME_MS="${PREVIEW_END_TIME_MS:-1735701600000}"
+START_TIME_MS="${START_TIME_MS:-1780272000000}"
+END_TIME_MS="${END_TIME_MS:-1783728000000}"
 
 if [[ ! "${USER_ID}" =~ ^[1-9][0-9]*$ ]]; then
   echo "USER_ID must be a positive integer" >&2
@@ -61,7 +61,9 @@ fi
 
 RUNTIME_ID=""
 CONTAINER_NAME=""
+CONTAINER_ID=""
 RUNTIME_ENDED=0
+EVENT_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 end_runtime() {
   if [[ -z "${RUNTIME_ID}" || "${RUNTIME_ENDED}" -eq 1 ]]; then
@@ -81,6 +83,36 @@ end_runtime() {
   RUNTIME_ENDED=1
 }
 
+owned_smoke_container() {
+  local runtime_label user_label coverage_label image_id
+  if ! docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+    return 1
+  fi
+  runtime_label="$(docker container inspect --format '{{index .Config.Labels "hushine.runtime.runtime_id"}}' "${CONTAINER_NAME}")"
+  user_label="$(docker container inspect --format '{{index .Config.Labels "hushine.runtime.user_id"}}' "${CONTAINER_NAME}")"
+  coverage_label="$(docker container inspect --format '{{index .Config.Labels "hushine.runtime.coverage"}}' "${CONTAINER_NAME}")"
+  image_id="$(docker container inspect --format '{{.Image}}' "${CONTAINER_NAME}")"
+  [[ "${runtime_label}" == "${RUNTIME_ID}" && "${user_label}" == "${USER_ID}" && "${coverage_label}" == "true" && "${image_id}" == "${IMAGE_ID}" ]]
+}
+
+fallback_cleanup_container() {
+  if ! docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! owned_smoke_container; then
+    echo "refusing fallback cleanup: container ownership labels do not match smoke runtime" >&2
+    return 1
+  fi
+  if ! docker stop --time 10 "${CONTAINER_NAME}" >/dev/null; then
+    echo "fallback docker stop failed for owned smoke container" >&2
+    return 1
+  fi
+  if ! docker rm -f "${CONTAINER_NAME}" >/dev/null; then
+    echo "fallback docker removal failed for owned smoke container" >&2
+    return 1
+  fi
+}
+
 cleanup() {
   local rc="$?"
   local cleanup_failed=0
@@ -92,7 +124,9 @@ cleanup() {
     fi
   fi
   if [[ -n "${CONTAINER_NAME}" ]] && docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
-    cleanup_failed=1
+    if ! fallback_cleanup_container; then
+      cleanup_failed=1
+    fi
   fi
   if [[ "${cleanup_failed}" -ne 0 ]]; then
     echo "cleanup failed; owned runtime may require operator intervention: ${RUNTIME_ID}" >&2
@@ -185,10 +219,31 @@ echo "→ PreviewRunStrategy through RuntimeChannel (one-shot Python worker)"
     -user "${USER_ID}" \
     -runtime "${RUNTIME_ID}" \
     -portfolio "${PORTFOLIO_ID}" \
-    -start-time-ms "${PREVIEW_START_TIME_MS}" \
-    -end-time-ms "${PREVIEW_END_TIME_MS}" \
+    -start-time-ms "${START_TIME_MS}" \
+    -end-time-ms "${END_TIME_MS}" \
     -timeout 45s
 )
+
+echo "→ RunStrategy through RuntimeChannel (active Python session worker)"
+RUN_OUTPUT="$({
+  cd "${SOURCE_ROOT}/control-panel-service"
+  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+    -action run \
+    -control-panel-addr "${CONTROL_PANEL_ADDR}" \
+    -portfolio-addr "${PORTFOLIO_ADDR}" \
+    -user "${USER_ID}" \
+    -runtime "${RUNTIME_ID}" \
+    -portfolio "${PORTFOLIO_ID}" \
+    -start-time-ms "${START_TIME_MS}" \
+    -end-time-ms "${END_TIME_MS}" \
+    -timeout 45s
+})"
+SESSION_ID="$(sed -n 's/.*session_id=\([^[:space:]]*\).*/\1/p' <<<"${RUN_OUTPUT}" | head -1)"
+if [[ -z "${SESSION_ID}" ]]; then
+  echo "RunStrategy returned no session_id" >&2
+  exit 1
+fi
+echo "${RUN_OUTPUT}"
 
 echo "→ EndRuntime through control-panel"
 end_runtime
@@ -202,6 +257,18 @@ for attempt in $(seq 1 30); do
   fi
   sleep 1
 done
+
+EVENTS_FILE="${RUNTIME_ROOT}/docker-events.jsonl"
+EVENT_UNTIL="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker events --since "${EVENT_SINCE}" --until "${EVENT_UNTIL}" --filter "container=${CONTAINER_ID}" --format '{{json .}}' \
+  | jq -c '{time:.time,action:.Action,id:.Actor.ID,image:(.Actor.Attributes.image // null),name:(.Actor.Attributes.name // null),runtime_id:(.Actor.Attributes["hushine.runtime.runtime_id"] // null),user_id:(.Actor.Attributes["hushine.runtime.user_id"] // null),coverage:(.Actor.Attributes["hushine.runtime.coverage"] // null),coverage_run_id:(.Actor.Attributes["hushine.runtime.coverage_run_id"] // null),signal:(.Actor.Attributes.signal // null),exitCode:(.Actor.Attributes.exitCode // null)}' \
+  >"${EVENTS_FILE}"
+if ! jq -e 'select(.action == "kill" and .signal == "15")' "${EVENTS_FILE}" >/dev/null \
+  || ! jq -e 'select(.action == "die" and .exitCode == "0")' "${EVENTS_FILE}" >/dev/null \
+  || ! jq -e 'select(.action == "destroy")' "${EVENTS_FILE}" >/dev/null; then
+  echo "graceful Docker stop/finalization events are incomplete" >&2
+  exit 1
+fi
 
 if ! find "${GO_DIR}" -type f -print -quit | grep -q .; then
   echo "Go coverage output is missing: ${GO_DIR}" >&2

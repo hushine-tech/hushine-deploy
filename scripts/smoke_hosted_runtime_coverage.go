@@ -23,8 +23,8 @@ func main() {
 	userID := flag.Int64("user", 0, "runtime owner user ID")
 	runtimeID := flag.String("runtime", "", "runtime ID")
 	portfolioID := flag.Int64("portfolio", 0, "portfolio ID; zero selects the first owned portfolio with an active strategy")
-	startTimeMs := flag.Int64("start-time-ms", 1735689600000, "preview backtest start time")
-	endTimeMs := flag.Int64("end-time-ms", 1735701600000, "preview backtest end time")
+	startTimeMs := flag.Int64("start-time-ms", 1780272000000, "backtest start time")
+	endTimeMs := flag.Int64("end-time-ms", 1783728000000, "backtest end time")
 	timeout := flag.Duration("timeout", 30*time.Second, "RPC timeout")
 	flag.Parse()
 
@@ -73,6 +73,23 @@ func main() {
 			len(resp.GetFailures()),
 			len(resp.GetDeclaredInputs()),
 		)
+	case "run":
+		selected := selectPortfolio(ctx, *portfolioAddr, *userID, *portfolioID)
+		resp, err := controlClient.RunStrategy(ctx, &strategyv1.RunStrategyRequest{
+			PortfolioId: selected,
+			UserId:      *userID,
+			RuntimeId:   strings.TrimSpace(*runtimeID),
+			Interval:    "1m",
+			StartTimeMs: *startTimeMs,
+			EndTimeMs:   *endTimeMs,
+		})
+		if err != nil {
+			fatalRPC("RunStrategy", err)
+		}
+		if strings.TrimSpace(resp.GetSessionId()) == "" {
+			fatalf("RunStrategy returned an empty session_id")
+		}
+		fmt.Printf("portfolio_id=%d session_id=%s\n", selected, resp.GetSessionId())
 	case "end":
 		resp, err := controlClient.EndRuntime(ctx, &controlpanelv1.EndRuntimeRequest{
 			UserId:    *userID,
@@ -85,7 +102,18 @@ func main() {
 		if runtime == nil {
 			fatalf("EndRuntime returned no runtime")
 		}
-		if runtime.GetRuntimeId() != strings.TrimSpace(*runtimeID) || runtime.GetSource() != "hosted" || runtime.GetCleanupStatus() != "succeeded" {
+		final, err := controlClient.GetRuntime(ctx, &controlpanelv1.GetRuntimeRequest{
+			UserId:    *userID,
+			RuntimeId: strings.TrimSpace(*runtimeID),
+		})
+		if err != nil {
+			fatalRPC("GetRuntime after EndRuntime", err)
+		}
+		runtime = final.GetRuntime()
+		if runtime == nil {
+			fatalf("GetRuntime after EndRuntime returned no runtime")
+		}
+		if runtime.GetRuntimeId() != strings.TrimSpace(*runtimeID) || runtime.GetSource() != "hosted" || !terminalRuntimeStatus(runtime.GetStatus()) || runtime.GetCleanupStatus() != "succeeded" {
 			fatalf(
 				"EndRuntime returned unexpected state: runtime_id=%s source=%s cleanup_status=%s",
 				runtime.GetRuntimeId(),
@@ -101,7 +129,16 @@ func main() {
 			runtime.GetCleanupStatus(),
 		)
 	default:
-		fatalf("-action must be preview or end")
+		fatalf("-action must be preview, run, or end")
+	}
+}
+
+func terminalRuntimeStatus(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "ended", "cancelled", "failed", "heartbeat_stale":
+		return true
+	default:
+		return false
 	}
 }
 
