@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Provision a real hosted coverage runtime, execute a one-shot Python worker,
-# end it through control-panel, and prove both language outputs are mergeable.
+# Provision a real hosted coverage runtime, exercise both one-shot and active
+# Python workers, end it through control-panel, and prove both language outputs
+# are mergeable.
 set -euo pipefail
 
 DEPLOY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -225,7 +226,7 @@ echo "→ PreviewRunStrategy through RuntimeChannel (one-shot Python worker)"
 )
 
 echo "→ RunStrategy through RuntimeChannel (active Python session worker)"
-RUN_OUTPUT="$({
+RUN_ONE_OUTPUT="$({
   cd "${SOURCE_ROOT}/control-panel-service"
   go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
     -action run \
@@ -238,12 +239,70 @@ RUN_OUTPUT="$({
     -end-time-ms "${END_TIME_MS}" \
     -timeout 45s
 })"
-SESSION_ID="$(sed -n 's/.*session_id=\([^[:space:]]*\).*/\1/p' <<<"${RUN_OUTPUT}" | head -1)"
-if [[ -z "${SESSION_ID}" ]]; then
+SESSION_ONE_ID="$(sed -n 's/.*session_id=\([^[:space:]]*\).*/\1/p' <<<"${RUN_ONE_OUTPUT}" | head -1)"
+if [[ -z "${SESSION_ONE_ID}" ]]; then
   echo "RunStrategy returned no session_id" >&2
   exit 1
 fi
-echo "${RUN_OUTPUT}"
+echo "${RUN_ONE_OUTPUT}"
+
+echo "→ assert EndRuntime rejects the active session"
+(
+  cd "${SOURCE_ROOT}/control-panel-service"
+  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+    -action expect-end-blocked \
+    -control-panel-addr "${CONTROL_PANEL_ADDR}" \
+    -user "${USER_ID}" \
+    -runtime "${RUNTIME_ID}" \
+    -timeout 15s
+)
+
+echo "→ StopStrategy first active worker"
+(
+  cd "${SOURCE_ROOT}/control-panel-service"
+  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+    -action stop \
+    -control-panel-addr "${CONTROL_PANEL_ADDR}" \
+    -portfolio-addr "${PORTFOLIO_ADDR}" \
+    -user "${USER_ID}" \
+    -runtime "${RUNTIME_ID}" \
+    -session "${SESSION_ONE_ID}" \
+    -timeout 45s
+)
+
+echo "→ RunStrategy again to prove worker recreation"
+RUN_TWO_OUTPUT="$({
+  cd "${SOURCE_ROOT}/control-panel-service"
+  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+    -action run \
+    -control-panel-addr "${CONTROL_PANEL_ADDR}" \
+    -portfolio-addr "${PORTFOLIO_ADDR}" \
+    -user "${USER_ID}" \
+    -runtime "${RUNTIME_ID}" \
+    -portfolio "${PORTFOLIO_ID}" \
+    -start-time-ms "${START_TIME_MS}" \
+    -end-time-ms "${END_TIME_MS}" \
+    -timeout 45s
+})"
+SESSION_TWO_ID="$(sed -n 's/.*session_id=\([^[:space:]]*\).*/\1/p' <<<"${RUN_TWO_OUTPUT}" | head -1)"
+if [[ -z "${SESSION_TWO_ID}" || "${SESSION_TWO_ID}" == "${SESSION_ONE_ID}" ]]; then
+  echo "first and second session IDs differ check failed" >&2
+  exit 1
+fi
+echo "${RUN_TWO_OUTPUT}"
+
+echo "→ StopStrategy recreated worker"
+(
+  cd "${SOURCE_ROOT}/control-panel-service"
+  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+    -action stop \
+    -control-panel-addr "${CONTROL_PANEL_ADDR}" \
+    -portfolio-addr "${PORTFOLIO_ADDR}" \
+    -user "${USER_ID}" \
+    -runtime "${RUNTIME_ID}" \
+    -session "${SESSION_TWO_ID}" \
+    -timeout 45s
+)
 
 echo "→ EndRuntime through control-panel"
 end_runtime

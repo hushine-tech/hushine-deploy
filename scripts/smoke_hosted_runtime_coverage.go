@@ -12,17 +12,19 @@ import (
 	portfoliov1 "github.com/hushine-tech/core-service/gen/portfoliov1"
 	strategyv1 "github.com/hushine-tech/strategy-service/gen/strategyv1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
 func main() {
-	action := flag.String("action", "", "preview or end")
+	action := flag.String("action", "", "preview, run, expect-end-blocked, stop, or end")
 	controlPanelAddr := flag.String("control-panel-addr", "127.0.0.1:50054", "control-panel gRPC address")
 	portfolioAddr := flag.String("portfolio-addr", "127.0.0.1:50051", "portfolio.v1 gRPC address")
 	userID := flag.Int64("user", 0, "runtime owner user ID")
 	runtimeID := flag.String("runtime", "", "runtime ID")
 	portfolioID := flag.Int64("portfolio", 0, "portfolio ID; zero selects the first owned portfolio with an active strategy")
+	sessionID := flag.String("session", "", "strategy session ID")
 	startTimeMs := flag.Int64("start-time-ms", 1780272000000, "backtest start time")
 	endTimeMs := flag.Int64("end-time-ms", 1783728000000, "backtest end time")
 	timeout := flag.Duration("timeout", 30*time.Second, "RPC timeout")
@@ -90,6 +92,36 @@ func main() {
 			fatalf("RunStrategy returned an empty session_id")
 		}
 		fmt.Printf("portfolio_id=%d session_id=%s\n", selected, resp.GetSessionId())
+	case "expect-end-blocked":
+		_, err := controlClient.EndRuntime(ctx, &controlpanelv1.EndRuntimeRequest{
+			UserId:    *userID,
+			RuntimeId: strings.TrimSpace(*runtimeID),
+		})
+		if err == nil {
+			fatalf("EndRuntime unexpectedly accepted an active session")
+		}
+		if grpcStatus, ok := status.FromError(err); !ok || grpcStatus.Code() != codes.AlreadyExists {
+			fatalRPC("EndRuntime active-session guard", err)
+		}
+		fmt.Println("end_runtime_active_session=blocked code=AlreadyExists")
+	case "stop":
+		if strings.TrimSpace(*sessionID) == "" {
+			fatalf("required for stop: -session")
+		}
+		resp, err := controlClient.StopStrategy(ctx, &strategyv1.StopStrategyRequest{
+			SessionId:  strings.TrimSpace(*sessionID),
+			StopAction: strategyv1.StopAction_STOP_ACTION_CANCEL,
+			UserId:     *userID,
+			RuntimeId:  strings.TrimSpace(*runtimeID),
+		})
+		if err != nil {
+			fatalRPC("StopStrategy", err)
+		}
+		if !resp.GetStopped() {
+			fatalf("StopStrategy returned stopped=false")
+		}
+		terminal := waitSessionTerminal(ctx, *portfolioAddr, *userID, strings.TrimSpace(*sessionID))
+		fmt.Printf("session_id=%s status=%s stopped=true\n", strings.TrimSpace(*sessionID), terminal)
 	case "end":
 		resp, err := controlClient.EndRuntime(ctx, &controlpanelv1.EndRuntimeRequest{
 			UserId:    *userID,
@@ -129,7 +161,42 @@ func main() {
 			runtime.GetCleanupStatus(),
 		)
 	default:
-		fatalf("-action must be preview, run, or end")
+		fatalf("-action must be preview, run, expect-end-blocked, stop, or end")
+	}
+}
+
+func waitSessionTerminal(ctx context.Context, addr string, userID int64, sessionID string) string {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fatalRPC("dial portfolio.v1", err)
+	}
+	defer conn.Close()
+	client := portfoliov1.NewPortfolioServiceClient(conn)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		resp, err := client.GetSession(ctx, &portfoliov1.GetSessionRequest{SessionId: sessionID, UserId: userID})
+		if err != nil {
+			fatalRPC("GetSession after StopStrategy", err)
+		}
+		value := strings.ToLower(strings.TrimSpace(resp.GetSession().GetStatus()))
+		if terminalSessionStatus(value) {
+			return value
+		}
+		select {
+		case <-ctx.Done():
+			fatalf("session did not become terminal after StopStrategy")
+		case <-ticker.C:
+		}
+	}
+}
+
+func terminalSessionStatus(value string) bool {
+	switch value {
+	case "completed", "finished", "failed", "stopped", "stop_failed", "recoverable":
+		return true
+	default:
+		return false
 	}
 }
 
