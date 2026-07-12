@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-11
 
-**Status:** Approved for implementation
+**Status:** Approved; implementation contract amended 2026-07-12
 
 ## Goal
 
@@ -106,8 +106,10 @@ For runtime `<runtime_id>`, control-panel creates and mounts:
 
 ```text
 <output_dir>/runtimes/<runtime_id>/
+├── finalization.json
 ├── go/
-└── python/
+├── python/
+└── coverage-manifest.json
 ```
 
 The container sees the runtime root at `/coverage`. Docker arguments include:
@@ -155,20 +157,47 @@ flow and exits normally. Worker restart changes from immediate kill to:
 3. force-kill only if the worker does not exit;
 4. wait for process cleanup before replacing in-memory ownership.
 
-The runtime-agent gains bounded shutdown of all unique active workers. Aliased
-session IDs that refer to one process are stopped once. Worker shutdown happens
-before the worker IPC gRPC server is gracefully stopped, preventing an active
-Connect stream from blocking runtime-agent shutdown indefinitely.
+The runtime-agent closes worker admission before shutdown, drains starts already
+admitted within the shared deadline, and prevents a timed-out start from
+launching later. It stops unique worker generations concurrently; aliases for
+one generation are stopped once, while PID reuse cannot merge two generations.
+Worker shutdown happens before the worker IPC gRPC server is gracefully stopped.
 
-When runtime-agent receives SIGINT or SIGTERM in an instrumented build, it
-snapshots Go counters to `GOCOVERDIR` before shutdown. Calling the snapshot path
-in a normal, uninstrumented image is disabled and has no effect.
+An instrumented boot atomically replaces any prior marker with
+`finalization.json` in `running` state as soon as the trusted coverage root and
+runtime identity are known. On SIGINT/SIGTERM the order is:
+
+1. close admission and stop/reap workers within one shared bound;
+2. snapshot Go counters into `go/`;
+3. atomically publish the final marker;
+4. gracefully stop worker IPC, with a bounded forced fallback.
+
+The schema-1 marker contains only these fields:
+
+```json
+{
+  "schema_version": 1,
+  "runtime_id": "rt-123",
+  "boot_id": "opaque-random-id",
+  "state": "running|complete|incomplete",
+  "worker_shutdown": "pending|ok|error|forced",
+  "forced_workers": 0,
+  "go_snapshot": "pending|ok|error",
+  "completed_at": "RFC3339 timestamp, final states only"
+}
+```
+
+`complete` requires worker shutdown `ok`, zero forced workers, and Go snapshot
+`ok`. Raw errors, credentials, addresses, and strategy content are never written
+to this marker. A normal uninstrumented image creates no marker or snapshot.
 
 ## Container Cleanup
 
 Normal Docker provisioning remains unchanged when coverage is disabled.
 
-For coverage containers, deprovisioning performs:
+Cleanup behavior is selected from the actual container's persisted coverage
+label, not from the current process configuration. For a coverage container,
+deprovisioning performs:
 
 1. `docker stop --time <configured-seconds> <handle>`;
 2. bounded worker and runtime-agent shutdown, allowing both languages to flush;
@@ -179,9 +208,12 @@ partial startup cleanup all retain existing service semantics. A stop failure
 does not prevent forced removal, and both failures are reported without exposing
 credentials.
 
-At census finalization, coverage-labeled hosted containers are stopped before
-Go/Python reports are merged. This is required because SIGKILL cannot be made
-reliably flush either runtime.
+At census finalization, Census selects only containers carrying both
+`hushine.runtime.coverage=true` and the active run's exact
+`hushine.runtime.coverage_run_id`. It stops them with the configured bound and
+waits briefly for their marker to leave `running`; it does not remove them.
+control-panel remains the sole removal owner. Containers from other runs are
+never touched.
 
 ## Reporting
 
@@ -201,9 +233,15 @@ coverage report
 coverage json
 ```
 
-The census run records a per-runtime manifest and both per-runtime and combined
-reports. Missing output is an explicit failed/incomplete coverage subject, not
-silently treated as zero execution.
+The census run records `coverage-manifest.json` per runtime and preserves the
+ordered `hosted-runtime-coverage-summary.json`. Missing, running, malformed,
+incomplete, or forced finalization evidence makes the runtime `incomplete` even
+when mergeable files exist.
+
+Only runtimes whose finalization, Go, and Python statuses are all `ok` are
+included in cross-runtime reports under `runtime-agent/combined/`. The adjacent
+`hosted-runtime-coverage-combined-summary.json` lists included and excluded
+runtime IDs with safe reasons. Raw per-runtime Go and Python shards are retained.
 
 ## Error Handling and Safety
 
@@ -214,9 +252,8 @@ silently treated as zero execution.
   addresses are forwarded into hosted runtimes.
 - Credential/TLS environment behavior stays unchanged and diagnostics remain
   redacted.
-- A container or process that reaches SIGKILL may have incomplete last-interval
-  counters; the report marks that runtime incomplete when finalization evidence
-  is absent.
+- A container or process that reaches SIGKILL is incomplete: missing evidence,
+  a forced worker count, or a failed snapshot can never be reported as `ok`.
 - Coverage directories are never deleted automatically with the container.
 
 ## Verification
@@ -246,8 +283,10 @@ silently treated as zero execution.
 - assert EndRuntime rejects the active session with `AlreadyExists`;
 - stop the session with `STOP_ACTION_STOP_ONLY`, require exact `stopped` state,
   then run a second session with a different ID to prove worker recreation;
-- stop the second session, then EndRuntime and require Docker SIGTERM, exit 0,
-  and destroy events;
+- require Preview profile exactly `backtest`, exactly one declared input, no
+  failures, and both support/readiness flags;
+- stop the second session, then EndRuntime and require an exact complete schema-1
+  marker plus ordered Docker `kill(signal=15) -> die(exitCode=0) -> destroy`;
 - verify valid Go and Python reports can be generated from mounted output;
 - verify the complete hosted path still registers and communicates solely over
   RuntimeChannel.

@@ -19,6 +19,28 @@
 - Runtime IDs may never escape the configured coverage root.
 - All implementation uses the existing `cleanup/medium-baseline-20260710` worktree and preserves unrelated dirty work.
 
+## Current Contract Correction (2026-07-12)
+
+This is a dated implementation plan. The following contract supersedes earlier
+intermediate snippets below where they differ:
+
+- runtime-agent writes a fresh schema-1 `finalization.json` in `running` state
+  immediately after the trusted coverage root and runtime identity are known;
+- shutdown order is worker admission close/drain, bounded concurrent worker
+  stop/reap, Go snapshot, final marker, then bounded worker-IPC shutdown;
+- `complete` requires worker shutdown `ok`, `forced_workers=0`, and Go snapshot
+  `ok`; missing/running/malformed/incomplete evidence is never reported `ok`;
+- control-panel decides stop-first cleanup from the actual container label and
+  keeps inspect/stop/remove failures visible within its declared cleanup bound;
+- Census stops only coverage containers with the active run's exact two labels,
+  never removes them, writes a per-runtime manifest, and combines only runtimes
+  whose finalization, Go, and Python statuses are all `ok`;
+- combined output lives under `coverage/runtime-agent/combined/`, with inclusion
+  and exclusion reasons in
+  `hosted-runtime-coverage-combined-summary.json`;
+- the strict smoke requires exact backtest Preview semantics, a complete marker,
+  and ordered `kill(15) -> die(0) -> destroy` lifecycle evidence.
+
 ---
 
 ## File Structure
@@ -64,7 +86,7 @@
 
 **Interfaces:**
 - Produces: `func (m *WorkerManager) StopAll(ctx context.Context, timeout time.Duration) error`
-- Produces: `func requestWorkerStop(process *os.Process) error`, selected by platform build tags.
+- Produces: `func requestWorkerStop(process *os.Process) (forced bool, err error)`, selected by platform build tags.
 - Preserves: `StopSessionWorker(ctx, sessionID, timeout)` semantics, adding TERM-first behavior and force-kill fallback.
 
 - [ ] **Step 1: Add failing lifecycle tests**
@@ -99,19 +121,25 @@ POSIX helper:
 
 ```go
 //go:build !windows
-func requestWorkerStop(process *os.Process) error { return process.Signal(syscall.SIGTERM) }
+func requestWorkerStop(process *os.Process) (bool, error) {
+    return false, process.Signal(syscall.SIGTERM)
+}
 ```
 
 Windows helper:
 
 ```go
 //go:build windows
-func requestWorkerStop(process *os.Process) error { return process.Kill() }
+func requestWorkerStop(process *os.Process) (bool, error) {
+    return true, process.Kill()
+}
 ```
 
 Change `StopSessionWorker` to request stop, wait up to the supplied timeout,
-then call `Kill` and wait. Implement `StopAll` by taking a snapshot of active
-workers, deduplicating by PID, and joining errors with `errors.Join`.
+then call `Kill` and wait only within the remaining bound. Implement `StopAll`
+by taking a snapshot of active worker-generation pointers, deduplicating aliases
+by pointer, stopping unique generations concurrently on one shared context, and
+joining errors with `errors.Join`. Numeric PID is never a lifetime identity.
 
 - [ ] **Step 4: Run focused and cross-platform tests**
 
@@ -177,15 +205,15 @@ child for snapshots. Do not pass arbitrary inherited coverage variables into
 the worker environment. SIGTERM handling comes from the coverage image's
 `.coveragerc` (`sigterm = true`); `coverage run` has no `--sigterm` option.
 
-On context cancellation:
+On context cancellation, the effective implementation order is:
 
 ```go
-if coverageRoot != "" {
-    _ = runtimeagent.WriteGoCoverageSnapshot(filepath.Join(coverageRoot, "go"))
-}
 shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 defer cancel()
-_ = workerManager.StopAll(shutdownCtx, 5*time.Second)
+workerErr := workerManager.StopAll(shutdownCtx, 5*time.Second)
+snapshotErr := runtimeagent.WriteGoCoverageSnapshot(filepath.Join(coverageRoot, "go"))
+// Atomically write complete only when workerErr == nil, forced count is zero,
+// and snapshotErr == nil; otherwise write incomplete.
 ```
 
 Stop workers before bounded gRPC graceful shutdown; call `grpcServer.Stop()` if
@@ -406,7 +434,9 @@ git commit -m "feat: persist hosted runtime coverage"
 
 **Interfaces:**
 - Consumes: `${RUN_DIR}/coverage/runtime-agent/runtimes/rt-123/{go,python}` for each discovered runtime directory.
-- Produces: per-runtime `go.cover.out`, Go functions, Python JSON/report, and `hosted-runtime-coverage-summary.json`.
+- Produces: per-runtime `coverage-manifest.json`, Go/Python reports, ordered
+  `hosted-runtime-coverage-summary.json`, `combined/` reports, and
+  `hosted-runtime-coverage-combined-summary.json`.
 
 - [ ] **Step 1: Add failing merge/missing-output tests**
 
@@ -430,8 +460,10 @@ Expected: FAIL because hosted runtime discovery/merge does not exist.
 
 - [ ] **Step 3: Implement discovery, merge, and startup propagation**
 
-Model runtime-agent as a Go subject in census config. Add deterministic discovery
-and language-specific collectors. Update the instrumented stack launcher to set:
+Model runtime-agent as a Go subject in census config. Add deterministic discovery,
+schema-1 finalization gating, active-run container stop, per-runtime manifests,
+and language-specific/per-run combined collectors. Update the instrumented stack
+launcher to set:
 
 ```text
 RUNTIME_COVERAGE_ENABLED=true
@@ -478,13 +510,14 @@ paths in the smoke report rather than staging unrelated repositories.
 The script must require an absolute output directory, verify the coverage image,
 create a unique runtime output directory, start a coverage container with a
 real RuntimeChannel credential supplied by the existing smoke harness, require
-a strict Preview result, run an active worker, prove EndRuntime rejects that
+a strict Preview result (`profile=backtest`, supported/ok, no failures, exactly
+one declared input), run an active worker, prove EndRuntime rejects that
 active session with `AlreadyExists`, stop it with `STOP_ACTION_STOP_ONLY` and
 require exact `stopped` state, then run and stop a second distinct session to
 prove worker recreation. End the runtime through control-panel, require exact
-`cancelled` state plus Docker SIGTERM, exit 0, and destroy events before
-executing Go/Python report commands. It must trap ownership-checked cleanup and
-redact credentials.
+`cancelled` state, exact complete schema-1 finalization, and ordered Docker
+SIGTERM, exit 0, and destroy events before executing Go/Python report commands.
+It must trap ownership-checked cleanup and redact credentials.
 
 - [ ] **Step 2: Run repository-level verification before Docker**
 
@@ -525,8 +558,8 @@ hushine-deploy/scripts/smoke_hosted_runtime_coverage.sh \
 Expected: runtime registers through RuntimeChannel; strict Preview succeeds;
 EndRuntime rejects the first active session; both `STOP_ACTION_STOP_ONLY`
 requests persist exact `stopped` sessions; the second session has a new ID;
-final runtime state is exactly `cancelled`; the runtime container records
-SIGTERM, exit 0, and destroy; Go `covdata textfmt` succeeds; Python `coverage
+final runtime state is exactly `cancelled`; finalization is exactly complete;
+the runtime container records ordered SIGTERM, exit 0, and destroy; Go `covdata textfmt` succeeds; Python `coverage
 combine` succeeds; and Docker has no leftover smoke container.
 
 - [ ] **Step 5: Verify the manual testing stack remains ready**

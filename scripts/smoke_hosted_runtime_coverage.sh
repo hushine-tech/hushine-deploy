@@ -319,6 +319,27 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 
+FINALIZATION_FILE="${RUNTIME_ROOT}/finalization.json"
+if [[ ! -f "${FINALIZATION_FILE}" || -L "${FINALIZATION_FILE}" ]]; then
+  echo "runtime coverage finalization marker is missing or unsafe" >&2
+  exit 1
+fi
+if ! jq -e --arg runtime_id "${RUNTIME_ID}" '
+  type == "object"
+  and (keys == ["boot_id", "completed_at", "forced_workers", "go_snapshot", "runtime_id", "schema_version", "state", "worker_shutdown"])
+  and .schema_version == 1
+  and .runtime_id == $runtime_id
+  and (.boot_id | type == "string" and length > 0)
+  and .state == "complete"
+  and .worker_shutdown == "ok"
+  and .forced_workers == 0
+  and .go_snapshot == "ok"
+  and (.completed_at | type == "string" and length > 0)
+' "${FINALIZATION_FILE}" >/dev/null; then
+  echo "runtime coverage finalization marker is not complete" >&2
+  exit 1
+fi
+
 EVENTS_FILE="${RUNTIME_ROOT}/docker-events.jsonl"
 # Docker can publish the destroy event just after container disappearance.
 # A near-future Unix boundary lets the event stream include that final record.
@@ -326,10 +347,17 @@ EVENT_UNTIL="$(( $(date +%s) + 2 ))"
 docker events --since "${EVENT_SINCE}" --until "${EVENT_UNTIL}" --filter "container=${CONTAINER_ID}" --format '{{json .}}' \
   | jq -c '{time:.time,action:.Action,id:.Actor.ID,image:(.Actor.Attributes.image // null),name:(.Actor.Attributes.name // null),runtime_id:(.Actor.Attributes["hushine.runtime.runtime_id"] // null),user_id:(.Actor.Attributes["hushine.runtime.user_id"] // null),coverage:(.Actor.Attributes["hushine.runtime.coverage"] // null),coverage_run_id:(.Actor.Attributes["hushine.runtime.coverage_run_id"] // null),signal:(.Actor.Attributes.signal // null),exitCode:(.Actor.Attributes.exitCode // null)}' \
   >"${EVENTS_FILE}"
-if ! jq -e 'select(.action == "kill" and .signal == "15")' "${EVENTS_FILE}" >/dev/null \
-  || ! jq -e 'select(.action == "die" and .exitCode == "0")' "${EVENTS_FILE}" >/dev/null \
-  || ! jq -e 'select(.action == "destroy")' "${EVENTS_FILE}" >/dev/null; then
-  echo "graceful Docker stop/finalization events are incomplete" >&2
+if ! jq -s -e '
+  [
+    .[]
+    | select(.action == "kill" or .action == "die" or .action == "destroy")
+    | if .action == "kill" then "kill:\(.signal)"
+      elif .action == "die" then "die:\(.exitCode)"
+      else "destroy"
+      end
+  ] == ["kill:15", "die:0", "destroy"]
+' "${EVENTS_FILE}" >/dev/null; then
+  echo "graceful Docker lifecycle order is invalid" >&2
   exit 1
 fi
 

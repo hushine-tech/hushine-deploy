@@ -56,7 +56,7 @@ func main() {
 		if err != nil {
 			fatalRPC("PreviewRunStrategy", err)
 		}
-		if !resp.GetSupported() || !resp.GetOk() || len(resp.GetFailures()) != 0 || len(resp.GetDeclaredInputs()) == 0 {
+		if !previewReady(resp) {
 			fatalf(
 				"PreviewRunStrategy preflight was not ready: profile=%s supported=%t ok=%t failure_count=%d declared_input_count=%d",
 				resp.GetProfile(),
@@ -163,6 +163,15 @@ func main() {
 	default:
 		fatalf("-action must be preview, run, expect-end-blocked, stop, or end")
 	}
+}
+
+func previewReady(resp *strategyv1.PreviewRunStrategyResponse) bool {
+	return resp != nil &&
+		resp.GetProfile() == "backtest" &&
+		resp.GetSupported() &&
+		resp.GetOk() &&
+		len(resp.GetFailures()) == 0 &&
+		len(resp.GetDeclaredInputs()) == 1
 }
 
 func waitSessionTerminal(ctx context.Context, addr string, userID int64, sessionID string) string {
