@@ -318,7 +318,9 @@ for attempt in $(seq 1 30); do
 done
 
 EVENTS_FILE="${RUNTIME_ROOT}/docker-events.jsonl"
-EVENT_UNTIL="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Docker can publish the destroy event just after container disappearance.
+# A near-future Unix boundary lets the event stream include that final record.
+EVENT_UNTIL="$(( $(date +%s) + 2 ))"
 docker events --since "${EVENT_SINCE}" --until "${EVENT_UNTIL}" --filter "container=${CONTAINER_ID}" --format '{{json .}}' \
   | jq -c '{time:.time,action:.Action,id:.Actor.ID,image:(.Actor.Attributes.image // null),name:(.Actor.Attributes.name // null),runtime_id:(.Actor.Attributes["hushine.runtime.runtime_id"] // null),user_id:(.Actor.Attributes["hushine.runtime.user_id"] // null),coverage:(.Actor.Attributes["hushine.runtime.coverage"] // null),coverage_run_id:(.Actor.Attributes["hushine.runtime.coverage_run_id"] // null),signal:(.Actor.Attributes.signal // null),exitCode:(.Actor.Attributes.exitCode // null)}' \
   >"${EVENTS_FILE}"
