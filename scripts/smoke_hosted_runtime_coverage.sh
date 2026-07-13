@@ -64,6 +64,8 @@ RUNTIME_ID=""
 CONTAINER_NAME=""
 CONTAINER_ID=""
 RUNTIME_ENDED=0
+SMOKE_WORK_ROOT=""
+HELPER_BIN=""
 EVENT_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 end_runtime() {
@@ -72,7 +74,7 @@ end_runtime() {
   fi
   if ! (
     cd "${SOURCE_ROOT}/control-panel-service"
-    go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+    "${HELPER_BIN}" \
       -action end \
       -control-panel-addr "${CONTROL_PANEL_ADDR}" \
       -user "${USER_ID}" \
@@ -82,6 +84,22 @@ end_runtime() {
     return 1
   fi
   RUNTIME_ENDED=1
+}
+
+stop_running_sessions() {
+  if [[ -z "${RUNTIME_ID}" || "${RUNTIME_ENDED}" -eq 1 ]]; then
+    return 0
+  fi
+  (
+    cd "${SOURCE_ROOT}/control-panel-service"
+    "${HELPER_BIN}" \
+      -action stop-running \
+      -control-panel-addr "${CONTROL_PANEL_ADDR}" \
+      -portfolio-addr "${PORTFOLIO_ADDR}" \
+      -user "${USER_ID}" \
+      -runtime "${RUNTIME_ID}" \
+      -timeout 30s
+  )
 }
 
 owned_smoke_container() {
@@ -116,11 +134,28 @@ fallback_cleanup_container() {
   return "${fallback_failed}"
 }
 
+cleanup_local_work() {
+  if [[ -z "${SMOKE_WORK_ROOT}" ]]; then
+    return 0
+  fi
+  if [[ ! -d "${SMOKE_WORK_ROOT}" || -L "${SMOKE_WORK_ROOT}" || "${HELPER_BIN}" != "${SMOKE_WORK_ROOT}/smoke-helper" ]]; then
+    echo "refusing to remove unexpected smoke work root" >&2
+    return 1
+  fi
+  rm -rf -- "${SMOKE_WORK_ROOT}"
+  SMOKE_WORK_ROOT=""
+  HELPER_BIN=""
+}
+
 cleanup() {
   local rc="$?"
   local cleanup_failed=0
   trap - EXIT
   if [[ -n "${RUNTIME_ID}" && "${RUNTIME_ENDED}" -eq 0 ]]; then
+    echo "→ cleanup: stop running sessions for ${RUNTIME_ID}" >&2
+    if ! stop_running_sessions >&2; then
+      cleanup_failed=1
+    fi
     echo "→ cleanup: EndRuntime ${RUNTIME_ID}" >&2
     if ! end_runtime >&2; then
       cleanup_failed=1
@@ -131,6 +166,9 @@ cleanup() {
       cleanup_failed=1
     fi
   fi
+  if ! cleanup_local_work; then
+    cleanup_failed=1
+  fi
   if [[ "${cleanup_failed}" -ne 0 ]]; then
     echo "cleanup failed; owned runtime may require operator intervention: ${RUNTIME_ID}" >&2
     if [[ "${rc}" -eq 0 ]]; then
@@ -140,6 +178,15 @@ cleanup() {
   exit "${rc}"
 }
 trap cleanup EXIT
+
+SMOKE_WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/hushine-coverage-smoke.XXXXXX")"
+chmod 0700 "${SMOKE_WORK_ROOT}"
+HELPER_BIN="${SMOKE_WORK_ROOT}/smoke-helper"
+(
+  cd "${SOURCE_ROOT}/control-panel-service"
+  go build -o "${HELPER_BIN}" "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go"
+)
+chmod 0700 "${HELPER_BIN}"
 
 SMOKE_NAME="coverage-smoke-$(date -u +%Y%m%d%H%M%S)-$$"
 echo "→ EnsureHostedRuntime via ${CONTROL_PANEL_ADDR} image=${COVERAGE_IMAGE}"
@@ -215,7 +262,7 @@ echo "container_id=${CONTAINER_ID} image_id=${CONTAINER_IMAGE_ID} coverage_label
 echo "→ PreviewRunStrategy through RuntimeChannel (one-shot Python worker)"
 (
   cd "${SOURCE_ROOT}/control-panel-service"
-  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+  "${HELPER_BIN}" \
     -action preview \
     -control-panel-addr "${CONTROL_PANEL_ADDR}" \
     -portfolio-addr "${PORTFOLIO_ADDR}" \
@@ -230,7 +277,7 @@ echo "→ PreviewRunStrategy through RuntimeChannel (one-shot Python worker)"
 echo "→ RunStrategy through RuntimeChannel (active Python session worker)"
 RUN_ONE_OUTPUT="$({
   cd "${SOURCE_ROOT}/control-panel-service"
-  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+  "${HELPER_BIN}" \
     -action run \
     -control-panel-addr "${CONTROL_PANEL_ADDR}" \
     -portfolio-addr "${PORTFOLIO_ADDR}" \
@@ -251,7 +298,7 @@ echo "${RUN_ONE_OUTPUT}"
 echo "→ assert EndRuntime rejects the active session"
 (
   cd "${SOURCE_ROOT}/control-panel-service"
-  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+  "${HELPER_BIN}" \
     -action expect-end-blocked \
     -control-panel-addr "${CONTROL_PANEL_ADDR}" \
     -user "${USER_ID}" \
@@ -262,7 +309,7 @@ echo "→ assert EndRuntime rejects the active session"
 echo "→ StopStrategy first active worker"
 (
   cd "${SOURCE_ROOT}/control-panel-service"
-  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+  "${HELPER_BIN}" \
     -action stop \
     -control-panel-addr "${CONTROL_PANEL_ADDR}" \
     -portfolio-addr "${PORTFOLIO_ADDR}" \
@@ -275,7 +322,7 @@ echo "→ StopStrategy first active worker"
 echo "→ RunStrategy again to prove worker recreation"
 RUN_TWO_OUTPUT="$({
   cd "${SOURCE_ROOT}/control-panel-service"
-  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+  "${HELPER_BIN}" \
     -action run \
     -control-panel-addr "${CONTROL_PANEL_ADDR}" \
     -portfolio-addr "${PORTFOLIO_ADDR}" \
@@ -296,7 +343,7 @@ echo "${RUN_TWO_OUTPUT}"
 echo "→ StopStrategy recreated worker"
 (
   cd "${SOURCE_ROOT}/control-panel-service"
-  go run "${DEPLOY_ROOT}/scripts/smoke_hosted_runtime_coverage.go" \
+  "${HELPER_BIN}" \
     -action stop \
     -control-panel-addr "${CONTROL_PANEL_ADDR}" \
     -portfolio-addr "${PORTFOLIO_ADDR}" \
@@ -319,6 +366,21 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 
+REPORT_ROOT="${OUTPUT_ROOT}/smoke-reports/${RUNTIME_ID}"
+echo "→ validate stopped runtime mount and stage Python coverage"
+(
+  cd "${SOURCE_ROOT}/control-panel-service"
+  "${HELPER_BIN}" \
+    -action stage-coverage \
+    -output-root "${OUTPUT_ROOT}" \
+    -runtime-root "${RUNTIME_ROOT}" \
+    -report-root "${REPORT_ROOT}" \
+    -strategy-root "${SOURCE_ROOT}/strategy-service" \
+    -runtime "${RUNTIME_ID}" \
+    -timeout 45s
+)
+PYTHON_INPUT_DIR="${REPORT_ROOT}/python-input"
+
 FINALIZATION_FILE="${RUNTIME_ROOT}/finalization.json"
 if [[ ! -f "${FINALIZATION_FILE}" || -L "${FINALIZATION_FILE}" ]]; then
   echo "runtime coverage finalization marker is missing or unsafe" >&2
@@ -340,7 +402,7 @@ if ! jq -e --arg runtime_id "${RUNTIME_ID}" '
   exit 1
 fi
 
-EVENTS_FILE="${RUNTIME_ROOT}/docker-events.jsonl"
+EVENTS_FILE="${REPORT_ROOT}/docker-events.jsonl"
 # Docker can publish the destroy event just after container disappearance.
 # A near-future Unix boundary lets the event stream include that final record.
 EVENT_UNTIL="$(( $(date +%s) + 2 ))"
@@ -365,25 +427,24 @@ if ! find "${GO_DIR}" -type f -print -quit | grep -q .; then
   echo "Go coverage output is missing: ${GO_DIR}" >&2
   exit 1
 fi
-if ! find "${PYTHON_DIR}" -name '.coverage*' -type f -print -quit | grep -q .; then
-  echo "Python coverage output is missing: ${PYTHON_DIR}" >&2
+if ! find "${PYTHON_INPUT_DIR}" -maxdepth 1 -name '.coverage*' -type f -print -quit | grep -q .; then
+  echo "staged Python coverage output is missing: ${PYTHON_INPUT_DIR}" >&2
   exit 1
 fi
 
-GO_MERGED="${RUNTIME_ROOT}/go-merged"
+GO_MERGED="${REPORT_ROOT}/go-merged"
 generate_go_reports() {
-  rm -rf "${GO_MERGED}"
   mkdir -p "${GO_MERGED}"
   (
     cd "${SOURCE_ROOT}/strategy-service"
     go tool covdata merge -i="${GO_DIR}" -o="${GO_MERGED}"
-    go tool covdata textfmt -i="${GO_MERGED}" -o="${RUNTIME_ROOT}/go.cover.out"
-    go tool cover -func="${RUNTIME_ROOT}/go.cover.out" >"${RUNTIME_ROOT}/go-functions.txt"
+    go tool covdata textfmt -i="${GO_MERGED}" -o="${REPORT_ROOT}/go.cover.out"
+    go tool cover -func="${REPORT_ROOT}/go.cover.out" >"${REPORT_ROOT}/go-functions.txt"
   )
 }
 generate_go_reports
 
-PYTHON_RC="${RUNTIME_ROOT}/python-report.coveragerc"
+PYTHON_RC="${REPORT_ROOT}/python-report.coveragerc"
 {
   echo '[run]'
   echo 'source = strategy_service'
@@ -393,39 +454,32 @@ PYTHON_RC="${RUNTIME_ROOT}/python-report.coveragerc"
   printf '    %s\n' "${SOURCE_ROOT}/strategy-service/strategy_service"
   echo '    /app/strategy-service/strategy_service'
 } >"${PYTHON_RC}"
-export COVERAGE_FILE="${PYTHON_DIR}/.coverage"
+export COVERAGE_FILE="${PYTHON_INPUT_DIR}/.coverage"
 export COVERAGE_RCFILE="${PYTHON_RC}"
-PYTHON_VALIDATION_LOG="${RUNTIME_ROOT}/python-data-validation-output.txt"
-: >"${PYTHON_VALIDATION_LOG}"
-while IFS= read -r -d '' shard; do
-  if ! (
-    cd "${SOURCE_ROOT}/strategy-service"
-    COVERAGE_FILE="${shard}" uv run --frozen --extra coverage coverage debug data
-  ) >>"${PYTHON_VALIDATION_LOG}" 2>&1; then
-    echo "invalid Python coverage shard: $(basename "${shard}")" >&2
-    exit 1
-  fi
-done < <(find "${PYTHON_DIR}" -maxdepth 1 -name '.coverage*' -type f -print0)
 (
   cd "${SOURCE_ROOT}/strategy-service"
-  uv run --frozen --extra coverage coverage combine --keep "${PYTHON_DIR}"
-  uv run --frozen --extra coverage coverage report --keep-combined >"${RUNTIME_ROOT}/python-report.txt"
-  uv run --frozen --extra coverage coverage json --keep-combined -o "${RUNTIME_ROOT}/python-coverage.json"
+  uv run --frozen --extra coverage coverage combine --keep "${PYTHON_INPUT_DIR}"
+  uv run --frozen --extra coverage coverage report --keep-combined >"${REPORT_ROOT}/python-report.txt"
+  uv run --frozen --extra coverage coverage json --keep-combined -o "${REPORT_ROOT}/python-coverage.json"
 )
 
 for report in \
-  "${RUNTIME_ROOT}/go.cover.out" \
-  "${RUNTIME_ROOT}/go-functions.txt" \
-  "${RUNTIME_ROOT}/python-report.txt" \
-  "${RUNTIME_ROOT}/python-coverage.json"; do
+  "${REPORT_ROOT}/go.cover.out" \
+  "${REPORT_ROOT}/go-functions.txt" \
+  "${REPORT_ROOT}/python-report.txt" \
+  "${REPORT_ROOT}/python-coverage.json"; do
   if [[ ! -s "${report}" ]]; then
     echo "coverage report is missing or empty: ${report}" >&2
     exit 1
   fi
 done
 
+if ! cleanup_local_work; then
+  exit 1
+fi
 trap - EXIT
 echo "✓ hosted runtime coverage smoke completed"
 echo "runtime_root=${RUNTIME_ROOT}"
-echo "go_report=${RUNTIME_ROOT}/go.cover.out"
-echo "python_report=${RUNTIME_ROOT}/python-coverage.json"
+echo "report_root=${REPORT_ROOT}"
+echo "go_report=${REPORT_ROOT}/go.cover.out"
+echo "python_report=${REPORT_ROOT}/python-coverage.json"

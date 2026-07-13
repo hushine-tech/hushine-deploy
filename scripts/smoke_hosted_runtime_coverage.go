@@ -4,7 +4,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -12,6 +16,7 @@ import (
 	controlpanelv1 "github.com/hushine-tech/control-panel-service/gen/controlpanelv1"
 	portfoliov1 "github.com/hushine-tech/core-service/gen/portfoliov1"
 	strategyv1 "github.com/hushine-tech/strategy-service/gen/strategyv1"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -19,11 +24,15 @@ import (
 )
 
 func main() {
-	action := flag.String("action", "", "preview, run, expect-end-blocked, stop, stop-running, or end")
+	action := flag.String("action", "", "preview, run, expect-end-blocked, stop, stop-running, end, or stage-coverage")
 	controlPanelAddr := flag.String("control-panel-addr", "127.0.0.1:50054", "control-panel gRPC address")
 	portfolioAddr := flag.String("portfolio-addr", "127.0.0.1:50051", "portfolio.v1 gRPC address")
 	userID := flag.Int64("user", 0, "runtime owner user ID")
 	runtimeID := flag.String("runtime", "", "runtime ID")
+	outputRoot := flag.String("output-root", "", "trusted hosted coverage output root")
+	runtimeRoot := flag.String("runtime-root", "", "stopped container's runtime coverage mount")
+	reportRoot := flag.String("report-root", "", "operator-owned host-only report root")
+	strategyRoot := flag.String("strategy-root", "", "strategy-service source root for locked coverage validation")
 	portfolioID := flag.Int64("portfolio", 0, "portfolio ID; zero selects the first owned portfolio with an active strategy")
 	sessionID := flag.String("session", "", "strategy session ID")
 	startTimeMs := flag.Int64("start-time-ms", 1780272000000, "backtest start time")
@@ -31,11 +40,36 @@ func main() {
 	timeout := flag.Duration("timeout", 30*time.Second, "RPC timeout")
 	flag.Parse()
 
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	if strings.TrimSpace(*action) == "stage-coverage" {
+		if strings.TrimSpace(*runtimeID) == "" {
+			fatalf("required for stage-coverage: -runtime")
+		}
+		if err := requireTrustedDirectory(*strategyRoot); err != nil {
+			fatalf("stage runtime coverage: invalid strategy root")
+		}
+		result, err := stageRuntimeCoverage(ctx, coverageStageConfig{
+			OutputRoot:  *outputRoot,
+			RuntimeRoot: *runtimeRoot,
+			ReportRoot:  *reportRoot,
+			RuntimeID:   strings.TrimSpace(*runtimeID),
+		}, lockedCoverageDebugRunner(*strategyRoot))
+		if err != nil {
+			fatalf("stage runtime coverage: %v", err)
+		}
+		fmt.Printf(
+			"report_root=%s python_input_dir=%s validation_log=%s shard_count=%d\n",
+			*reportRoot,
+			result.PythonInputDir,
+			result.ValidationLog,
+			len(result.PythonShardNames),
+		)
+		return
+	}
 	if *userID <= 0 || strings.TrimSpace(*runtimeID) == "" {
 		fatalf("required: -user and -runtime")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
 
 	controlConn, err := grpc.NewClient(*controlPanelAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -165,8 +199,288 @@ func main() {
 			runtime.GetCleanupStatus(),
 		)
 	default:
-		fatalf("-action must be preview, run, expect-end-blocked, stop, stop-running, or end")
+		fatalf("-action must be preview, run, expect-end-blocked, stop, stop-running, end, or stage-coverage")
 	}
+}
+
+type coverageStageConfig struct {
+	OutputRoot  string
+	RuntimeRoot string
+	ReportRoot  string
+	RuntimeID   string
+}
+
+type coverageStageResult struct {
+	PythonInputDir   string
+	ValidationLog    string
+	PythonShardNames []string
+}
+
+type coverageDebugRunner func(context.Context, string, io.Writer) error
+
+type coverageShard struct {
+	path string
+	info fs.FileInfo
+}
+
+func stageRuntimeCoverage(
+	ctx context.Context,
+	cfg coverageStageConfig,
+	validate coverageDebugRunner,
+) (coverageStageResult, error) {
+	var result coverageStageResult
+	if validate == nil {
+		return result, fmt.Errorf("locked coverage validator is required")
+	}
+	outputRoot, err := exactAbsolutePath(cfg.OutputRoot, "output root")
+	if err != nil {
+		return result, err
+	}
+	runtimeRoot, err := exactAbsolutePath(cfg.RuntimeRoot, "runtime root")
+	if err != nil {
+		return result, err
+	}
+	reportRoot, err := exactAbsolutePath(cfg.ReportRoot, "report root")
+	if err != nil {
+		return result, err
+	}
+	runtimeID := strings.TrimSpace(cfg.RuntimeID)
+	if runtimeID == "" || strings.ContainsAny(runtimeID, `/\\`) || runtimeID == "." || runtimeID == ".." {
+		return result, fmt.Errorf("runtime_id is not a safe path component")
+	}
+	if runtimeRoot != filepath.Join(outputRoot, "runtimes", runtimeID) {
+		return result, fmt.Errorf("runtime root does not match the owned output path")
+	}
+	if reportRoot != filepath.Join(outputRoot, "smoke-reports", runtimeID) {
+		return result, fmt.Errorf("report root does not match the owned host-only path")
+	}
+	for _, dir := range []string{outputRoot, filepath.Join(outputRoot, "runtimes"), runtimeRoot, filepath.Join(runtimeRoot, "go"), filepath.Join(runtimeRoot, "python")} {
+		if err := requireTrustedDirectory(dir); err != nil {
+			return result, err
+		}
+	}
+
+	pythonRoot := filepath.Join(runtimeRoot, "python")
+	shards := make([]coverageShard, 0)
+	err = filepath.WalkDir(runtimeRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, infoErr := os.Lstat(path)
+		if infoErr != nil {
+			return infoErr
+		}
+		mode := info.Mode()
+		coverageName := strings.HasPrefix(entry.Name(), ".coverage")
+		if coverageName && !mode.IsRegular() {
+			return fmt.Errorf("coverage shard name is not a regular file: %s", entry.Name())
+		}
+		if mode&os.ModeSymlink != 0 || (!mode.IsDir() && !mode.IsRegular()) {
+			return fmt.Errorf("runtime coverage tree contains a symlink or special file")
+		}
+		if !coverageName || !mode.IsRegular() {
+			return nil
+		}
+		if filepath.Dir(path) != pythonRoot {
+			return fmt.Errorf("coverage shard is outside the Python raw directory")
+		}
+		shards = append(shards, coverageShard{path: path, info: info})
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	if len(shards) == 0 {
+		return result, fmt.Errorf("Python coverage output is missing")
+	}
+	sort.Slice(shards, func(i, j int) bool {
+		return filepath.Base(shards[i].path) < filepath.Base(shards[j].path)
+	})
+
+	reportsRoot := filepath.Dir(reportRoot)
+	if err := createOrSecureOwnedDirectory(reportsRoot); err != nil {
+		return result, err
+	}
+	if err := createFreshOwnedDirectory(reportRoot); err != nil {
+		return result, fmt.Errorf("create fresh report root: %w", err)
+	}
+	result.PythonInputDir = filepath.Join(reportRoot, "python-input")
+	if err := createFreshOwnedDirectory(result.PythonInputDir); err != nil {
+		return result, fmt.Errorf("create Python input staging: %w", err)
+	}
+	result.ValidationLog = filepath.Join(reportRoot, "python-data-validation-output.txt")
+	validationLog, err := os.OpenFile(result.ValidationLog, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return result, fmt.Errorf("create Python validation log: %w", err)
+	}
+	defer validationLog.Close()
+	if err := validationLog.Chmod(0o600); err != nil {
+		return result, fmt.Errorf("secure Python validation log: %w", err)
+	}
+
+	for _, shard := range shards {
+		name := filepath.Base(shard.path)
+		destination := filepath.Join(result.PythonInputDir, name)
+		if err := copyRegularFileIdentityStable(shard.path, shard.info, destination); err != nil {
+			return result, err
+		}
+		result.PythonShardNames = append(result.PythonShardNames, name)
+	}
+	for _, name := range result.PythonShardNames {
+		if _, err := fmt.Fprintf(validationLog, "== %s ==\n", name); err != nil {
+			return result, fmt.Errorf("write Python validation log: %w", err)
+		}
+		staged := filepath.Join(result.PythonInputDir, name)
+		if err := validate(ctx, staged, validationLog); err != nil {
+			_ = validationLog.Sync()
+			return result, fmt.Errorf("validate Python coverage shard %s: %w", name, err)
+		}
+	}
+	if err := validationLog.Sync(); err != nil {
+		return result, fmt.Errorf("sync Python validation log: %w", err)
+	}
+	return result, nil
+}
+
+func exactAbsolutePath(value, label string) (string, error) {
+	if strings.TrimSpace(value) != value || !filepath.IsAbs(value) || filepath.Clean(value) != value {
+		return "", fmt.Errorf("%s must be an absolute cleaned path", label)
+	}
+	return value, nil
+}
+
+func requireTrustedDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect trusted directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("trusted path is not a real directory")
+	}
+	return nil
+}
+
+func createOrSecureOwnedDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		if err := createFreshOwnedDirectory(path); err != nil {
+			return fmt.Errorf("create operator report directory: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect operator report directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("operator report path is not a real directory")
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("secure operator report directory: %w", err)
+	}
+	return nil
+}
+
+func createFreshOwnedDirectory(path string) error {
+	if err := os.Mkdir(path, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
+}
+
+func copyRegularFileIdentityStable(source string, expected fs.FileInfo, destination string) error {
+	before, err := os.Lstat(source)
+	if err != nil {
+		return fmt.Errorf("inspect Python coverage shard before copy: %w", err)
+	}
+	if !stableFileIdentity(expected, before) {
+		return fmt.Errorf("Python coverage shard changed before copy")
+	}
+	inputFD, err := unix.Open(source, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("open Python coverage shard: %w", err)
+	}
+	input := os.NewFile(uintptr(inputFD), source)
+	if input == nil {
+		_ = unix.Close(inputFD)
+		return fmt.Errorf("open Python coverage shard: invalid file descriptor")
+	}
+	defer input.Close()
+	opened, err := input.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect opened Python coverage shard: %w", err)
+	}
+	if !stableFileIdentity(before, opened) {
+		return fmt.Errorf("Python coverage shard was replaced while opening")
+	}
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create staged Python coverage shard: %w", err)
+	}
+	removeOutput := true
+	defer func() {
+		_ = output.Close()
+		if removeOutput {
+			_ = os.Remove(destination)
+		}
+	}()
+	if err := output.Chmod(0o600); err != nil {
+		return fmt.Errorf("secure staged Python coverage shard: %w", err)
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		return fmt.Errorf("copy Python coverage shard: %w", err)
+	}
+	if err := output.Sync(); err != nil {
+		return fmt.Errorf("sync staged Python coverage shard: %w", err)
+	}
+	if err := output.Close(); err != nil {
+		return fmt.Errorf("close staged Python coverage shard: %w", err)
+	}
+	after, err := os.Lstat(source)
+	if err != nil {
+		return fmt.Errorf("inspect Python coverage shard after copy: %w", err)
+	}
+	if !stableFileIdentity(opened, after) {
+		return fmt.Errorf("Python coverage shard changed during copy")
+	}
+	removeOutput = false
+	return nil
+}
+
+func stableFileIdentity(left, right fs.FileInfo) bool {
+	return left != nil && right != nil &&
+		left.Mode().IsRegular() && right.Mode().IsRegular() &&
+		os.SameFile(left, right) &&
+		left.Size() == right.Size() &&
+		left.ModTime().Equal(right.ModTime())
+}
+
+func lockedCoverageDebugRunner(strategyRoot string) coverageDebugRunner {
+	return func(ctx context.Context, shard string, output io.Writer) error {
+		cmd := exec.CommandContext(
+			ctx,
+			"uv", "run", "--frozen", "--extra", "coverage", "coverage", "debug", "data",
+		)
+		cmd.Dir = strategyRoot
+		cmd.Env = environmentWithValue(os.Environ(), "COVERAGE_FILE", shard)
+		cmd.Stdout = output
+		cmd.Stderr = output
+		return cmd.Run()
+	}
+}
+
+func environmentWithValue(env []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			result = append(result, item)
+		}
+	}
+	return append(result, prefix+value)
 }
 
 func previewReady(resp *strategyv1.PreviewRunStrategyResponse) bool {
