@@ -65,6 +65,18 @@ intermediate snippets below where they differ:
   `supported=true`, `ok=true`, zero failures, exactly one declared input, a
   complete marker, and ordered
   `kill(15) -> die(0) -> destroy` lifecycle evidence.
+- Before provisioning, the smoke compiles its control-panel action helper into
+  a fresh mode-`0700` temporary directory. Its 30-second session-stop and
+  45-second runtime/action bounds therefore exclude `go run` compilation. EXIT
+  cleanup always discovers/stops running sessions before calling `EndRuntime`.
+- After stop, the smoke recursively rejects symlinks and special files anywhere
+  in the runtime mount. It uses no-follow, identity-stable copies to stage raw
+  Python shards under the host-only
+  `<OUTPUT_ROOT>/smoke-reports/<runtime_id>/python-input` tree, validates every
+  staged copy with the locked coverage tooling, and admits only validated copies
+  to combine/report. Python validation evidence, Docker events, and all derived
+  Go/Python reports remain under `smoke-reports/<runtime_id>`, not in the
+  container-writable `runtimes/<runtime_id>` bind mount.
 - The previous smoke exposed the invalid shard and drove these corrections. A
   fresh-image smoke and an isolated real Census `session-stop` remain Task 13
   gates; neither is recorded as passed by this plan.
@@ -568,7 +580,17 @@ control-panel, require exact `cancelled` state, exact complete schema-1
 finalization, and ordered Docker
 SIGTERM, exit 0, and destroy events before independently validating every raw
 Python shard with the locked `coverage debug data` command and executing
-Go/Python report commands. It must trap ownership-checked cleanup and redact
+Go/Python report commands. Before provisioning, compile the action helper into
+a fresh mode-`0700` temporary directory so the 30/45-second action timeouts do
+not include `go run` compilation. The ownership-checked EXIT trap must first
+discover and stop running sessions, then call `EndRuntime`, including when a
+RunStrategy response was lost. After stop, recursively reject symlinks and
+special files in the complete runtime mount, copy each Python shard through a
+no-follow identity-stable read into the host-only
+`<OUTPUT_ROOT>/smoke-reports/<runtime_id>/python-input` tree, and validate each
+staged copy with the locked tooling before combine/report. Put validation
+evidence, Docker events, and every derived Go/Python report under that host-only
+report root rather than the container-writable runtime bind mount. Redact all
 credentials.
 
 - [ ] **Step 2: Run repository-level verification before Docker**
@@ -613,8 +635,12 @@ requests persist exact `stopped` sessions; the second session has a new ID;
 final runtime state is exactly `cancelled`; finalization is exactly complete;
 the runtime container records ordered SIGTERM, exit 0, and destroy; Go `covdata
 textfmt` succeeds; every raw Python shard independently passes locked `coverage
-debug data` before Python combine/report; and Docker has no leftover smoke
-container.
+debug data` from its no-follow, identity-stable host-only staged copy before
+Python combine/report; the stopped runtime tree contains no symlink or special
+file; Docker event evidence and all derived Go/Python reports are under
+`<OUTPUT_ROOT>/smoke-reports/<runtime_id>`; and Docker has no leftover smoke
+container. A failed EXIT path must record session stop before `EndRuntime`, and
+neither bounded action may compile the smoke helper.
 
 - [ ] **Step 5: Verify the manual testing stack remains ready**
 

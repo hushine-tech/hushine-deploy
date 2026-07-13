@@ -133,6 +133,37 @@ Each Python worker writes parallel data files beneath `python/`, so multiple
 sessions and worker restarts cannot overwrite each other. Go meta/counter files
 accumulate beneath `go/` and are merged at report time.
 
+The reusable smoke keeps its derived evidence outside that container-writable
+mount. Its host-only layout is:
+
+```text
+<output_dir>/smoke-reports/<runtime_id>/
+├── python-input/
+├── python-data-validation-output.txt
+├── docker-events.jsonl
+├── go-merged/
+├── go.cover.out
+├── go-functions.txt
+├── python-report.txt
+└── python-coverage.json
+```
+
+Before provisioning a runtime, the smoke builds its control-panel action helper
+into a fresh mode-`0700` temporary directory. The later 30-second session-stop
+and 45-second runtime/action bounds therefore measure the RPC work rather than
+an unbounded `go run` compilation. The EXIT trap first discovers and stops any
+running sessions and only then calls `EndRuntime`, which also reconciles a
+session whose RunStrategy response was lost.
+
+After the runtime has stopped, the staging helper recursively rejects every
+symlink and special file anywhere in the runtime mount. It copies each raw
+Python shard into `smoke-reports/<runtime_id>/python-input` using a no-follow
+open plus stable pre/open/post file-identity checks. Each staged copy must then pass
+the locked `uv run --frozen --extra coverage coverage debug data` validation
+before combine/report can use it. Go and Python reports plus the Docker event
+evidence are written only beneath the host-only smoke report root, never into
+the bind mount that the runtime container could write.
+
 ## Runtime and Worker Lifecycle
 
 The current worker environment is intentionally rebuilt from a safe allowlist,
@@ -320,7 +351,15 @@ runtime IDs with safe reasons. Raw per-runtime Go and Python shards are retained
 - stop the second session, then EndRuntime and require an exact complete schema-1
   marker plus ordered Docker `kill(signal=15) -> die(exitCode=0) -> destroy`;
 - independently validate every raw Python shard, then verify valid Go and Python
-  reports can be generated from mounted output;
+  reports can be generated into the host-only
+  `smoke-reports/<runtime_id>/` tree;
+- require the stopped runtime mount to contain only real directories and regular
+  files, stage Python inputs through no-follow identity-stable copies, and keep
+  Python validation, Go/Python reports, and Docker event evidence outside the
+  container-writable bind mount;
+- prove EXIT cleanup stops running sessions before `EndRuntime`, with the smoke
+  action helper precompiled before provisioning so compilation is outside the
+  30/45-second action bounds;
 - verify the complete hosted path still registers and communicates solely over
   RuntimeChannel.
 
