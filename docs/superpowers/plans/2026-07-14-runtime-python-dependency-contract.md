@@ -1709,8 +1709,12 @@ Also assert all of the following:
 - every public/client/transport timeout value rejects booleans, non-numeric
   values, NaN, infinities, zero, negatives, and values greater than 30 seconds
   before creating a directory or process. Finite `int`/`float` values satisfying
-  `0 < timeout_seconds <= 30` are accepted; production uses the fixed 15-second
-  default and shorter values exist only for bounded lifecycle tests;
+  `0 < timeout_seconds <= 30` are accepted; production uses the fixed 30-second
+  default and shorter values exist only for bounded lifecycle tests. A clean
+  wheel-plus-service symlink-venv measurement showed the all-eight-root first
+  invocation exhausting a nominal 15-second budget at the 14-second run
+  deadline after reserving cleanup time, while subsequent cached invocations
+  passed; production therefore does not rely on host page-cache warmth;
 - stdout and stderr are independently capped at 64 KiB while the child runs.
   The parent uses two portable reader threads plus bounded buffers/overflow
   signals (not `selectors` and not an unbounded `communicate`), then on timeout
@@ -1823,7 +1827,7 @@ def probe_strategy_imports(
     *,
     python_invocation_path: str,
     profile: RuntimeProfile | None = None,
-    timeout_seconds: float = 15.0,
+    timeout_seconds: float = 30.0,
 ) -> StrategyDependencyError | None: ...
 
 def _probe_strategy_imports_for_test(
@@ -1831,7 +1835,7 @@ def _probe_strategy_imports_for_test(
     *,
     python_invocation_path: str,
     profile: RuntimeProfile | None = None,
-    timeout_seconds: float = 15.0,
+    timeout_seconds: float = 30.0,
     extra_python_path: tuple[str, ...],
 ) -> StrategyDependencyError | None: ...
 
@@ -1930,7 +1934,7 @@ def probe_import_records(
     *,
     python_invocation_path: str,
     expected_profile: ExpectedProfile,
-    timeout_seconds: float = 15.0,
+    timeout_seconds: float = 30.0,
 ) -> ImportProbeResult: ...
 ~~~
 
