@@ -1608,7 +1608,7 @@ def test_import_initialization_failure_is_distinct(tmp_path):
         "<db>",
         "import requests\nraise AssertionError('user body executed')",
     )
-    result = probe_strategy_imports(
+    result = _probe_strategy_imports_for_test(
         resolved,
         python_invocation_path=sys.executable,
         extra_python_path=(str(tmp_path),),
@@ -1824,7 +1824,15 @@ def probe_strategy_imports(
     python_invocation_path: str,
     profile: RuntimeProfile | None = None,
     timeout_seconds: float = 15.0,
-    extra_python_path: tuple[str, ...] = (),
+) -> StrategyDependencyError | None: ...
+
+def _probe_strategy_imports_for_test(
+    resolved: ResolvedStrategySource,
+    *,
+    python_invocation_path: str,
+    profile: RuntimeProfile | None = None,
+    timeout_seconds: float = 15.0,
+    extra_python_path: tuple[str, ...],
 ) -> StrategyDependencyError | None: ...
 
 def gate_strategy_source(
@@ -1890,6 +1898,19 @@ class ExpectedProfile:
     contract_sha256: str
 
 @dataclass(frozen=True, slots=True)
+class ImportName:
+    name: str
+    asname: str | None
+
+@dataclass(frozen=True, slots=True)
+class ImportRecord:
+    kind: Literal["import", "from"]
+    module: str
+    names: tuple[ImportName, ...]
+    lineno: int
+    col_offset: int
+
+@dataclass(frozen=True, slots=True)
 class ImportProbeResult:
     ok: bool
     code: Literal[
@@ -1913,9 +1934,20 @@ def probe_import_records(
 ) -> ImportProbeResult: ...
 ~~~
 
-`ImportRecord` is an immutable neutral `import`/`from` value, not a Hosted
-source or error type. Protocol codecs remain in the non-public `protocol`
-module and do not expand this adapter surface. The production client has no
+For `kind="import"`, `names` is exactly empty; for `kind="from"`, it is
+non-empty. The collector returns only these exact frozen value types, and the
+public client accepts only them; raw mappings are accepted only by private
+protocol-codec tests. `ImportRecord` is not a Hosted source or error type.
+Protocol codecs remain in the non-public `protocol` module and do not expand
+this adapter surface. Both adapters import the five stable symbols
+`ExpectedProfile`, `ImportRecord`, `ImportProbeResult`,
+`collect_import_records`, and `probe_import_records` directly from the
+`hushine_runtime_import_probe` root package; codecs and test seams are not root
+exports. A successful result is exactly `ok=True`, `code=""`, and
+`requested_module=""`. A failed result is exactly `ok=False` with one non-empty
+stable code; requested-path/import failures name the correlated requested
+module, while transport/protocol/environment failures use the empty module.
+The production client has no
 `extra_python_path` parameter. Hermetic child fixtures use a separately named,
 module-private `_probe_import_records_for_test(..., extra_python_path=...)`
 seam; production code cannot select it, and ordinary calls hard-code the empty
@@ -1938,8 +1970,9 @@ in either high-level module. The existing checker imports of
 wrappers over the neutral transport during this task because the checker is
 outside Task 5's owned paths; they may not retain transport implementation.
 
-`extra_python_path` exists only for hermetic fixture tests; production call
-sites always pass the default empty tuple. Parse the already size-bounded source in the parent and
+`extra_python_path` exists only for hermetic fixture tests through the two
+module-private seams; production functions expose no such argument and encode
+the empty tuple directly. Parse the already size-bounded source in the parent and
 normalize only `ast.Import` and absolute `ast.ImportFrom` nodes into a bounded,
 ordered, first-occurrence-unique JSON request. The protocol has schema version
 1 and uses only the exact record shapes and field types specified in Step 2;
