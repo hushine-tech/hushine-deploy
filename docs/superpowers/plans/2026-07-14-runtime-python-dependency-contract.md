@@ -1496,7 +1496,9 @@ paths or cross-builds are insufficient.
 - Modify: strategy-service/tests/test_strategy_engine.py
 - Modify: strategy-service/tests/test_debug_strategy_sources.py
 - Modify: strategy-service/tests/test_grpc_server.py
+- Modify: strategy-service/tests/test_input_universe.py
 - Modify: strategy-service/tests/test_notification.py
+- Modify: strategy-service/tests/test_periodic_sample_trigger.py
 - Modify: strategy-service/tests/test_strategy_phase3_runtime.py
 
 **Interfaces:**
@@ -1994,7 +1996,11 @@ captured source object. If the backing file changes between them, the first
 session still runs the gated bytes. Hot reload performs a fresh read, gate and
 load, then swaps only after the existing declaration-compatibility checks. On
 failure it retains the prior instance, notifier, indicator writer and routing
-state.
+state. Migrate all fourteen raw `create_strategy(..., strategy_code=...)`
+fixtures in `tests/test_input_universe.py` to construct and pass a successful
+sealed token. Migrate `tests/test_periodic_sample_trigger.py` recording fakes
+and `_run_session()` invocations to accept and forward that same token; neither
+test file may preserve the raw path/code compatibility signature.
 
 - [ ] **Step 7: Put the gate before all Preview/Run session side effects**
 
@@ -2091,7 +2097,9 @@ PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
   tests/test_strategy_validation_preflight.py \
   tests/test_grpc_server.py \
   tests/test_strategy_phase3_declarations.py \
+  tests/test_input_universe.py \
   tests/test_notification.py \
+  tests/test_periodic_sample_trigger.py \
   tests/test_strategy_phase3_runtime.py -q
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
 ~~~
@@ -2152,8 +2160,10 @@ test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | s
   strategy_service/strategy_imports.py \
   tests/test_debug_strategy_sources.py \
   tests/test_grpc_server.py \
+  tests/test_input_universe.py \
   tests/test_strategy_engine.py \
   tests/test_notification.py \
+  tests/test_periodic_sample_trigger.py \
   tests/test_strategy_imports.py \
   tests/test_strategy_phase3_runtime.py | sort)"
 git diff --cached --quiet
@@ -2161,7 +2171,8 @@ git add strategy_service/strategy_imports.py strategy_service/strategy/base.py \
   strategy_service/service.py strategy_service/grpc_server.py \
   tests/test_strategy_imports.py tests/test_strategy_engine.py \
   tests/test_debug_strategy_sources.py tests/test_grpc_server.py \
-  tests/test_notification.py tests/test_strategy_phase3_runtime.py
+  tests/test_input_universe.py tests/test_notification.py \
+  tests/test_periodic_sample_trigger.py tests/test_strategy_phase3_runtime.py
 test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
   strategy_service/grpc_server.py \
   strategy_service/service.py \
@@ -2169,8 +2180,10 @@ test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
   strategy_service/strategy_imports.py \
   tests/test_debug_strategy_sources.py \
   tests/test_grpc_server.py \
+  tests/test_input_universe.py \
   tests/test_strategy_engine.py \
   tests/test_notification.py \
+  tests/test_periodic_sample_trigger.py \
   tests/test_strategy_imports.py \
   tests/test_strategy_phase3_runtime.py | sort)"
 git diff --cached --check
