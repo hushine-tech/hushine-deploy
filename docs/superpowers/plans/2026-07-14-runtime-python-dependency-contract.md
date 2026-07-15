@@ -1659,9 +1659,12 @@ Also assert all of the following:
   `kind="from"`, a non-empty absolute dotted `module`, the same integer bounds,
   and a non-empty ordered names array. Each name object has exactly `name` and
   `asname`: `name` is a non-empty imported identifier or `*`; `asname` is null
-  or a non-empty identifier, and `*` requires null. Empty arrays/modules/names,
-  booleans used as integers, duplicate keys, unknown kinds, and extra keys at
-  every level are rejected. The collector preserves lexical
+  or a non-empty identifier, and `*` requires null. An empty `names` array on a
+  `from` record, empty modules/names, booleans used as integers, duplicate
+  keys, unknown kinds, and extra keys at every level are rejected. The
+  top-level `imports=[]` is the canonical no-op request used by the cold-wheel
+  smoke, and `extra_python_path=[]` is the required production default; both
+  are valid. The collector preserves lexical
   `(lineno,col_offset)` and alias order and deduplicates only by the exact key
   `('import', module)` or
   `('from', module, ordered((name,asname)))`, retaining the first source
@@ -1697,8 +1700,13 @@ Also assert all of the following:
   or overflow terminates, escalates to kill, waits/reaps, closes pipes, joins
   both readers, and removes the private root in `finally`. Tests exercise that
   cleanup on POSIX and a native Windows runner;
-- import stdout/stderr cannot become protocol output. Python-level output is
-  redirected in the child; any native/trailing output causes a safe failure;
+- import stdout/stderr cannot become protocol output. During the import window,
+  both Python-level streams and native file descriptors 1/2 are redirected to
+  a null sink while a duplicated private protocol descriptor is retained for
+  the final response. Native import output discarded inside that window does
+  not turn a successful import into a failure; any bytes that escape onto the
+  protocol stdout/stderr outside the one canonical response, including
+  trailing output, cause a safe failure;
 - traceback, paths, environment values, internal missing names, child output,
   and injected canary secrets never appear in `str(error)`, RPC details, or
   the returned message;
@@ -1706,7 +1714,11 @@ Also assert all of the following:
   `ModuleNotFoundError(name=requested_module)` is IMPORT_FAILED, not
   UNAVAILABLE; the latter requires the child to report `static_found=false`;
 - the manifest-rendered imports for all eight public roots succeed under the
-  exact worker interpreter and isolated environment.
+  exact worker interpreter in the cold environment that installs both the
+  strategy-library wheel and strategy-service's manifest-projected direct
+  dependencies. The isolated strategy-library unit environment is not itself
+  a product dependency closure and must not copy the mapping or add an ad-hoc
+  dependency solely to make this integration assertion pass.
 - a real symlink-based virtualenv proves the child retains the worker's
   `sys.prefix`, can locate the installed `strategy_service` and
   `hushine_strategy` origins, and imports all eight public roots. Running the
@@ -1862,7 +1874,10 @@ policy and the transport rejects unknown policies rather than merging them.
 The transport module never imports `runtime_dependencies`; profile facts
 are passed into the higher-level protocol to avoid a cycle. Tests fail if a
 second `Popen`, environment allowlist, reader, or cleanup implementation remains
-in either high-level module.
+in either high-level module. The existing checker imports of
+`_probe_environment` and `_run_installed_probe` remain thin compatibility
+wrappers over the neutral transport during this task because the checker is
+outside Task 5's owned paths; they may not retain transport implementation.
 
 `extra_python_path` exists only for hermetic fixture tests; production call
 sites always pass the default empty tuple. Parse the already size-bounded source in the parent and
@@ -1942,10 +1957,14 @@ Execute the reconstructed import even when discovery says false so
 Python aliases can still succeed. Treat `static_found` as a classification
 fact on failures: if the real import succeeds, normalize it to true in the
 success response; if the import fails, return the pre-import non-executing
-lookup value. Add exact-child success regressions proving `os.path` and
+lookup value. This richer child lookup must not call Task 4's public
+`find_spec_without_import()` as-is because that API intentionally collapses a
+clean miss and a lookup exception to `None`; lookup exceptions remain
+found/unknown here and can never prove unavailability. Add exact-child success
+regressions proving `os.path` and
 `requests.packages.urllib3` can have a false preliminary lookup, still execute
 successfully, and produce an accepted success response. Redirect Python and native import
-stdout/stderr to a null/bounded sink while retaining a duplicated private
+stdout/stderr to a null sink while retaining a duplicated private
 protocol descriptor for the final JSON. The parent
 accepts `missing_name` only as internal classification input, logs only its
 redacted form with exception class, and discards all captured import output. No
