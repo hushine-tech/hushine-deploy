@@ -674,10 +674,13 @@ cd strategy-library
 uv run --isolated --no-project --with-editable '.[test]' python scripts/check_runtime_dependency_contract.py \
   --write-projections \
   --service-project ../strategy-service/pyproject.toml \
-  --debugger-project ../strategy-debugger-cli/pyproject.toml
+  --service-lock ../strategy-service/uv.lock \
+  --debugger-project ../strategy-debugger-cli/pyproject.toml \
+  --debugger-lock ../strategy-debugger-cli/uv.lock \
+  --json
 ~~~
 
-Expected: each block contains the loader-sorted bare distribution names and a second identical command changes no bytes. Internal dependencies stay present outside the block and do not enter the manifest. The committed locks, not duplicated hand-written lower bounds, pin concrete versions for these two application environments.
+Expected: each block contains the loader-sorted bare distribution names and a second identical command changes no bytes. Write mode requires project/lock arguments to remain paired but does not read or require the debugger lock to exist yet; Step 4 creates it. Internal dependencies stay present outside the block and do not enter the manifest. The committed locks, not duplicated hand-written lower bounds, pin concrete versions for these two application environments.
 
 In `strategy-service/pyproject.toml`, replace the mutable Git-`main` requirement for the shared SDK with a normal direct requirement and a sibling source override:
 
