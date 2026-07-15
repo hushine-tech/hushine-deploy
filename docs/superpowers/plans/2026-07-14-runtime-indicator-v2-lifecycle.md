@@ -11,6 +11,14 @@
 ## Global Constraints
 
 - The coordinated worker protocol version is exactly `2`; a missing or different `WorkerHello.protocol_version` fails with code `RUNTIME_WORKER_PROTOCOL_UNSUPPORTED` before `StartSession` is sent.
+- Consume, do not redefine, the dependency-contract plan's single immutable
+  authenticated `WorkerIdentity{SessionID, PID, Token, Generation}`.
+  `SessionID` is the canonical `StartSession` ID. `Connect` captures that
+  identity once and passes it by value to every frame, exit, stream-close,
+  admission, lifecycle, indicator, and cleanup path. No parallel
+  `IndicatorFrameIdentity`, `WorkerConnection`, pending/real Session alias, or
+  field-by-field identity reconstruction is allowed. The token is opaque and
+  is never logged or persisted.
 - V1 custom-indicator protobuf fields, RPC names, domain types, repository paths, JSON envelopes, and frontend reconstruction code are removed at cutover; removed protobuf field number `15` is reserved and never reused.
 - Existing custom-indicator definitions and chunks are deleted; sessions, portfolios, venues, strategies, orders, fills, wallet snapshots, notifications, and reconciliation records retain every pre-existing field value and row. The sole additive Session field is `indicator_finalization_pending`, backfilled/defaulted false and changed only by the lifecycle coordinator.
 - `chunk_size` is exactly `1024`; `chunk_index = stream_sequence / 1024`, `offset = stream_sequence % 1024`, and a full chunk becomes immutable immediately.
@@ -25,6 +33,23 @@
   `recoverable`, retains buffers for retry, never finalizes while an admitted
   handler can still mutate them, and never returns a success acknowledgement.
 - Runtime heartbeat and RuntimeChannel stay alive while user Python code is blocked; local worker IPC remains loopback TCP and must compile/run on Windows without Unix sockets, POSIX-only paths, or Unix-only signals.
+- `Agent.Shutdown` is the sole process-shutdown owner. Main invokes it exactly
+  once and never independently calls `WorkerManager.StopAll`, stops worker IPC,
+  or cancels RuntimeChannel. `SessionLifecycle` remains the sole terminal-state
+  coordinator beneath it. RuntimeChannel owns an independent context and stays
+  connected, heartbeating, and platform-call-capable until every bounded
+  terminal attempt completes or its exact retry state is durably checkpointed;
+  only then may main stop IPC, cancel RuntimeChannel, and exit.
+- A failed terminal operation is not retained until a versioned retry journal
+  containing exact V2 definitions/chunks/finalization guards, payload hashes,
+  desired/effective status, and acknowledged-step state is atomically persisted
+  under configured persistent `StateRoot`. The journal never stores
+  `WorkerIdentity.Token`; it loads before new Runs are admitted, replays only
+  after RuntimeChannel authentication, blocks reuse of its canonical Session
+  ID, and is deleted only after finalization, status/pending-clear
+  acknowledgement, and cleanup complete. If both completion and durable
+  checkpointing fail, `Agent.Shutdown` must not cancel RuntimeChannel or permit
+  process exit; an in-memory-only record never satisfies shutdown.
 - Route platform calls only through authenticated RuntimeChannel methods; a session is still routed only by `runtime_id`, and no internal database/Kafka/order address is exposed to self-hosted or Bare workers.
 - Generated SQL is regenerated from service-owned migrations; generated protobuf files are regenerated from their authoritative `.proto` files and never hand-edited.
 - Preserve dirty work and commit only owned files inside each independent repository. Every `git add` block below is an owned-file inventory, not permission to stage a pre-existing dirty path wholesale: capture `git status --short` before each task, use `git add -p` for any already-dirty path, stage generated artifacts by exact filename, and inspect `git diff --cached --check` plus `git diff --cached` before every commit.
@@ -841,9 +866,23 @@ message IndicatorFrameV2 {
   repeated IndicatorDefinition definitions = 8;
   repeated IndicatorSampleV2 samples = 9;
 }
+
+message FinalStatus {
+  string session_id = 1;
+  string status = 2;
+  int64 bars_processed = 3;
+  string error = 4;
+  RuntimeDependencyError dependency_error = 5;
+  string reconciliation_run_id = 6;
+}
 ```
 
 Add `IndicatorFrameV2 indicator_frame_v2 = 21` to `WorkerFrame.payload`; 21 is new and does not collide with notification/wallet/final/error/log fields 16–20.
+`FinalStatus.reconciliation_run_id=6` is the optional identity of an already
+persisted reconciliation run used by the later Spot lifecycle; it must round
+trip beside the dependency plan's existing `dependency_error=5` in the Python
+and Go descriptor/encoding tests, must not create a Session column, and must
+never be synthesized when no run exists.
 
 - [ ] **Step 4: Regenerate all strategy-service stubs from authoritative protos**
 
@@ -1084,11 +1123,14 @@ git commit -m "feat: sequence every runtime indicator bar"
 
 **Interfaces:**
 - Consumes: `runtimeworkerv1.IndicatorFrameV2`; core V2 save/finalize protobufs; platform methods from Task 2.
-- Produces: `ReceiveFrame(IndicatorFrameIdentity, *rwv1.IndicatorFrameV2) error`,
-  `FlushSession(ctx, sessionID) error`, `FinalizeSession(ctx, sessionID) error`,
+- Produces: `ReceiveFrame(WorkerIdentity, *rwv1.IndicatorFrameV2) error`,
+  `FlushSession(ctx, WorkerIdentity) error`,
+  `FinalizeSession(ctx, WorkerIdentity) error`,
   and typed `*IndicatorProtocolError` with code
-  `RUNTIME_INDICATOR_PROTOCOL_ERROR`. The trusted identity carries the admitted
-  connection's Session ID and generation; payload IDs are never routing truth.
+  `RUNTIME_INDICATOR_PROTOCOL_ERROR`. This is the dependency plan's immutable
+  authenticated identity; no indicator-specific identity is introduced.
+  Payload IDs are never routing truth, and every flush/finalize remains pinned
+  to the same Session/generation.
 
 - [ ] **Step 1: Write deterministic buffer tests for required bar counts and sparse markers**
 
@@ -1205,13 +1247,13 @@ For every accepted frame, append its time to every definition's chunk. Append a 
 
 `indicatorSessionState` owns `streams map[string]*indicatorStreamState`; each
 stream owns the clock, deterministic serialized first definitions, and series.
-Before lookup/mutation, compare the trusted `IndicatorFrameIdentity` with the
-payload and cached Run facts: Session ID, worker connection, Runtime, and
-generation must agree. A stale generation claiming a replacement Session,
+Before lookup/mutation, compare the trusted `WorkerIdentity` with the payload
+and cached Run facts: canonical Session ID, authenticated PID/token/generation,
+and the Run fact's Runtime must agree. A stale generation claiming a replacement Session,
 another live Session on the same Runtime, or a cross-Session platform/order/
 wallet/final frame is rejected before admission and cannot create a buffer.
-Task 7 wires this identity to `WorkerConnection` and repeats these cases against
-the real Agent handlers.
+Task 7 passes the same `WorkerIdentity` through the real Agent handlers and
+repeats these cases without reconstructing it or introducing an alias.
 
 Classify sequence/time first: an approved immediate same-time duplicate returns
 without reading/applying definitions or samples; a lower/gap/different-time
@@ -1226,13 +1268,6 @@ frame has no partial effect.
 Return:
 
 ```go
-type IndicatorFrameIdentity struct {
-    SessionID string
-    RuntimeID string
-    WorkerID  string
-    Generation uint64
-}
-
 type IndicatorProtocolError struct {
     SessionID, StreamKey string
     Sequence             uint64
@@ -1264,7 +1299,8 @@ during I/O, record at most the acknowledged prior revision and keep the current
 chunk dirty. Only drop/forget a sealed chunk after its matching finalize token
 succeeds. An identical retry sends the same revision and finalization guard.
 Keep `state.flushMu` as the sole per-session flush owner. Periodic flush calls
-`FlushSession`; a full boundary sets a durable per-session `flushPending` flag
+`FlushSession`; a full boundary sets an in-memory latched per-session
+`flushPending` flag
 before a coalesced wakeup. If the wakeup channel is full, the owner still loops
 until the flag is observed/cleared, so a boundary cannot degrade silently to the
 next periodic tick. Terminal calls `FinalizeSession`, seals every contiguous
@@ -1419,6 +1455,8 @@ git commit -m "feat: expose indicator v2 data to the portal"
 **Files:**
 - Create: `strategy-service/internal/runtimeagent/session_lifecycle.go`
 - Create: `strategy-service/internal/runtimeagent/session_lifecycle_test.go`
+- Create: `strategy-service/internal/runtimeagent/terminal_retry_store.go`
+- Create: `strategy-service/internal/runtimeagent/terminal_retry_store_test.go`
 - Modify: `strategy-service/internal/runtimeagent/worker_server.go`
 - Modify: `strategy-service/internal/runtimeagent/worker_server_test.go`
 - Modify: `strategy-service/internal/runtimeagent/worker_ipc_server.go`
@@ -1434,13 +1472,18 @@ git commit -m "feat: expose indicator v2 data to the portal"
 - Modify: `strategy-service/tests/test_session_worker_entry.py`
 
 **Interfaces:**
-- `WorkerStartSpec.Generation uint64` is allocated monotonically by
-  `WorkerManager`; token, PID, canonical `StartSession.session_id`, process exit,
-  and stream close all carry the same generation. Per the dependency plan, a
-  Run has no second random real-session alias; any one-shot Validate/Preview
-  internal identity remains distinct and never becomes a durable Session.
+- The dependency plan's `WorkerIdentity{SessionID, PID, Token, Generation}` is
+  the sole worker identity. `WorkerManager` allocates generation monotonically;
+  process exit and stream close carry that exact captured value. A Run has no
+  second random real-session alias; one-shot Validate/Preview identities remain
+  private and never become durable Sessions.
 - `WorkerManager.SetExitHandler(func(WorkerExitEvent))` reports process completion but never publishes session state itself.
 - `WorkerIPCServer.SetStreamClosedHandler(func(WorkerStreamClosedEvent))` reports closure after its receive loop stops and all previously received frames have returned from `WorkerFrameHandler`.
+- Preserve `WorkerDrainer` and
+  `WorkerManager.MarkSessionWorkerDraining(sessionID string)` source-compatibly.
+  For an authenticated FinalStatus, lifecycle calls it after closing admission
+  and before indicator/platform persistence, preserving bounded ACK-driven
+  natural-exit grace plus the existing signal/force/reap fallback.
 - Every generation-pinned mutating frame obtains a
   `SessionRegistry.BeginFrameAdmission` lease. Ordinary paths defer release;
   any path that triggers terminal work must claim/queue it, release exactly
@@ -1453,6 +1496,9 @@ git commit -m "feat: expose indicator v2 data to the portal"
   forget session memory. `Terminate` is only a wrapper for callers that prove
   they hold no admission lease.
 - `SessionLifecycle.RunRetryLoop(ctx, interval)` retries retained failed finalization/status work for generation-pinned terminal records; it never changes a previously published `recoverable` state back to the original desired terminal state.
+- `TerminalRetryStore` atomically checkpoints the exact retry payload and
+  acknowledged steps beneath persistent `StateRoot`; startup loads it before
+  admitting Runs and replay begins only after RuntimeChannel authentication.
 
 - [ ] **Step 1: Write generation/alias tests before changing the registry**
 
@@ -1463,8 +1509,14 @@ first, _ := manager.PrepareSessionWorker("pending-a")
 second, _ := manager.PrepareSessionWorker("pending-b")
 if first.Generation == 0 || second.Generation <= first.Generation { t.Fatalf("non-monotonic generations") }
 
-registry.AdmitWorker(first.SessionID, first.Token, 101, first.Generation)
-registry.ForgetWorkerIdentity(first.SessionID, 101, first.Token, first.Generation-1)
+firstIdentity := WorkerIdentity{
+    SessionID: first.SessionID, PID: 101,
+    Token: first.Token, Generation: first.Generation,
+}
+registry.AdmitWorker(firstIdentity)
+stale := firstIdentity
+stale.Generation--
+registry.ForgetWorkerIdentity(stale)
 if _, ok := registry.ActiveWorker(first.SessionID); !ok { t.Fatal("stale generation removed active worker") }
 ```
 
@@ -1485,12 +1537,9 @@ Use a short Python module that exits 17 and assert exactly one event:
 
 ```go
 type WorkerExitEvent struct {
-    PendingSessionID string
-    SessionID        string
-    Generation       uint64
-    PID              int64
-    ExitErr          error
-    StopRequested    bool
+    Identity      WorkerIdentity
+    ExitErr       error
+    StopRequested bool
 }
 ```
 
@@ -1504,10 +1553,8 @@ For IPC, force EOF and handler failure and assert exactly one:
 
 ```go
 type WorkerStreamClosedEvent struct {
-    PendingSessionID string
-    SessionID        string
-    Generation       uint64
-    Err              error
+    Identity WorkerIdentity
+    Err      error
 }
 ```
 
@@ -1524,20 +1571,18 @@ Expected: FAIL because identities have no generation and process/stream exit cal
 
 - [ ] **Step 4: Add generation to manager, registry, IPC identity, and aliases**
 
-Add `nextGeneration atomic.Uint64` to `WorkerManager`; `PrepareSessionWorker` allocates once and copies the value into `WorkerStartSpec` and `ManagedWorker`. Replace the registry's token-only expected map with an identity record. Every admit, alias, lookup, forget, send, and callback must compare generation as well as token/PID.
+Add `nextGeneration atomic.Uint64` to `WorkerManager`; `PrepareSessionWorker`
+allocates once and copies the value into the dependency plan's
+`WorkerIdentity`, `WorkerStartSpec`, and `ManagedWorker`. Replace the registry's
+token-only expected map with that identity. Every admit, lookup, forget, send,
+and callback accepts or compares the full captured identity; do not recreate an
+identity from individual fields and do not add a Run alias.
 
 Change the frame handler boundary to:
 
 ```go
-type WorkerConnection struct {
-    PendingSessionID string
-    SessionID        string
-    Generation       uint64
-    PID              int64
-}
-
 type WorkerFrameHandler func(
-    context.Context, WorkerConnection, *rwv1.WorkerFrame,
+    context.Context, WorkerIdentity, *rwv1.WorkerFrame,
     func(*rwv1.AgentFrame) error,
 ) error
 ```
@@ -1567,7 +1612,15 @@ In `session_lifecycle_test.go`, table-test these sources and desired terminal st
 | Bare local restart | restart request | old session `recoverable` |
 | Agent SIGTERM/shutdown | Agent shutdown request | active session `recoverable` after tail finalization |
 
-For every row assert the call order begins `close-admission, finalize, update-session`; a worker final-status path then does `send-ack, mark-acknowledged`, and process/stream cleanup ends with `forget`. `failed`, `stopped`, and `stop_failed` must not bypass finalization.
+For every non-worker-final row assert the call order begins
+`close-admission, finalize, update-session`; an authenticated worker-final path is exactly
+`close-admission, mark-worker-draining, finalize, update-session, send-ack,
+mark-acknowledged, reap, forget`. `failed`, `stopped`, and `stop_failed` must not
+bypass finalization. Preserve and extend the existing regressions
+`TestAgentFinalStatusMarksWorkerDrainingBeforePlatformUpdate`,
+`TestAgentFinalStatusDrainingLetsConcurrentStopAllWaitForAckExit`,
+`TestDrainingWorkerTimeoutFallsBackToSignalAndForce`, and
+`TestDrainingWorkerProductionDeadlineReservesForceReapAndCleanup`.
 
 Add a deliberately blocked admitted-frame case. After terminal work closes admission, a later frame is rejected, and before the blocked handler releases there is no `FinalizeSession`, terminal `UpdateSession`, success acknowledgement, or forget. After release, assert the exact tail finalizes before the terminal update. Add a drain-timeout variant: before the injected timeout fires there is no durable call; when it fires, record stable `WORKER_FRAME_DRAIN_TIMEOUT`, retain lifecycle/indicator/registry state, perform no finalization while mutation remains possible, and persist Session status `recoverable` with `indicator_finalization_pending=true` and the original desired status/reason embedded in the safe failure reason. There is no success acknowledgement or forget. A retry after release drains and finalizes the exact retained tail, keeps the already-published status `recoverable`, then performs a metadata-only `UpdateSession(recoverable, indicator_finalization_pending=false)` before cleanup; it must not perform a second terminal status transition. If that flag-clear write fails, retain the lifecycle record and retry only the clear. If the timeout's initial recoverable update itself fails, retry that update independently without ever finalizing before drain.
 
@@ -1577,7 +1630,7 @@ double release. Add a restart race where process-exit and stream-close callbacks
 both arrive before the restart goroutine resumes: they must attach reap facts to
 the already claimed Bare-restart record and never create unexpected-exit.
 
-Repeat every row with indicator finalization failure. Assert one `UpdateSession(recoverable, indicator_finalization_pending=true)` attempt with the original status/reason embedded in the error, an `AgentError{Code:"INDICATOR_FINALIZATION_FAILED"}` instead of an empty success acknowledgement when a worker is waiting, and no buffer forget. Repeat a normal row with `UpdateSession` failure and assert `SESSION_TERMINAL_PERSIST_FAILED`, no success acknowledgement, and retained memory.
+Repeat every row with indicator finalization failure. Assert one `UpdateSession(recoverable, indicator_finalization_pending=true)` attempt with the original status/reason embedded in the error, an `AgentError{Code:"INDICATOR_FINALIZATION_FAILED"}` instead of an empty success acknowledgement when a worker is waiting, and no buffer forget. Repeat a normal row with `UpdateSession` failure and assert `SESSION_TERMINAL_PERSIST_FAILED`, no success acknowledgement, and a durably journaled record plus live cache.
 
 For each retained-failure case, make the next persistence attempt succeed and drive one retry-loop tick. When finalization originally failed, assert the retry seals the exact retained revision, keeps the already-published Session status `recoverable`, durably clears `indicator_finalization_pending`, and forgets memory only after process/stream reap and the clear is acknowledged. When terminal-status persistence originally failed, assert the retry performs only the still-pending operation(s), publishes the correct desired status/pending fact when no prior status was durable, and then cleans up. Repeated retry ticks after success must make zero platform calls.
 
@@ -1604,10 +1657,14 @@ const (
 )
 
 type TerminalRequest struct {
-    SessionID, FrameID, DesiredStatus, Reason string
-    Generation, BarsProcessed uint64
-    Source TerminalSource
-    Send func(*rwv1.AgentFrame) error
+    Identity            WorkerIdentity
+    FrameID             string
+    DesiredStatus       string
+    Reason              string
+    ReconciliationRunID string
+    BarsProcessed       uint64
+    Source              TerminalSource
+    Send                func(*rwv1.AgentFrame) error
 }
 ```
 
@@ -1636,7 +1693,36 @@ worker-final sends empty acknowledgement;
 cleanup forgets only after process and stream reap. Equivalent claims reuse the
 stored result.
 
-Each lifecycle record stores which durable steps are acknowledged (`frameDrained`, `indicatorFinalized`, `sessionStatusPersisted`, `finalizationPendingCleared`), whether a drain timeout forced recoverable status, the effective durable status, and process/stream reap facts. `RunRetryLoop` is started by `cmd/runtime-agent/main.go` with the Agent context and a two-second tick. A tick claims one failed record, reruns only safe unacknowledged steps, and releases the claim before moving on. It may persist a pending `recoverable` status without frame drain, but the per-session flush owner may finalize only after `frameDrained=true`. If the first pass already persisted `recoverable` because drain or indicator finalization failed, later drain/finalization success does not promote the Session to the original `finished`/`failed`/`stopped`; it makes the retained tail durable, clears the pending fact while leaving status recoverable, and only then permits generation cleanup. If no fallback status was required and no status was persisted, the retry persists the original desired status with pending=false after finalization succeeds. Cancellation leaves records intact until normal Agent shutdown handling reports them. Tests use an injected tick channel and never sleep.
+Each lifecycle record stores which durable steps are acknowledged
+(`frameDrained`, `indicatorFinalized`, `sessionStatusPersisted`,
+`finalizationPendingCleared`), whether a drain timeout forced recoverable
+status, the effective durable status, process/stream reap facts, and the exact
+payload hashes/guards needed for replay. Before returning a retryable error or
+dropping live state, write a schema-versioned journal with mode `0600` by
+same-directory temporary file, file sync, atomic replace/rename, and directory
+sync; provide/test the Windows implementation. Never serialize the worker
+token. A truncated, corrupt, unknown-version, hash-mismatched, or conflicting
+journal fails startup closed instead of silently admitting Runs.
+
+`RunRetryLoop` starts only after RuntimeChannel authentication, with an
+independent lifecycle context and a two-second tick. A tick claims one failed
+record, reruns only safe unacknowledged steps, and releases the claim before
+moving on. It may persist a pending `recoverable` status without frame drain,
+but the per-session flush owner may finalize only after `frameDrained=true`. If
+the first pass already persisted `recoverable` because drain or indicator
+finalization failed, later success does not promote the Session to the original
+`finished`/`failed`/`stopped`; it makes the exact tail durable, clears the
+pending fact while leaving status recoverable, and only then permits cleanup
+and journal deletion. If no fallback status was required and no status was
+persisted, retry persists the original desired status with pending=false after
+finalization succeeds. Cancellation is permitted only after completion or a
+successful durable checkpoint. Tests use an injected tick channel and never
+sleep.
+
+Add a process-reconstruction test: fail save/finalize/update, destroy the Agent,
+recreate it with the same `StateRoot`, authenticate RuntimeChannel, and replay
+the byte-identical revision/hash without duplicate application. Add corrupt and
+truncated-journal tests that fail closed.
 
 Agent owns all terminal updates. Preserve the existing Python guard that skips `_persist_session_status` for agent-managed terminal sessions; add tests for all five terminal strings so Python cannot race the Agent's update.
 
@@ -1671,13 +1757,19 @@ A stream-close event following an acknowledged final status is cleanup evidence,
 
 If steps 2–5 fail, do not start a replacement. If new `RunStrategy` fails, leave the old session recoverable and return the new-run error. Assert that a late old frame cannot enter the new session and that the response contains distinct old/new session IDs.
 
-Add `Agent.Shutdown(ctx)`: while RuntimeChannel/platform persistence is still
-available, atomically claim `TerminalAgentShutdown` for every active generation,
-close admission, stop and `Cmd.Wait`/stream-reap each worker, drive exact-tail
-finalization, and persist recoverable. Only after all bounded attempts (or
-retained explicit retryable failure records) may main cancel RuntimeChannel and
-gRPC. SIGTERM tests cover a normal and blocked worker plus finalization/status
-failure; no disappeared worker leaves a durable running Session.
+Add `Agent.Shutdown(ctx)` as the sole shutdown owner: while RuntimeChannel and
+platform persistence remain available, atomically claim
+`TerminalAgentShutdown` for every active generation, close admission, stop and
+`Cmd.Wait`/stream-reap each worker, drive exact-tail finalization, and persist
+recoverable. Main calls it exactly once. Only after every operation completed or
+its exact retry journal is atomically durable may `Shutdown` return; if both
+completion and checkpoint fail, it does not return permission to cancel the
+channel or exit. Main then stops IPC, cancels RuntimeChannel, and exits; it never
+calls `StopAll` independently. Add an executable ordering test:
+`signal -> Agent.Shutdown once -> terminal persistence/checkpoint -> Shutdown
+returns -> IPC stop -> RuntimeChannel cancel`. SIGTERM tests cover normal and
+blocked workers plus finalization/status/checkpoint failure; no disappeared
+worker leaves a durable running Session.
 
 - [ ] **Step 10: Run lifecycle, race, Python ownership, and full strategy-service tests**
 
@@ -1696,7 +1788,7 @@ Expected: PASS; race detector reports no stale-generation alias or double termin
 - [ ] **Step 11: Commit lifecycle coordination in strategy-service**
 
 ```bash
-git add internal/runtimeagent/session_lifecycle.go internal/runtimeagent/session_lifecycle_test.go internal/runtimeagent/worker_server.go internal/runtimeagent/worker_server_test.go internal/runtimeagent/worker_ipc_server.go internal/runtimeagent/worker_ipc_server_test.go internal/runtimeagent/worker_manager.go internal/runtimeagent/worker_manager_test.go internal/runtimeagent/agent.go internal/runtimeagent/agent_test.go cmd/runtime-agent/main.go cmd/runtime-agent/main_test.go strategy_service/grpc_server.py tests/test_grpc_server.py tests/test_session_worker_entry.py
+git add internal/runtimeagent/session_lifecycle.go internal/runtimeagent/session_lifecycle_test.go internal/runtimeagent/terminal_retry_store.go internal/runtimeagent/terminal_retry_store_test.go internal/runtimeagent/worker_server.go internal/runtimeagent/worker_server_test.go internal/runtimeagent/worker_ipc_server.go internal/runtimeagent/worker_ipc_server_test.go internal/runtimeagent/worker_manager.go internal/runtimeagent/worker_manager_test.go internal/runtimeagent/agent.go internal/runtimeagent/agent_test.go cmd/runtime-agent/main.go cmd/runtime-agent/main_test.go strategy_service/grpc_server.py tests/test_grpc_server.py tests/test_session_worker_entry.py
 git commit -m "fix: finalize indicators across worker lifecycle"
 ```
 
@@ -2461,6 +2553,7 @@ No branch treats unreachable `.10`, missing TimescaleDB, a skipped test, or a fa
 (cd ../control-panel-service && go test ./internal/runtimechannel -run 'Indicator.*V2|SessionFinalizationPending' -count=1 -v)
 (cd ../strategy-service && go test ./internal/runtimeagent -run 'TestIndicatorV2Integration1023ThenTwoFrames|SessionLifecycle|RetryPending|UnexpectedExit|RestartSession' -count=1 -v)
 (cd ../strategy-service && HUSHINE_BLOCKED_WORKER_SECONDS=660 HUSHINE_BLOCKED_WORKER_OBSERVE_SECONDS=600 ./scripts/runtime-agent-blocked-worker.test.sh)
+(cd ../strategy-service && bash scripts/start-bare-runtime-debugpy.test.sh)
 (cd ../strategy-service && ./scripts/runtime-agent-platform.test.sh)
 (cd ../gateway/quant-handler && go test ./internal/app -run 'StrategyIndicator.*V2|Session.*FinalizationPending' -count=1 -v)
 (cd ../gateway/quant-frontend && node scripts/session-indicator-data.test.mjs && node scripts/runtime-status.test.mjs && npm run test:session-custom-indicators && npm run build)
@@ -2481,10 +2574,18 @@ From the workspace root, with `.10` credentials available through libpq:
 ```bash
 cd core-service && make proto && go test ./... -count=1 && go vet ./...
 cd ../control-panel-service && go test ./... -count=1 && go vet ./...
-cd ../strategy-service && ./generate_proto.sh && PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q && go test ./... -count=1 && go vet ./...
+cd ../strategy-service && ./generate_proto.sh && PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q && go test ./... -count=1 && go vet ./... && bash scripts/start-bare-runtime-debugpy.test.sh && bash scripts/runtime-agent-platform.test.sh
 cd ../gateway/quant-handler && go test ./... -count=1 && go vet ./...
 cd ../quant-frontend && npm run build && for test_file in scripts/*.test.mjs; do node "${test_file}" || exit 1; done
 cd ../../hushine-deploy && make db-schema-bundle && make test-runtime-indicator-v2
+cd ..
+set +e
+openspec_output="$(openspec validate --all --strict --no-interactive 2>&1)"
+openspec_status=$?
+set -e
+printf '%s\n' "$openspec_output"
+test "$openspec_status" -eq 0
+! grep -Fq 'No items found to validate' <<<"$openspec_output"
 ```
 
 Expected: all PASS, no skips in the focused smoke, and a second `make db-schema-bundle` produces no diff.
@@ -2521,4 +2622,4 @@ git commit -m "test: verify runtime indicator v2 deployment"
 
 ## Final Acceptance Record
 
-Record the commit SHA from each independent repository, the three acceptance-owned database names, their successful cleanup, the 1023+2 durable chunk summary, the full 600-second blocked-worker heartbeat count/max-gap/replacement generation, Windows cross-build artifacts, the successful native Windows workflow URL/artifact for the exact strategy-service SHA, and the frontend executable-test result. Do not claim completion from unit tests or cross-build output alone; all Task 12 commands and the native Windows gate must have fresh output from the final tree.
+Record the commit SHA from each independent repository, the three acceptance-owned database names, their successful cleanup, the 1023+2 durable chunk summary, the full 600-second blocked-worker heartbeat count/max-gap/replacement generation, Windows cross-build artifacts, the successful native Windows workflow URL/artifact for the exact strategy-service SHA, both tracked strategy-service shell-test results, the strict non-empty OpenSpec validation result, and the frontend executable-test result. Do not claim completion from unit tests or cross-build output alone; all Task 12 commands and the native Windows gate must have fresh output from the final tree.

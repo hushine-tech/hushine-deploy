@@ -33,7 +33,7 @@
 - Existing CreateStrategy remains valid without runtime_id and preserves the current product sequence: create/save Strategy first, then create/select Runtime when starting it. The design phrase "save-time validation" is resolved as an optional editor action against an already selected runtime, exposed through HTTP ValidateStrategySource; storage-only Create never invokes it, never requires runtime_id, and is never blocked by Runtime availability. Preview and Run always validate on their selected runtime.
 - A Hosted startup-profile failure is captured by the platform provisioner as a structured admission failure without registering or routing the Runtime. A Self-hosted startup-profile failure may send one bounded credential-authenticated failure report that creates no HELLO, lease, registry entry, or route; local stderr remains authoritative if reporting cannot connect. Bare/debugger stays an internal local-log path.
 - The change adds no database table, column, migration, compatibility alias, dynamic pip/uv install, or requirements upload.
-- Generated protobuf files are regenerated from authoritative proto files and are never edited manually. Determinism is proven by checksums of a first and second generation, not by comparing generated output with the pre-change worktree. Dependency-protocol tags coexist with Indicator V2: dependency fields use nested-message tags 5/6; Indicator V2 uses WorkerHello.protocol_version field number 5 with runtime value 2 and WorkerFrame.indicator_frame_v2 field number 21 while reserving the old WorkerFrame field number 15. The final descriptor/value test asserts all fields and reservations together.
+- Generated protobuf files are regenerated from authoritative proto files and are never edited manually. Determinism is proven by checksums of a first and second generation, not by comparing generated output with the pre-change worktree. Dependency-protocol tags coexist with Indicator V2: dependency fields use nested-message tags 5/6; Indicator V2 uses WorkerHello.protocol_version field number 5 with runtime value 2 and WorkerFrame.indicator_frame_v2 field number 21 while reserving the old WorkerFrame field number 15. `FinalStatus.dependency_error` remains field 5 and the later Spot reconciliation identity uses `FinalStatus.reconciliation_run_id` field 6. The final descriptor/value test asserts all fields and reservations together.
 - Each repository is independent. Preserve unrelated dirty work, stage only task-owned files, and use repository-scoped commits named in each task.
 - Before Task 1 edits strategy-library, fetch its approved remote branch and record the exact pre-implementation `HEAD`/merge-base as `RUNTIME_DEPENDENCY_BASE_SHA`; require a 40-character commit that resolves locally. Every pre-push baseline check uses that immutable SHA. The coordinated post-push gate instead uses the final published strategy-library SHA and requires state `present`.
 
@@ -452,9 +452,13 @@ def test_first_introduction_at_existing_ref_accepts_only_schema_1_bytes(tmp_path
 
 def test_projection_write_is_manifest_derived_and_idempotent(tmp_path):
     project = write_marked_project(tmp_path, direct=["internal-tool>=1"])
-    sync_project_projection(profile_for("numpy", "pandas"), project)
+    sync_project_projection(
+        profile_for("numpy", "pandas"), project, write=True
+    )
     once = project.read_bytes()
-    sync_project_projection(profile_for("numpy", "pandas"), project)
+    sync_project_projection(
+        profile_for("numpy", "pandas"), project, write=True
+    )
     assert project.read_bytes() == once
     assert read_generated_names(project) == {"numpy", "pandas"}
 
@@ -2884,7 +2888,7 @@ cd ../control-panel-service
 go test ./internal/runtimechannel -run FrameContract -count=1
 ~~~
 
-At dependency-only handoff, record the legacy WorkerFrame indicator field number 15 plus nested dependency field numbers SessionProgress=6 and result/final/error=5. The full-system acceptance plan then applies Indicator V2 and reruns this same test; final evidence must show WorkerHello.protocol_version field number 5 with runtime value 2, WorkerFrame.indicator_frame_v2 field number 21, WorkerFrame field number 15 reserved, and all nested dependency field numbers unchanged. Descriptor checksum generation from Task 7 must still be deterministic after both proto changes.
+At dependency-only handoff, record the legacy WorkerFrame indicator field number 15 plus nested dependency field numbers SessionProgress=6 and result/final/error=5. The full-system acceptance plan then applies Indicator V2 and reruns this same test; final evidence must show WorkerHello.protocol_version field number 5 with runtime value 2, WorkerFrame.indicator_frame_v2 field number 21, WorkerFrame field number 15 reserved, `FinalStatus.dependency_error=5`, `FinalStatus.reconciliation_run_id=6`, and all other nested dependency field numbers unchanged. Descriptor checksum generation from Task 7 must still be deterministic after both proto changes.
 
 - [ ] **Step 5: Repeat final normal/coverage closure from clean commits and cache**
 
