@@ -615,11 +615,28 @@ git commit -m "test: enforce runtime dependency projections"
 
 **Interfaces:**
 - Consumes: manifest public_distributions, the Task 2 projection writer, the committed strategy-library revision, and each product project/lock.
-- Produces: manifest-generated direct projections, a local-source service lock, a standalone immutable-Git debugger lock, and frozen Python-compatible installations for Hosted 3.13 and debugger 3.12+.
+- Produces: manifest-generated direct projections, a local-source service lock,
+  a standalone immutable-Git debugger lock, and frozen Python-compatible
+  installations for Hosted 3.13 plus the debugger's 3.12 lower bound. Task 3
+  locks the service sibling source; later image tasks install it and prove the
+  embedded strategy-library commit fact.
 
 - [ ] **Step 1: Write product-level projection tests before editing dependencies**
 
-In each repository import the checker from ../strategy-library and compare normalized direct/locked names to `profile.public_distributions`. Do not spell public names in these product tests. Generate a transitive-only fixture by moving the first loader-selected public distribution outside the marked direct block while leaving it in the synthetic lock; assert MISSING_DIRECT_DISTRIBUTION for that loader-selected name. Both tests also assert that check-mode projection regeneration is a no-op.
+Record the exact starting HEAD and `git status --short` for both product
+repositories. Every owned path must start clean; if it does not, stop and split
+the pre-existing hunks before continuing.
+
+In each repository import the checker from ../strategy-library and compare normalized direct/locked names to `profile.public_distributions`. Do not spell public names in these product tests. Generate a transitive-only fixture by removing the first loader-selected public distribution from the complete direct dependency array while leaving it in the synthetic lock; assert MISSING_DIRECT_DISTRIBUTION for that loader-selected name. Add a separate malformed-projection fixture that moves the selected public dependency outside the marker block while keeping it direct and assert the Task 2 outside-projection violation. Both tests also assert that check-mode projection regeneration is a no-op.
+
+Before creating the helper, add debugger shell/pytest tests that invoke
+`scripts/with-local-strategy-library-git.sh SOURCE_REPO EXPECTED_COMMIT
+COMMAND...` and require: the script is missing/non-executable at RED; malformed
+or absent SHA fails before the command; command exit status is propagated;
+success/failure/signal cleanup removes the private mirror; poisoned global Git
+`insteadOf` configuration is ignored; and persistent project/lock bytes never
+contain a mirror or file URL. Derive the expected commit from the selected local
+strategy-library checkout rather than embedding it.
 
 ~~~python
 def test_every_public_distribution_is_direct_and_locked():
@@ -642,7 +659,11 @@ cd ../strategy-debugger-cli
 uv run --isolated --no-project --with-editable '.[test]' pytest tests/test_dependency_projection.py -q
 ~~~
 
-Expected: both tests report the loader-derived missing-direct set; debugger additionally reports its missing lock. Failure assertions derive names and counts from the manifest rather than embedding an expected public list.
+Expected: both projection tests report the loader-derived missing-direct set;
+the outside-marker fixture reports the distinct projection-boundary violation;
+debugger additionally reports its missing lock; and helper tests fail because
+the script does not exist yet. Failure assertions derive names and counts from
+the manifest rather than embedding an expected public list.
 
 - [ ] **Step 3: Add exact direct dependency projections**
 
@@ -667,19 +688,26 @@ In `strategy-service/pyproject.toml`, replace the mutable Git-`main` requirement
 hushine-strategy-library = { path = "../strategy-library" }
 ~~~
 
-Do not mark the image dependency editable. The relative source resolves both in the sibling-repository worktree and in the Docker layout `/app/strategy-service` plus `/app/strategy-library`. Extend the service projection test to assert that the old `git+ssh://...@main` source is absent and the lock records the local source; this binds the installed SDK to the library tree whose commit becomes an image fact.
+Do not mark the dependency editable. The relative source resolves both in the
+sibling-repository worktree and in the later Docker build layout
+`/app/strategy-service` plus `/app/strategy-library`. Extend the service
+projection test to assert that the old `git+ssh://...@main` source is absent and
+the lock records the local source. This task binds the lock to the sibling
+source only; Task 9 removes the current image `--no-install-package` exception,
+installs the SDK, and proves its commit fact.
 
-The debugger must remain bootstrappable from a clone containing only `strategy-debugger-cli`. Remove its sibling path override and pin `hushine-strategy-library` to the exact Task 1/2 commit through the existing HTTPS repository. That commit is intentionally not pushed yet, so never assume GitHub can fetch it and never push it early. Add `scripts/with-local-strategy-library-git.sh SOURCE_REPO COMMAND...`: it clones SOURCE_REPO to a private temporary bare mirror, verifies the requested 40-character commit exists, and runs COMMAND with process-local Git config `url.file://MIRROR.insteadOf=https://github.com/hushine-tech/strategy-library.git` plus `GIT_ALLOW_PROTOCOL=file:https`. It changes no user/global Git config and removes the mirror on exit.
+The debugger must remain bootstrappable from a clone containing only `strategy-debugger-cli`. Remove its sibling path override and pin `hushine-strategy-library` to the exact Task 1/2 commit through the existing HTTPS repository. That commit is intentionally not pushed yet, so never assume GitHub can fetch it and never push it early. Add executable mode-0755 `scripts/with-local-strategy-library-git.sh SOURCE_REPO EXPECTED_COMMIT COMMAND...`: under `umask 077`, validate `EXPECTED_COMMIT` against `^[0-9a-f]{40}$`, clone SOURCE_REPO to a private temporary bare mirror, require `git --git-dir="$mirror" cat-file -e "$EXPECTED_COMMIT^{commit}"`, and run COMMAND with a process-local `url.file://MIRROR.insteadOf=https://github.com/hushine-tech/strategy-library.git` rewrite plus `GIT_ALLOW_PROTOCOL=file:https`. Inject the rewrite through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`, set `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`, and restore/override poisoned inherited Git-config variables. It changes no user/global Git config. One idempotent trap covers EXIT/HUP/INT/TERM, removes the mirror, and preserves the command/signal exit result.
 
 ~~~bash
 cd /Users/xdy/Workplace/hushine-worktrees/medium-cleanup/strategy-debugger-cli
 LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
 test "${#LIBRARY_COMMIT}" -eq 40
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
+  "$LIBRARY_COMMIT" \
   uv add --no-sync "hushine-strategy-library @ git+https://github.com/hushine-tech/strategy-library.git@${LIBRARY_COMMIT}"
 ~~~
 
-The rewrite changes transport only. The resulting `pyproject.toml`/`uv.lock` must contain the canonical HTTPS URL and immutable 40-character revision, and no file URL, mirror path, `../strategy-library` path, editable source, branch, or tag. Unit-test mirror cleanup on success/failure. Add a debugger projection test that copies only the debugger repository fixture and proves `uv lock --check` resolves through an explicitly supplied mirror without a sibling checkout.
+The rewrite changes transport only. The resulting `pyproject.toml`/`uv.lock` must contain the canonical HTTPS URL and the same immutable 40-character revision supplied to the helper, and no file URL, mirror path, `../strategy-library` path, editable source, branch, or tag. Unit-test mirror cleanup on success/failure/signal, malformed/missing commit rejection, command-status propagation, and configuration isolation. Add a debugger cold-install test that copies only the debugger repository fixture, uses an empty `UV_CACHE_DIR` and empty virtual environment with no sibling checkout, runs `uv sync --python 3.12 --frozen --extra test` through the explicitly supplied mirror/SHA, then imports `hushine_strategy` with that exact interpreter. `uv lock --check` alone or a warm cache is not standalone proof.
 
 - [ ] **Step 4: Regenerate and verify both locks**
 
@@ -689,13 +717,22 @@ uv lock
 uv lock --check
 uv sync --python 3.13 --frozen --extra dev
 cd ../strategy-debugger-cli
-./scripts/with-local-strategy-library-git.sh ../strategy-library uv lock
-./scripts/with-local-strategy-library-git.sh ../strategy-library uv lock --check
+LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
+test "${#LIBRARY_COMMIT}" -eq 40
+./scripts/with-local-strategy-library-git.sh ../strategy-library "$LIBRARY_COMMIT" uv lock
+./scripts/with-local-strategy-library-git.sh ../strategy-library "$LIBRARY_COMMIT" uv lock --check
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
-  uv sync --frozen --extra test
+  "$LIBRARY_COMMIT" uv sync --python 3.12 --frozen --extra test
+./scripts/with-local-strategy-library-git.sh ../strategy-library \
+  "$LIBRARY_COMMIT" uv run --python 3.12 --frozen --extra test \
+  python -c 'import hushine_strategy'
 ~~~
 
-Expected: every lock/sync command exits 0; strategy-debugger-cli/uv.lock is newly tracked and contains no mirror/file path.
+Expected: every lock/sync/import command exits 0 under the exact supplied SHA;
+strategy-debugger-cli/uv.lock is newly tracked and contains no mirror/file path.
+The debugger product test additionally repeats sync/import from its copy-only
+fixture with an empty cache, so these ordinary commands need not destroy the
+developer's shared cache.
 
 - [ ] **Step 5: Wire a service Make target and run the product tests**
 
@@ -718,20 +755,30 @@ cd strategy-service
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/test_runtime_dependency_projection.py -q
 make dependency-contract
 cd ../strategy-debugger-cli
+LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
-  uv run --frozen --extra test pytest tests/test_dependency_projection.py -q
+  "$LIBRARY_COMMIT" uv run --python 3.12 --frozen --extra test \
+  pytest tests/test_dependency_projection.py -q
 ~~~
 
-Expected: all commands pass. Confirm uv lock --check leaves both worktrees unchanged.
+Expected: all commands pass. Before every lock-check/sync/test block, record
+both repositories' `git status --short --untracked-files=all` plus SHA-256 for
+the owned project/lock files; afterwards require statuses and hashes to differ
+only by the Task 3 changes already present before that block. A generic “clean”
+assertion is invalid while the task is intentionally uncommitted.
 
 - [ ] **Step 6: Commit independently in each product repository**
 
 ~~~bash
 cd strategy-service
 git add pyproject.toml uv.lock Makefile tests/test_runtime_dependency_projection.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' Makefile pyproject.toml tests/test_runtime_dependency_projection.py uv.lock | sort)"
+git diff --cached --check
 git commit -m "build: lock runtime dependency contract"
 cd ../strategy-debugger-cli
 git add pyproject.toml uv.lock scripts/with-local-strategy-library-git.sh tests/test_dependency_projection.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' pyproject.toml scripts/with-local-strategy-library-git.sh tests/test_dependency_projection.py uv.lock | sort)"
+git diff --cached --check
 git commit -m "build: lock debugger runtime dependencies"
 ~~~
 
