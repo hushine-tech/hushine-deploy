@@ -793,14 +793,20 @@ git commit -m "build: lock debugger runtime dependencies"
 - Modify: strategy-library/hushine_strategy/__init__.py
 - Create: strategy-library/tests/hushine_strategy/test_import_validation.py
 - Modify: strategy-library/tests/hushine_strategy/test_validator.py
+- Modify: strategy-library/tests/hushine_strategy/test_replay.py
 - Modify: strategy-service/strategy_service/runtime_profile.py
 - Modify: strategy-service/strategy_service/strategy_validator.py
 - Create: strategy-service/tests/test_runtime_profile.py
 - Modify: strategy-service/tests/test_strategy_validator.py
+- Modify: strategy-service/tests/test_strategy_validation_preflight.py
 
 **Interfaces:**
 - Consumes: parsed AST, caller-owned standard-library roots, safe platform prefixes, packaged public profile, and an injectable module finder.
 - Produces: ImportedModule and DependencyValidationIssue values with stable dependency codes; Hosted RuntimeProfile carrying name, version, digest, Python constraint, build facts, and sorted public roots.
+
+Record the exact starting HEAD and `git status --short` for strategy-library and
+strategy-service. Every owned path must start clean; otherwise stop and split
+the pre-existing hunks before continuing.
 
 - [ ] **Step 1: Write the shared validator contract tests**
 
@@ -822,8 +828,9 @@ def test_each_manifest_root_is_allowed(root):
     ) == ()
 
 @pytest.mark.parametrize("module", [
-    "scipy", "sklearn", "statsmodels", "pandas_ta", "ta",
-    "coverage", "debugpy", "pytest", "pyarrow", "zstandard",
+    "scipy", "sklearn", "statsmodels", "pandas_ta", "ta", "talib",
+    "coverage", "debugpy", "pydevd", "pydevd_pycharm", "pytest",
+    "pyarrow", "zstandard",
 ])
 def test_non_contract_modules_are_not_public(module):
     issues = validate_dependency_imports(
@@ -852,14 +859,51 @@ def test_allowed_root_with_missing_complete_path_is_unavailable():
 
 The import collector records alias.name for ast.Import and node.module for absolute ast.ImportFrom; it never treats imported symbols such as pandas.DataFrame as submodules. A finder exception is converted to unavailable with a safe message.
 
+The shared dependency-code set is closed and exact:
+`UNSUPPORTED_STRATEGY_DEPENDENCY` and
+`STRATEGY_DEPENDENCY_UNAVAILABLE`. Debugger/tool/algorithm modules use the first
+code; finder absence or exception uses the second. Add spy tests proving:
+
+- `import pandas.io.common` asks only for `pandas.io.common`;
+- `from pandas.io import common` asks only for `pandas.io`;
+- `from pandas import DataFrame` asks only for `pandas`;
+- unsupported `talib.child` never calls the finder;
+- platform-prefix matching is segment-boundary exact: `strategy_service.types`
+  and descendants may pass, while `strategy_service`,
+  `strategy_service.wallet`, and `strategy_service.types_evil` do not;
+- a finder exception containing a path/secret returns only the fixed safe
+  unavailable message, with `issue.module` equal to the requested complete
+  module and no exception text.
+
+For every shared issue, `issue.module` is exactly the source-requested complete
+`ImportedModule.module`, never its collapsed root. Assert
+`import talib.child` produces exactly
+`(UNSUPPORTED_STRATEGY_DEPENDENCY, "talib.child")`.
+
+`iter_imported_modules` excludes every `ast.ImportFrom` whose `level > 0` and
+never calls the finder for it. The library and service adapters separately scan
+relative imports before shared dependency validation and preserve the existing
+safety code `forbidden_import`, including leading dots in `module`. Cover
+`from . import x`, `from .hushine_strategy import X`, and
+`from ..pandas import X` in both adapters.
+
 - [ ] **Step 2: Run shared tests and verify RED**
 
 ~~~bash
 cd strategy-library
+uv run --isolated --no-project --with-editable '.[test]' pytest \
+  tests/hushine_strategy/test_validator.py -q
 uv run --isolated --no-project --with-editable '.[test]' pytest tests/hushine_strategy/test_import_validation.py tests/hushine_strategy/test_validator.py -q
 ~~~
 
-Expected: the new module is missing; existing tests also show requests is falsely rejected and scipy/pandas_ta are falsely accepted.
+First modify only the existing validator behavior tests and run the first command:
+requests is falsely rejected; scipy/pandas_ta are falsely accepted; and
+talib/tool roots are rejected under legacy `forbidden_import`/debugger-specific
+codes rather than the stable uppercase dependency code. Then add the new
+shared-module tests and run the second command; it
+fails during collection because `import_validation` is missing. Keeping these
+REDs separate proves both legacy behavior and the new API instead of letting a
+collection error hide the behavior failures.
 
 - [ ] **Step 3: Implement the shared import-validation API**
 
@@ -891,11 +935,34 @@ def validate_dependency_imports(
 ) -> tuple[DependencyValidationIssue, ...]: ...
 ~~~
 
-Permission is decided only by the top-level root. Availability is decided using the complete ImportedModule.module. Sort issues by line, module, and code and deduplicate identical AST paths so Hosted and debugger results are byte-stable.
+Permission first matches an exact platform prefix on a segment boundary
+(`module == prefix` or `module.startswith(prefix + ".")`). A platform prefix
+never authorizes its top-level root or siblings. Otherwise permission is
+decided by the top-level standard-library/profile root. Availability is decided
+using exactly the complete `ImportedModule.module`; permission failure never
+calls the finder. Sort issues by line, module, and code and deduplicate by
+`(line,module,code)` so Hosted and debugger results are byte-stable. Finder
+errors never expose exception text, environment, paths, or secrets.
 
 - [ ] **Step 4: Refactor the library validator without weakening safety rules**
 
-Remove the manually maintained third-party names from ALLOWED_IMPORT_ROOTS and remove requests from FORBIDDEN_IMPORT_ROOTS. Keep its existing limited standard-library roots, relative-import rejection, __builtins__ checks, forbidden-call alias tracking, and MyStrategy requirement. Map shared dependency issues into existing ValidationIssue fields without changing unrelated safety codes.
+Remove the manually maintained third-party names from `ALLOWED_IMPORT_ROOTS` and
+remove requests from `FORBIDDEN_IMPORT_ROOTS`. Preserve `ALLOWED_IMPORT_ROOTS`
+as a compatibility export consumed by replay, but derive it at import time from
+the existing limited standard-library roots, safe `hushine_strategy` platform
+root, and `load_runtime_dependency_profile().public_import_roots`; it must not
+become a second handwritten public list. Keep relative-import rejection,
+`__builtins__` checks, forbidden-call alias tracking, and MyStrategy requirement.
+Map shared dependency issues into existing `ValidationIssue` fields without
+changing unrelated safety codes. Run replay tests to prove the derived export
+still admits validated numpy/pandas authoring imports and rejects forbidden
+import smuggling.
+
+The library adapter classifies relative imports and every root in
+`FORBIDDEN_IMPORT_ROOTS` before shared dependency validation, emits exactly the
+existing `forbidden_import` issue, suppresses the corresponding shared issue,
+and never emits two categories for one AST import. Add `os` and `subprocess`
+tests requiring exactly one `forbidden_import` each and zero finder calls.
 
 Update assertions so:
 
@@ -928,30 +995,76 @@ class RuntimeProfile:
     image_build_id: str
 ~~~
 
-current_runtime_profile() loads the packaged profile on each process through a cached, immutable loader and reads build facts from HUSHINE_RUNTIME_STRATEGY_SERVICE_COMMIT, HUSHINE_RUNTIME_STRATEGY_LIBRARY_COMMIT, and HUSHINE_RUNTIME_IMAGE_BUILD_ID. Missing build vars use the literal local-dev only outside a packaged Runtime image; Task 9 makes image startup fail when embedded facts are absent.
+`current_runtime_profile()` loads the packaged profile once per process through a
+cached, immutable loader and reads build facts from
+`HUSHINE_RUNTIME_STRATEGY_SERVICE_COMMIT`,
+`HUSHINE_RUNTIME_STRATEGY_LIBRARY_COMMIT`, and
+`HUSHINE_RUNTIME_IMAGE_BUILD_ID`. If all three are absent, set all three facts
+to the literal `local-dev`. If all three are non-empty, preserve them exactly.
+Any blank or partial combination raises a safe configuration error; a profile
+must never mix real and local-dev identity. Expose an internal pure
+environment-to-profile helper or cache-reset seam so tests cover all-missing,
+all-present, every partial/blank combination without cache-order pollution.
+This adapter does not guess whether it is in an image; Task 9/startup gates
+reject `local-dev` in packaged Runtime mode.
 
-Refactor strategy_service/strategy_validator.py to call validate_dependency_imports with sys.stdlib_module_names and platform prefixes strategy_service.types and hushine_strategy, then append its existing INPUTS, ORDER_TARGETS, risk, and OrderDecision checks. Replace lowercase dependency-only codes with the stable uppercase forms while preserving existing declaration codes.
+Before implementing the adapter, write `test_runtime_profile.py`, service
+validator, relative-import, safe-prefix-boundary, and saved-strategy preflight
+tests, then run them RED against the existing constants/lowercase codes:
+
+~~~bash
+cd strategy-service
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_runtime_profile.py tests/test_strategy_validator.py \
+  tests/test_strategy_validation_preflight.py -q
+cd ../strategy-library
+uv run --isolated --no-project --with-editable '.[test]' pytest -q
+cd ../strategy-service
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
+~~~
+
+Expected: RED for the missing profile fields/all-or-none build facts, shared
+prefix/relative behavior, and old lowercase serialized dependency codes.
+
+Refactor `strategy_service/strategy_validator.py` to reject relative imports
+with existing `forbidden_import`, then call `validate_dependency_imports` with
+`sys.stdlib_module_names` and platform prefixes `strategy_service.types` and
+`hushine_strategy`; append its existing INPUTS, ORDER_TARGETS, risk, and
+OrderDecision checks unchanged. Replace only dependency codes with the exact
+uppercase closed set while preserving declaration/safety codes. Update
+`tests/test_strategy_validation_preflight.py` so serialized saved-strategy
+errors assert the new stable code and complete module.
 
 - [ ] **Step 6: Prove Hosted/library equality and non-expansion**
 
 ~~~bash
 cd strategy-library
-uv run --isolated --no-project --with-editable '.[test]' pytest tests/hushine_strategy/test_import_validation.py tests/hushine_strategy/test_validator.py -q
+uv run --isolated --no-project --with-editable '.[test]' pytest \
+  tests/hushine_strategy/test_import_validation.py \
+  tests/hushine_strategy/test_validator.py \
+  tests/hushine_strategy/test_replay.py -q
 cd ../strategy-service
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
-  tests/test_runtime_profile.py tests/test_strategy_validator.py -q
+  tests/test_runtime_profile.py tests/test_strategy_validator.py \
+  tests/test_strategy_validation_preflight.py -q
 ~~~
 
-Expected: both suites pass and the service assertion compares its sorted public modules directly to load_runtime_dependency_profile().public_import_roots.
+Then run each repository's full Python suite. Expected: all focused/full suites
+pass and the service assertion compares its sorted public modules directly to
+`load_runtime_dependency_profile().public_import_roots`.
 
 - [ ] **Step 7: Commit shared and service changes separately**
 
 ~~~bash
 cd strategy-library
-git add hushine_strategy/import_validation.py hushine_strategy/validator.py hushine_strategy/__init__.py tests/hushine_strategy/test_import_validation.py tests/hushine_strategy/test_validator.py
+git add hushine_strategy/import_validation.py hushine_strategy/validator.py hushine_strategy/__init__.py tests/hushine_strategy/test_import_validation.py tests/hushine_strategy/test_validator.py tests/hushine_strategy/test_replay.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' hushine_strategy/__init__.py hushine_strategy/import_validation.py hushine_strategy/validator.py tests/hushine_strategy/test_import_validation.py tests/hushine_strategy/test_replay.py tests/hushine_strategy/test_validator.py | sort)"
+git diff --cached --check
 git commit -m "refactor: share strategy dependency validation"
 cd ../strategy-service
-git add strategy_service/runtime_profile.py strategy_service/strategy_validator.py tests/test_runtime_profile.py tests/test_strategy_validator.py
+git add strategy_service/runtime_profile.py strategy_service/strategy_validator.py tests/test_runtime_profile.py tests/test_strategy_validation_preflight.py tests/test_strategy_validator.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' strategy_service/runtime_profile.py strategy_service/strategy_validator.py tests/test_runtime_profile.py tests/test_strategy_validation_preflight.py tests/test_strategy_validator.py | sort)"
+git diff --cached --check
 git commit -m "refactor: consume shared runtime profile"
 ~~~
 
