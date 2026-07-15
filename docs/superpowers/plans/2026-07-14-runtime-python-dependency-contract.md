@@ -1582,7 +1582,13 @@ one public root only through a private test-only request seam to create an
 importable package whose `__init__` imports an absent transitive module or
 raises RuntimeError. No test adds a production dependency root. Availability is
 never inferred from Task 4's finder: every assertion below invokes the exact
-target interpreter child. Assert:
+target interpreter child. The two source-level examples below belong to
+`strategy-service/tests/test_strategy_imports.py`: `ResolvedStrategySource`,
+`probe_strategy_imports`, and `StrategyDependencyError` are Hosted adapter
+interfaces and must not be moved into or imported by strategy-library. The
+library RED instead builds the equivalent normalized import records plus
+primitive expected-profile facts, invokes the neutral client, and asserts its
+closed result code/requested-module classification. Assert:
 
 ~~~python
 def test_missing_allowed_submodule_is_unavailable(worker_python):
@@ -1694,6 +1700,11 @@ Also assert all of the following:
   launch failure, nonzero internal exit, invalid UTF-8, malformed/duplicate or
   extra JSON, schema mismatch, trailing stdout, oversized stdout/stderr, and
   an incomplete response all fail closed with the same safe code;
+- every public/client/transport timeout value rejects booleans, non-numeric
+  values, NaN, infinities, zero, negatives, and values greater than 30 seconds
+  before creating a directory or process. Finite `int`/`float` values satisfying
+  `0 < timeout_seconds <= 30` are accepted; production uses the fixed 15-second
+  default and shorter values exist only for bounded lifecycle tests;
 - stdout and stderr are independently capped at 64 KiB while the child runs.
   The parent uses two portable reader threads plus bounded buffers/overflow
   signals (not `selectors` and not an unbounded `communicate`), then on timeout
