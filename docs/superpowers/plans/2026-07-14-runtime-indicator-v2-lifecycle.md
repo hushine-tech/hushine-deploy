@@ -955,7 +955,7 @@ message FinalStatus {
   string status = 2;
   int64 bars_processed = 3;
   string error = 4;
-  RuntimeDependencyError dependency_error = 5;
+  strategy.v1.RuntimeDependencyError dependency_error = 5;
   string reconciliation_run_id = 6;
 }
 ```

@@ -3456,6 +3456,11 @@ scan/Preview continues to permit canonical exact symbols from
 
 - [ ] **Step 7: Run the complete debugger and shared validator suites**
 
+The standalone checkout must test the exact prospective commit, including all
+new Task 6 paths. After the full debugger suite passes but before invoking the
+standalone script, stage exactly the 14 owned paths, verify the index, and write
+an immutable index tree:
+
 ~~~bash
 cd strategy-debugger-cli
 LIBRARY_COMMIT=953ff880e262cf514f0532e58ab99bf03c50f541
@@ -3463,7 +3468,23 @@ test "$(git -C ../strategy-library rev-parse HEAD)" = "$LIBRARY_COMMIT"
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
   "$LIBRARY_COMMIT" \
   uv run --frozen --extra test pytest tests/ -q
-bash scripts/bootstrap-standalone.test.sh --library-repo ../strategy-library
+git add init.py pyproject.toml uv.lock \
+  scripts/bootstrap-standalone.test.sh scripts/bootstrap-standalone.test.ps1 \
+  src/hushine_debugger/runtime_profile.py src/hushine_debugger/cli.py \
+  src/hushine_debugger/init_workspace.py src/hushine_debugger/replay.py \
+  tests/test_runtime_profile.py tests/test_dependency_projection.py \
+  tests/test_cli.py tests/test_workspace.py tests/test_replay_cli.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
+  init.py pyproject.toml scripts/bootstrap-standalone.test.ps1 \
+  scripts/bootstrap-standalone.test.sh src/hushine_debugger/cli.py \
+  src/hushine_debugger/init_workspace.py src/hushine_debugger/replay.py \
+  src/hushine_debugger/runtime_profile.py tests/test_cli.py \
+  tests/test_dependency_projection.py tests/test_replay_cli.py \
+  tests/test_runtime_profile.py tests/test_workspace.py uv.lock | sort)"
+git diff --cached --check
+INDEX_TREE=$(git write-tree)
+INDEX_TREE="$INDEX_TREE" \
+  bash scripts/bootstrap-standalone.test.sh --library-repo ../strategy-library
 cd ../strategy-library
 uv run --isolated --no-project --with-editable '.[test]' pytest \
   tests/hushine_strategy/test_validator.py \
@@ -3472,14 +3493,35 @@ uv run --isolated --no-project --with-editable '.[test]' pytest \
   tests/hushine_strategy/test_import_probe.py -q
 ~~~
 
-Expected: POSIX and shared suites pass, including requests accepted and
-internal tools rejected. This does not satisfy the separately recorded native
-Windows gate.
+`scripts/bootstrap-standalone.test.sh` requires the caller-provided
+`INDEX_TREE`, verifies it is a Git tree, creates
+`$TMP/checkout/strategy-debugger-cli`, and populates that directory only with:
+
+~~~bash
+git archive "$INDEX_TREE" \
+  | tar -x -C "$TMP/checkout/strategy-debugger-cli"
+~~~
+
+It must not archive/clone `HEAD`, copy `git ls-files` bytes from the working
+tree, or include ignored/untracked `.superpowers/` evidence. Expected: the
+cached-name guard proves exactly 14 paths; POSIX and shared suites pass,
+including requests accepted and internal tools rejected; and the standalone
+checkout exercises the indexed new scripts/modules. This does not satisfy the
+separately recorded native Windows gate.
 
 - [ ] **Step 8: Commit debugger bootstrap/profile behavior**
 
+Do not trust the index retained from Step 7. Keep the original `INDEX_TREE`
+value in the same release shell; do not recompute it from the changed working
+tree. After every suite and standalone run completes, repeat the exact 14-path
+stage, cached-name guard, and cached diff check. The newly written index tree
+must still equal the exact tree exercised by the standalone checkout; any
+mismatch fails this step and requires rerunning Step 7 against the new tree.
+Then commit that verified index. Do not push.
+
 ~~~bash
 cd strategy-debugger-cli
+: "${INDEX_TREE:?run Step 7 in this release shell first}"
 git add pyproject.toml uv.lock init.py \
   scripts/bootstrap-standalone.test.sh scripts/bootstrap-standalone.test.ps1 \
   src/hushine_debugger/runtime_profile.py src/hushine_debugger/cli.py \
@@ -3495,8 +3537,18 @@ test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
   tests/test_dependency_projection.py tests/test_replay_cli.py \
   tests/test_runtime_profile.py tests/test_workspace.py uv.lock | sort)"
 git diff --cached --check
+test "$(git write-tree)" = "$INDEX_TREE"
 git commit -m "feat: verify locked debugger runtime profile"
+test -z "$(git diff --name-only)"
+test -z "$(git diff --cached --name-only)"
+test -z "$(git status --porcelain=v1 --untracked-files=all \
+  | sed '/^?? \.superpowers\//d')"
 ~~~
+
+The final status guard deliberately excludes only untracked `.superpowers/`
+evidence. It does not exclude any tracked change or any other untracked path;
+the exact cached-name guard plus `git write-tree` equality bind the commit to
+the 14-path tree that the standalone test actually exercised.
 
 ### Task 7: Define and Regenerate the Typed Dependency Protocol
 
@@ -3511,6 +3563,12 @@ git commit -m "feat: verify locked debugger runtime profile"
 - Modify generated: strategy-service/strategy_service/gen/runtime_worker_pb2_grpc.py
 - Modify generated: strategy-service/strategy_service/gen/control_panel_service_pb2.py
 - Modify generated: strategy-service/strategy_service/gen/control_panel_service_pb2_grpc.py
+- Modify generated baseline: strategy-service/strategy_service/gen/portfolio_service_pb2.py
+- Modify generated baseline: strategy-service/strategy_service/gen/portfolio_service_pb2_grpc.py
+- Modify generated baseline: strategy-service/strategy_service/gen/order_service_pb2.py
+- Modify generated baseline: strategy-service/strategy_service/gen/order_service_pb2_grpc.py
+- Modify generated baseline: strategy-service/strategy_service/gen/marketdata_service_pb2.py
+- Modify generated baseline: strategy-service/strategy_service/gen/marketdata_service_pb2_grpc.py
 - Modify generated: strategy-service/gen/strategyv1/strategy_service.pb.go
 - Modify generated: strategy-service/gen/strategyv1/strategy_service_grpc.pb.go
 - Modify generated: strategy-service/gen/runtimeworkerv1/runtime_worker.pb.go
@@ -3527,6 +3585,29 @@ git commit -m "feat: verify locked debugger runtime profile"
 **Interfaces:**
 - Consumes: shared profile/error facts from Python and Runtime image build metadata.
 - Produces: strategy.v1 RuntimeDependencyProfile, RuntimeDependencyError, StrategyValidationIssueProto, ValidateStrategySource RPC; typed worker detail; RuntimeChannel HELLO/RESUME/StreamError detail; and a credential-signed failure-only startup report that cannot register a Runtime.
+
+Before Step 1, require a clean four-repository boundary and record the two
+repositories that Task 7 must not change:
+
+~~~bash
+set -euo pipefail
+cd strategy-service
+ROOT="$(cd .. && pwd -P)"
+for repo in strategy-service core-service control-panel-service golang-lib; do
+  git -C "$ROOT/$repo" diff --quiet
+  git -C "$ROOT/$repo" diff --cached --quiet
+  test -z "$(git -C "$ROOT/$repo" ls-files --others --exclude-standard)"
+done
+TASK7_CORE_BASE_SHA="$(git -C "$ROOT/core-service" rev-parse HEAD)"
+TASK7_GOLANG_BASE_SHA="$(git -C "$ROOT/golang-lib" rev-parse HEAD)"
+test "${#TASK7_CORE_BASE_SHA}" -eq 40
+test "${#TASK7_GOLANG_BASE_SHA}" -eq 40
+printf 'TASK7_CORE_BASE_SHA=%s\nTASK7_GOLANG_BASE_SHA=%s\n' \
+  "$TASK7_CORE_BASE_SHA" "$TASK7_GOLANG_BASE_SHA"
+~~~
+
+Record those two printed values in the Task 7 evidence and restore them as
+shell variables for the final Step 9 unchanged-repository assertions.
 
 - [ ] **Step 1: Write generated-contract tests before editing proto**
 
@@ -3554,39 +3635,102 @@ def test_validate_source_rpc_exists():
     assert request.runtime_id == "rt-1"
 
 def test_dependency_tags_coexist_with_worker_frame_evolution():
+    frame = worker_pb2.WorkerFrame.DESCRIPTOR
+    fields = frame.fields_by_name
     assert worker_pb2.SessionProgress.DESCRIPTOR.fields_by_name[
         "dependency_error"
     ].number == 6
-    assert worker_pb2.PlatformCallResult.DESCRIPTOR.fields_by_name[
-        "dependency_error"
-    ].number == 5
-    frame = worker_pb2.WorkerFrame.DESCRIPTOR
-    if "indicator_frame_v2" in frame.fields_by_name:
+    for message in (
+        worker_pb2.PlatformCallResult,
+        worker_pb2.FinalStatus,
+        worker_pb2.WorkerError,
+    ):
+        assert message.DESCRIPTOR.fields_by_name["dependency_error"].number == 5
+    if "indicator_frame_v2" not in fields:
+        assert fields["indicator_frame"].number == 15
+    elif "indicator_frame" in fields:
         assert worker_pb2.WorkerHello.DESCRIPTOR.fields_by_name[
             "protocol_version"
         ].number == 5
         assert worker_pb2.WorkerHello(protocol_version=2).protocol_version == 2
-        assert frame.fields_by_name["indicator_frame_v2"].number == 21
-        assert descriptor_reserves(frame, 15)
+        assert fields["indicator_frame"].number == 15
+        assert fields["indicator_frame_v2"].number == 21
+        assert not descriptor_reserves(frame, 15)
     else:
-        assert frame.fields_by_name["indicator_frame"].number == 15
+        assert worker_pb2.WorkerHello.DESCRIPTOR.fields_by_name[
+            "protocol_version"
+        ].number == 5
+        assert worker_pb2.WorkerHello(protocol_version=2).protocol_version == 2
+        assert fields["indicator_frame_v2"].number == 21
+        assert descriptor_reserves(frame, 15)
+        assert descriptor_reserves_name(frame, "indicator_frame")
+    final_fields = worker_pb2.FinalStatus.DESCRIPTOR.fields_by_name
+    if "reconciliation_run_id" in final_fields:
+        assert final_fields["reconciliation_run_id"].number == 6
 ~~~
 
-Go frame test:
+The Python descriptor suite also asserts exact field-number tables rather than
+only constructing sample messages:
+
+- `RuntimeDependencyProfile`: schema/name/version/digest/hosted-python/public-
+  roots/service-commit/library-commit/image-build fields `1..9`;
+- `RuntimeDependencyError`: code/module/profile/profile-version/image-build/
+  message fields `1..6`;
+- `StrategyValidationIssueProto`: code/message/module/line/symbol fields `1..5`;
+- `ValidateStrategySourceRequest`: source `1`, user `100`, runtime `101`;
+- `ValidateStrategySourceResponse`: ok/issues/profile `1..3`, plus
+  `StrategyService.ValidateStrategySource` input/output descriptors;
+- all four worker dependency fields shown above;
+- `RuntimeHello.dependency_profile=15`, `RuntimeResume.dependency_profile=4`,
+  `StreamError.dependency_error=3`, startup-report request fields `1..8`,
+  response `recorded=1`, and both
+  `ControlPanelService.ValidateStrategySource` and
+  `ControlPanelService.ReportRuntimeStartupFailure` input/output descriptors.
+
+Add `test_generated_runtime_worker_imports_outside_repository_cwd`: launch the
+managed interpreter from a temporary cwd outside the checkout and import
+`strategy_service.gen.runtime_worker_pb2`; an absolute sibling-stub import is
+RED, while the generated package-relative import is GREEN.
+
+Name the reflection-based strategy-service Go test exactly
+`TestRuntimeDependencyChannelProto` and the control-panel test exactly
+`TestRuntimeDependencyFrameContract`. Both compile against the pre-change
+descriptors and fail assertions rather than disappearing behind a compile
+error. Before generation, their source may reference only descriptor symbols
+that already exist: `strategyv1.File_strategy_service_proto`,
+`runtimeworkerv1.File_runtime_worker_proto`, and
+`controlpanelv1.File_control_panel_service_proto`. Resolve every new message,
+field, and method by descriptor name; a missing descriptor calls `t.Fatalf`.
+Do not reference a new generated struct, oneof wrapper, field, or accessor in
+the prewritten RED. If the same test needs a value round trip after generation,
+construct it with `dynamicpb.NewMessage` from the resolved descriptor. The
+control-panel test follows this compile-before-generation pattern:
 
 ~~~go
-profile := &strategyv1.RuntimeDependencyProfile{
-    SchemaVersion: 1,
-    ProfileName: "platform-python-3.13",
-    ProfileVersion: "1.0.0",
-    ContractSha256: "8457b3c35618558fc8bfc74d4135b7eb52e00c33a8c9a49d202830f3fd5b62c5",
-    ImageBuildId: "build-1",
-}
-frame := &cpv1.RuntimeFrame{Payload: &cpv1.RuntimeFrame_Hello{
-    Hello: &cpv1.RuntimeHello{DependencyProfile: profile},
-}}
-if got := frame.GetHello().GetDependencyProfile().GetImageBuildId(); got != "build-1" {
-    t.Fatalf("image build id = %q", got)
+func TestRuntimeDependencyFrameContract(t *testing.T) {
+    file := cpv1.File_control_panel_service_proto
+    hello := file.Messages().ByName("RuntimeHello")
+    if hello == nil {
+        t.Fatal("RuntimeHello is missing")
+    }
+    field := hello.Fields().ByName("dependency_profile")
+    if field == nil {
+        t.Fatal("RuntimeHello.dependency_profile is missing")
+    }
+    if field.Number() != 15 ||
+        field.Message().FullName() != "strategy.v1.RuntimeDependencyProfile" {
+        t.Fatalf("RuntimeHello.dependency_profile = %v", field)
+    }
+    service := file.Services().ByName("ControlPanelService")
+    if service == nil {
+        t.Fatal("ControlPanelService is missing")
+    }
+    method := service.Methods().ByName("ReportRuntimeStartupFailure")
+    if method == nil {
+        t.Fatal("ReportRuntimeStartupFailure is missing")
+    }
+    // Resolve and assert every other RuntimeHello/Resume/StreamError/
+    // startup-report field and both new service methods the same way.
 }
 ~~~
 
@@ -3596,12 +3740,21 @@ if got := frame.GetHello().GetDependencyProfile().GetImageBuildId(); got != "bui
 cd strategy-service
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
   tests/test_runtime_dependency_proto.py tests/test_runtime_worker_proto.py -q
-go test ./internal/runtimeagent -run RuntimeChannelProto -count=1
+go test ./internal/runtimeagent -list '^TestRuntimeDependencyChannelProto$' \
+  | grep -Fx 'TestRuntimeDependencyChannelProto'
+go test ./internal/runtimeagent \
+  -run '^TestRuntimeDependencyChannelProto$' -count=1 -v
 cd ../control-panel-service
-go test ./internal/runtimechannel -run FrameContract -count=1
+go test ./internal/runtimechannel \
+  -list '^TestRuntimeDependencyFrameContract$' \
+  | grep -Fx 'TestRuntimeDependencyFrameContract'
+go test ./internal/runtimechannel \
+  -run '^TestRuntimeDependencyFrameContract$' -count=1 -v
 ~~~
 
-Expected: generated types and ValidateStrategySource do not exist.
+Expected: each `-list` guard prints its exact one test name, then Python and Go
+tests execute and fail because generated dependency types, fields, and
+ValidateStrategySource do not exist. Zero selected Go tests is not RED.
 
 - [ ] **Step 3: Add exact shared strategy messages and RPC**
 
@@ -3738,46 +3891,92 @@ Add a shell contract test that runs with `env -u PYTHON` under the existing
 sed -i '' for BSD, and use it for generated relative-import rewrites. Keep every
 existing proto source/output and mapping. The script must fail when python3,
 grpc_tools.protoc, protoc, protoc-gen-go, or protoc-gen-go-grpc is unavailable.
+After generating `runtime_worker_pb2.py`, add the newly required sibling import
+rewrite exactly:
+
+~~~bash
+sed_in_place 's/^import strategy_service_pb2/from . import strategy_service_pb2/' \
+  "$OUT_DIR/runtime_worker_pb2.py"
+~~~
+
+The outside-repository-cwd import test from Step 1 must fail if this rewrite is
+missing. The frozen environment's grpcio-tools `1.81.1` is the accepted new
+Python generated baseline; do not repin the older `1.80.0` generator. Review
+and retain the resulting regenerated portfolio, order, and market-data Python
+stub pairs even though their authoritative protos are unchanged.
 
 - [ ] **Step 7: Regenerate all stubs and compare first/second-generation checksums**
 
 ~~~bash
 cd strategy-service
+ROOT="$(cd .. && pwd -P)"
+STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hushine-task7.XXXXXX")"
+cleanup_task7_state() { rm -rf -- "$STATE_DIR"; }
+trap cleanup_task7_state EXIT HUP INT TERM
 PYTHON=.venv/bin/python ./generate_proto.sh
 find strategy_service/gen gen -type f \( -name '*.py' -o -name '*.go' \) -print \
   | LC_ALL=C sort \
   | while IFS= read -r file; do shasum -a 256 "$file"; done \
-  > /tmp/strategy-proto-first.sha256
+  > "$STATE_DIR/strategy.first"
 PYTHON=.venv/bin/python ./generate_proto.sh
 find strategy_service/gen gen -type f \( -name '*.py' -o -name '*.go' \) -print \
   | LC_ALL=C sort \
   | while IFS= read -r file; do shasum -a 256 "$file"; done \
-  > /tmp/strategy-proto-second.sha256
-diff -u /tmp/strategy-proto-first.sha256 /tmp/strategy-proto-second.sha256
+  > "$STATE_DIR/strategy.second"
+diff -u "$STATE_DIR/strategy.first" "$STATE_DIR/strategy.second"
 
-cd ../control-panel-service
+cd "$ROOT/control-panel-service"
 make proto
 find gen/controlpanelv1 -type f -name '*.go' -print \
   | LC_ALL=C sort \
   | while IFS= read -r file; do shasum -a 256 "$file"; done \
-  > /tmp/control-panel-proto-first.sha256
+  > "$STATE_DIR/control.first"
 make proto
 find gen/controlpanelv1 -type f -name '*.go' -print \
   | LC_ALL=C sort \
   | while IFS= read -r file; do shasum -a 256 "$file"; done \
-  > /tmp/control-panel-proto-second.sha256
-diff -u /tmp/control-panel-proto-first.sha256 /tmp/control-panel-proto-second.sha256
+  > "$STATE_DIR/control.second"
+diff -u "$STATE_DIR/control.first" "$STATE_DIR/control.second"
+
+cmp "$ROOT/strategy-service/gen/controlpanelv1/control_panel_service.pb.go" \
+  "$ROOT/control-panel-service/gen/controlpanelv1/control_panel_service.pb.go"
+cmp "$ROOT/strategy-service/gen/controlpanelv1/control_panel_service_grpc.pb.go" \
+  "$ROOT/control-panel-service/gen/controlpanelv1/control_panel_service_grpc.pb.go"
+
+cd "$ROOT/strategy-service"
+test "$(git diff --name-only -- strategy_service/gen gen | LC_ALL=C sort)" = "$(printf '%s\n' \
+  gen/controlpanelv1/control_panel_service.pb.go \
+  gen/controlpanelv1/control_panel_service_grpc.pb.go \
+  gen/runtimeworkerv1/runtime_worker.pb.go \
+  gen/runtimeworkerv1/runtime_worker_grpc.pb.go \
+  gen/strategyv1/strategy_service.pb.go \
+  gen/strategyv1/strategy_service_grpc.pb.go \
+  strategy_service/gen/control_panel_service_pb2.py \
+  strategy_service/gen/control_panel_service_pb2_grpc.py \
+  strategy_service/gen/marketdata_service_pb2.py \
+  strategy_service/gen/marketdata_service_pb2_grpc.py \
+  strategy_service/gen/order_service_pb2.py \
+  strategy_service/gen/order_service_pb2_grpc.py \
+  strategy_service/gen/portfolio_service_pb2.py \
+  strategy_service/gen/portfolio_service_pb2_grpc.py \
+  strategy_service/gen/runtime_worker_pb2.py \
+  strategy_service/gen/runtime_worker_pb2_grpc.py \
+  strategy_service/gen/strategy_service_pb2.py \
+  strategy_service/gen/strategy_service_pb2_grpc.py | LC_ALL=C sort)"
+cleanup_task7_state
+trap - EXIT HUP INT TERM
 ~~~
 
-Expected: each checksum diff is empty. Review the ordinary repository diff separately to confirm the authoritative/generated changes are the intended protocol delta. Never use `git diff --exit-code` as the second-generation determinism assertion because the first generation is intentionally dirty relative to HEAD.
-
-Before staging, compare `git diff --name-only` scoped to
-`strategy_service/gen` and `gen` against the exact generated-file inventory in
-this task. Any changed generated file outside that allow-list is a failure that
-must be reviewed; directory-level staging must not absorb it. The PYTHON-unset
-fallback/override assertions live in the already listed
-`tests/test_runtime_dependency_proto.py`, so this task creates no unlisted shell
-test.
+Expected: each checksum diff is empty, both control-panel Go copies are
+byte-identical across repositories, and the strategy-service generated diff is
+exactly the 18 listed outputs. The six portfolio/order/market-data Python stubs
+are an intentional grpcio-tools `1.81.1` baseline update. Never use a shared
+fixed `/tmp` checksum name or `git diff --exit-code` for second-generation
+determinism; the first generation is intentionally dirty relative to HEAD.
+Directory-level staging must not absorb any other generated file. The
+PYTHON-unset fallback/override assertions live in the already listed
+`tests/test_runtime_dependency_proto.py`, so this task creates no unlisted
+shell test.
 
 - [ ] **Step 8: Run protocol contract tests**
 
@@ -3785,22 +3984,139 @@ test.
 cd strategy-service
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
   tests/test_runtime_dependency_proto.py tests/test_runtime_worker_proto.py -q
-go test ./internal/runtimeagent -run RuntimeChannelProto -count=1
+go test ./internal/runtimeagent -list '^TestRuntimeDependencyChannelProto$' \
+  | grep -Fx 'TestRuntimeDependencyChannelProto'
+go test ./internal/runtimeagent \
+  -run '^TestRuntimeDependencyChannelProto$' -count=1 -v
 cd ../control-panel-service
-go test ./internal/runtimechannel -run FrameContract -count=1
+go test ./internal/runtimechannel \
+  -list '^TestRuntimeDependencyFrameContract$' \
+  | grep -Fx 'TestRuntimeDependencyFrameContract'
+go test ./internal/runtimechannel \
+  -run '^TestRuntimeDependencyFrameContract$' -count=1 -v
 ~~~
 
-Expected: all tests pass. At this dependency stage, the coexistence test observes legacy WorkerFrame indicator field number 15; after the ordered Indicator V2 plan it observes WorkerHello.protocol_version field number 5 with runtime value 2, indicator_frame_v2 field number 21, and the reservation of field number 15 while the nested dependency field numbers remain 5/6.
+Expected: both `-list` guards print exactly one name and all tests pass. At the
+dependency-only handoff, the descriptor test observes legacy
+`indicator_frame=15`. During additive Indicator V2 it accepts both
+`indicator_frame=15` and `indicator_frame_v2=21` with tag 15 unreserved. After
+the sealed cutover it requires only `indicator_frame_v2=21` plus the numeric and
+name reservations for the removed V1 field. All three states retain nested
+dependency tags 5/6; whenever present, `WorkerHello.protocol_version=5` and
+`FinalStatus.reconciliation_run_id=6` are also asserted.
 
 - [ ] **Step 9: Commit authoritative and generated protocol changes per repository**
 
 ~~~bash
 cd strategy-service
-git add proto/strategy_service.proto proto/runtime_worker.proto generate_proto.sh strategy_service/gen/strategy_service_pb2.py strategy_service/gen/strategy_service_pb2_grpc.py strategy_service/gen/runtime_worker_pb2.py strategy_service/gen/runtime_worker_pb2_grpc.py strategy_service/gen/control_panel_service_pb2.py strategy_service/gen/control_panel_service_pb2_grpc.py gen/strategyv1/strategy_service.pb.go gen/strategyv1/strategy_service_grpc.pb.go gen/runtimeworkerv1/runtime_worker.pb.go gen/runtimeworkerv1/runtime_worker_grpc.pb.go gen/controlpanelv1/control_panel_service.pb.go gen/controlpanelv1/control_panel_service_grpc.pb.go tests/test_runtime_dependency_proto.py tests/test_runtime_worker_proto.py internal/runtimeagent/runtime_channel_proto_test.go
+ROOT="$(cd .. && pwd -P)"
+: "${TASK7_CORE_BASE_SHA:?restore the Step 1 recorded SHA}"
+: "${TASK7_GOLANG_BASE_SHA:?restore the Step 1 recorded SHA}"
+test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | LC_ALL=C sort)" = "$(printf '%s\n' \
+  gen/controlpanelv1/control_panel_service.pb.go \
+  gen/controlpanelv1/control_panel_service_grpc.pb.go \
+  gen/runtimeworkerv1/runtime_worker.pb.go \
+  gen/runtimeworkerv1/runtime_worker_grpc.pb.go \
+  gen/strategyv1/strategy_service.pb.go \
+  gen/strategyv1/strategy_service_grpc.pb.go \
+  generate_proto.sh \
+  internal/runtimeagent/runtime_channel_proto_test.go \
+  proto/runtime_worker.proto \
+  proto/strategy_service.proto \
+  strategy_service/gen/control_panel_service_pb2.py \
+  strategy_service/gen/control_panel_service_pb2_grpc.py \
+  strategy_service/gen/marketdata_service_pb2.py \
+  strategy_service/gen/marketdata_service_pb2_grpc.py \
+  strategy_service/gen/order_service_pb2.py \
+  strategy_service/gen/order_service_pb2_grpc.py \
+  strategy_service/gen/portfolio_service_pb2.py \
+  strategy_service/gen/portfolio_service_pb2_grpc.py \
+  strategy_service/gen/runtime_worker_pb2.py \
+  strategy_service/gen/runtime_worker_pb2_grpc.py \
+  strategy_service/gen/strategy_service_pb2.py \
+  strategy_service/gen/strategy_service_pb2_grpc.py \
+  tests/test_runtime_dependency_proto.py \
+  tests/test_runtime_worker_proto.py | LC_ALL=C sort)"
+git diff --cached --quiet
+git add \
+  gen/controlpanelv1/control_panel_service.pb.go \
+  gen/controlpanelv1/control_panel_service_grpc.pb.go \
+  gen/runtimeworkerv1/runtime_worker.pb.go \
+  gen/runtimeworkerv1/runtime_worker_grpc.pb.go \
+  gen/strategyv1/strategy_service.pb.go \
+  gen/strategyv1/strategy_service_grpc.pb.go \
+  generate_proto.sh internal/runtimeagent/runtime_channel_proto_test.go \
+  proto/runtime_worker.proto proto/strategy_service.proto \
+  strategy_service/gen/control_panel_service_pb2.py \
+  strategy_service/gen/control_panel_service_pb2_grpc.py \
+  strategy_service/gen/marketdata_service_pb2.py \
+  strategy_service/gen/marketdata_service_pb2_grpc.py \
+  strategy_service/gen/order_service_pb2.py \
+  strategy_service/gen/order_service_pb2_grpc.py \
+  strategy_service/gen/portfolio_service_pb2.py \
+  strategy_service/gen/portfolio_service_pb2_grpc.py \
+  strategy_service/gen/runtime_worker_pb2.py \
+  strategy_service/gen/runtime_worker_pb2_grpc.py \
+  strategy_service/gen/strategy_service_pb2.py \
+  strategy_service/gen/strategy_service_pb2_grpc.py \
+  tests/test_runtime_dependency_proto.py tests/test_runtime_worker_proto.py
+test "$(git diff --cached --name-only | LC_ALL=C sort)" = "$(printf '%s\n' \
+  gen/controlpanelv1/control_panel_service.pb.go \
+  gen/controlpanelv1/control_panel_service_grpc.pb.go \
+  gen/runtimeworkerv1/runtime_worker.pb.go \
+  gen/runtimeworkerv1/runtime_worker_grpc.pb.go \
+  gen/strategyv1/strategy_service.pb.go \
+  gen/strategyv1/strategy_service_grpc.pb.go \
+  generate_proto.sh \
+  internal/runtimeagent/runtime_channel_proto_test.go \
+  proto/runtime_worker.proto \
+  proto/strategy_service.proto \
+  strategy_service/gen/control_panel_service_pb2.py \
+  strategy_service/gen/control_panel_service_pb2_grpc.py \
+  strategy_service/gen/marketdata_service_pb2.py \
+  strategy_service/gen/marketdata_service_pb2_grpc.py \
+  strategy_service/gen/order_service_pb2.py \
+  strategy_service/gen/order_service_pb2_grpc.py \
+  strategy_service/gen/portfolio_service_pb2.py \
+  strategy_service/gen/portfolio_service_pb2_grpc.py \
+  strategy_service/gen/runtime_worker_pb2.py \
+  strategy_service/gen/runtime_worker_pb2_grpc.py \
+  strategy_service/gen/strategy_service_pb2.py \
+  strategy_service/gen/strategy_service_pb2_grpc.py \
+  tests/test_runtime_dependency_proto.py \
+  tests/test_runtime_worker_proto.py | LC_ALL=C sort)"
+git diff --cached --check
+git diff --quiet
+test -z "$(git ls-files --others --exclude-standard)"
 git commit -m "feat: add runtime dependency protocol"
-cd ../control-panel-service
-git add proto/control_panel_service.proto gen/controlpanelv1/control_panel_service.pb.go gen/controlpanelv1/control_panel_service_grpc.pb.go internal/runtimechannel/frame_contract_test.go
+test -z "$(git status --short --untracked-files=all)"
+
+cd "$ROOT/control-panel-service"
+test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | LC_ALL=C sort)" = "$(printf '%s\n' \
+  gen/controlpanelv1/control_panel_service.pb.go \
+  gen/controlpanelv1/control_panel_service_grpc.pb.go \
+  internal/runtimechannel/frame_contract_test.go \
+  proto/control_panel_service.proto | LC_ALL=C sort)"
+git diff --cached --quiet
+git add proto/control_panel_service.proto \
+  gen/controlpanelv1/control_panel_service.pb.go \
+  gen/controlpanelv1/control_panel_service_grpc.pb.go \
+  internal/runtimechannel/frame_contract_test.go
+test "$(git diff --cached --name-only | LC_ALL=C sort)" = "$(printf '%s\n' \
+  gen/controlpanelv1/control_panel_service.pb.go \
+  gen/controlpanelv1/control_panel_service_grpc.pb.go \
+  internal/runtimechannel/frame_contract_test.go \
+  proto/control_panel_service.proto | LC_ALL=C sort)"
+git diff --cached --check
+git diff --quiet
+test -z "$(git ls-files --others --exclude-standard)"
 git commit -m "feat: carry runtime dependency admission facts"
+test -z "$(git status --short --untracked-files=all)"
+
+test "$(git -C "$ROOT/core-service" rev-parse HEAD)" = "$TASK7_CORE_BASE_SHA"
+test "$(git -C "$ROOT/golang-lib" rev-parse HEAD)" = "$TASK7_GOLANG_BASE_SHA"
+test -z "$(git -C "$ROOT/core-service" status --short --untracked-files=all)"
+test -z "$(git -C "$ROOT/golang-lib" status --short --untracked-files=all)"
 ~~~
 
 ### Task 8: Implement Validate, Worker Readiness, Typed Failure Propagation, and Cleanup
