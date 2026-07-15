@@ -1659,8 +1659,14 @@ Also assert all of the following:
   record has at most 128 ordered names. An `import` record has the exact keys
   `kind`, `module`, `lineno`, and `col_offset`, with `kind="import"`, a
   non-empty absolute dotted module, integer `lineno>=1`, and integer
-  `col_offset>=0`; one AST alias becomes one record and its local `asname` is
-  intentionally irrelevant to import initialization. A `from` record has the
+  `col_offset>=0`; both source positions are additionally bounded by
+  `1_048_576`, matching the 1 MiB source cap. A dotted module consists only of
+  one or more single-dot-separated Python identifiers for which
+  `str.isidentifier()` is true and `keyword.iskeyword()` is false; leading,
+  trailing, and repeated dots are invalid. The same identifier/non-keyword
+  rule applies to imported names and aliases except for the explicitly allowed
+  `*`. One AST alias becomes one record and its local `asname` is intentionally
+  irrelevant to import initialization. A `from` record has the
   exact keys `kind`, `module`, `names`, `lineno`, and `col_offset`, with
   `kind="from"`, a non-empty absolute dotted `module`, the same integer bounds,
   and a non-empty ordered names array. Each name object has exactly `name` and
@@ -1872,6 +1878,48 @@ installation must pass `python -I -m hushine_runtime_import_probe
 _probe-imports`; user strategy source that imports this internal root remains
 unsupported. Task 6 calls this exact client/child rather than forking a debugger
 protocol.
+
+The stable neutral client surface consumed by Task 5's Hosted adapter and Task
+6's debugger adapter is:
+
+~~~python
+@dataclass(frozen=True, slots=True)
+class ExpectedProfile:
+    name: str
+    version: str
+    contract_sha256: str
+
+@dataclass(frozen=True, slots=True)
+class ImportProbeResult:
+    ok: bool
+    code: Literal[
+        "",
+        "STRATEGY_DEPENDENCY_UNAVAILABLE",
+        "STRATEGY_IMPORT_FAILED",
+    ]
+    requested_module: str
+    profile_name: str
+    profile_version: str
+    contract_sha256: str
+
+def collect_import_records(tree: ast.AST) -> tuple[ImportRecord, ...]: ...
+
+def probe_import_records(
+    imports: Sequence[ImportRecord],
+    *,
+    python_invocation_path: str,
+    expected_profile: ExpectedProfile,
+    timeout_seconds: float = 15.0,
+) -> ImportProbeResult: ...
+~~~
+
+`ImportRecord` is an immutable neutral `import`/`from` value, not a Hosted
+source or error type. Protocol codecs remain in the non-public `protocol`
+module and do not expand this adapter surface. The production client has no
+`extra_python_path` parameter. Hermetic child fixtures use a separately named,
+module-private `_probe_import_records_for_test(..., extra_python_path=...)`
+seam; production code cannot select it, and ordinary calls hard-code the empty
+array.
 
 Move Task 4.5's already-tested stdlib-only private-root/environment/deadline/
 reader/kill/reap implementation into
