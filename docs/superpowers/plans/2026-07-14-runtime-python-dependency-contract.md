@@ -14,7 +14,10 @@
 - Schema 1 is exact: profile platform-python-3.13, profile version 1.0.0, Hosted Python 3.13, debugger Python >=3.12, and the eight approved roots dateutil, google, grpc, numpy, pandas, pydantic, requests, and yaml. The loader rejects a non-SemVer profile_version and any schema-1 Python constraint other than those exact values; later changes must introduce a new supported schema deliberately.
 - The schema-1 manifest bytes specified in Task 1 have SHA-256 8457b3c35618558fc8bfc74d4135b7eb52e00c33a8c9a49d202830f3fd5b62c5. Build, HELLO, admission configuration, tests, and documentation use the loader-computed digest; the literal appears only in assertions/configuration that intentionally pin this rollout.
 - scipy, sklearn, statsmodels, pandas_ta, pandas-ta, TA-Lib, and ta remain unsupported. coverage, debugpy, pyarrow, pytest, zstandard, grpcio-tools, and all other installed tools remain non-public.
-- Standard-library imports and the existing safe platform prefixes strategy_service.types and hushine_strategy remain governed by existing safety rules; they are not manifest distributions.
+- Standard-library imports and the exact symbol-level platform surfaces for
+  `strategy_service.types` and `hushine_strategy` remain governed by shared
+  safety rules; they are not manifest distributions. Binding a platform module
+  object or importing an operator-only SDK module is rejected.
 - Every manifest public distribution is a direct Runtime dependency in both strategy-service and strategy-debugger-cli and resolves in each committed uv.lock. A transitive installation is an explicit failure. The checker owns a write mode that reconciles only its marked pyproject projection block from the manifest; check mode proves that regeneration is a no-op, so tests and developers never maintain a second eight-item mapping.
 - `strategy-library` deliberately has no `uv.lock`. Every library test/check command uses `uv run --isolated --no-project --with-editable '.[test]' ...`, records repository status before/after, and must not create a lock or any tracked/untracked repository artifact. The service and debugger remain the only lock owners.
 - Debugger closure is run on every currently released CPython minor satisfying schema 1's `>=3.12` at release time—3.12, 3.13, and 3.14 for this release. A newly released satisfying minor expands the required matrix before the next debugger publication; “3.12+” is never treated as proof from only two sampled minors.
@@ -542,7 +545,7 @@ There are exactly two valid states:
 
 Do not make Git history a Runtime image requirement: build-time calls omit `--baseline-ref` but still check schema/project/lock/installed closure.
 
-Installed checking launches exactly one JSON probe child under `python_executable`. That child checks `sys.version_info`, loads installed distribution metadata, imports every probe, and returns the packaged manifest bytes/digest it sees. The parent does not call importlib.metadata or import any probe itself. Supply only the target invocation's allowlisted environment plus `PATH`, `HOME`, locale, and required runtime build facts; explicitly remove inherited PYTHONPATH, PYTHONHOME, VIRTUAL_ENV, UV_PROJECT_ENVIRONMENT, database, Kafka, core/order endpoints, tokens, and credentials. Tests set poisoned caller values for each removed variable and require the child not to observe them.
+Installed checking launches exactly one JSON probe child under `python_executable`. That child checks `sys.version_info`, loads installed distribution metadata, imports every probe, and returns the packaged manifest bytes/digest it sees. The parent does not call importlib.metadata or import any probe itself. Supply only Task 4.5's named profile-probe environment, with a newly-created private HOME/temp/cwd; the installed-profile child neither needs nor receives Runtime image build facts. Explicitly remove inherited PYTHONPATH, PYTHONHOME, VIRTUAL_ENV, UV_PROJECT_ENVIRONMENT, database, Kafka, core/order endpoints, tokens, and credentials. Tests set poisoned caller values for each removed variable and require the child not to observe them.
 
 - [ ] **Step 4: Add stable CLI arguments and output**
 
@@ -791,22 +794,30 @@ git commit -m "build: lock debugger runtime dependencies"
 - Create: strategy-library/hushine_strategy/import_validation.py
 - Modify: strategy-library/hushine_strategy/validator.py
 - Modify: strategy-library/hushine_strategy/__init__.py
+- Modify: strategy-library/hushine_strategy/replay/engine.py
 - Create: strategy-library/tests/hushine_strategy/test_import_validation.py
 - Modify: strategy-library/tests/hushine_strategy/test_validator.py
 - Modify: strategy-library/tests/hushine_strategy/test_replay.py
 - Modify: strategy-service/strategy_service/runtime_profile.py
 - Modify: strategy-service/strategy_service/strategy_validator.py
+- Modify: strategy-service/strategy_service/grpc_server.py
 - Create: strategy-service/tests/test_runtime_profile.py
 - Modify: strategy-service/tests/test_strategy_validator.py
 - Modify: strategy-service/tests/test_strategy_validation_preflight.py
 
 **Interfaces:**
-- Consumes: parsed AST, caller-owned standard-library roots, safe platform prefixes, packaged public profile, and an injectable module finder.
-- Produces: ImportedModule and DependencyValidationIssue values with stable dependency codes; Hosted RuntimeProfile carrying name, version, digest, Python constraint, build facts, and sorted public roots.
+- Consumes: parsed AST, caller-owned standard-library roots, an exact
+  platform import-surface policy, and the packaged public profile.
+- Produces: ImportedModule, DependencyValidationIssue,
+  DynamicImportSafetyIssue, and PlatformImportPolicy values; shared platform-
+  surface and dynamic-import/code-execution safety collectors;
+  find_spec_without_import() for non-executing source-origin
+  lookup/diagnostics; Hosted RuntimeProfile carrying name, version, digest,
+  Python constraint, build facts, and sorted public roots.
 
-Record the exact starting HEAD and `git status --short` for strategy-library and
-strategy-service. Every owned path must start clean; otherwise stop and split
-the pre-existing hunks before continuing.
+Record the exact starting HEAD and full porcelain status for strategy-library
+and strategy-service. Both isolated worktrees must start completely clean;
+otherwise stop and split/preserve the pre-existing hunks before continuing.
 
 - [ ] **Step 1: Write the shared validator contract tests**
 
@@ -823,8 +834,7 @@ def test_each_manifest_root_is_allowed(root):
         tree,
         profile=load_runtime_dependency_profile(),
         stdlib_roots=frozenset(),
-        platform_prefixes=("hushine_strategy",),
-        finder=lambda name: object(),
+        platform_modules=frozenset({"hushine_strategy"}),
     ) == ()
 
 @pytest.mark.parametrize("module", [
@@ -837,43 +847,55 @@ def test_non_contract_modules_are_not_public(module):
         ast.parse(f"import {module}"),
         profile=load_runtime_dependency_profile(),
         stdlib_roots=frozenset(),
-        platform_prefixes=(),
-        finder=lambda name: object(),
+        platform_modules=frozenset(),
     )
     assert [(issue.code, issue.module) for issue in issues] == [
         ("UNSUPPORTED_STRATEGY_DEPENDENCY", module)
     ]
 
-def test_allowed_root_with_missing_complete_path_is_unavailable():
-    issues = validate_dependency_imports(
-        ast.parse("from google.cloud import storage"),
-        profile=load_runtime_dependency_profile(),
-        stdlib_roots=frozenset(),
-        platform_prefixes=(),
-        finder=lambda name: None if name == "google.cloud" else object(),
+def test_complete_path_finder_never_imports_parent_package(tmp_path, monkeypatch):
+    package = tmp_path / "explosive_parent"
+    marker = tmp_path / "parent-imported"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed')\n"
+        "raise AssertionError('parent package executed')\n",
+        encoding="utf-8",
     )
-    assert [(issue.code, issue.module) for issue in issues] == [
-        ("STRATEGY_DEPENDENCY_UNAVAILABLE", "google.cloud")
-    ]
+    (package / "child.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    sys.modules.pop("explosive_parent", None)
+    assert find_spec_without_import("explosive_parent.child") is not None
+    assert "explosive_parent" not in sys.modules
+    assert not marker.exists()
+
+@pytest.mark.parametrize("module", ["os.path", "collections.abc"])
+def test_stdlib_dotted_aliases_do_not_require_pathfinder_resolution(module):
+    assert validate_dependency_imports(
+        ast.parse(f"import {module}"),
+        profile=load_runtime_dependency_profile(),
+        stdlib_roots=frozenset({"os", "collections"}),
+        platform_modules=frozenset(),
+    ) == ()
 ~~~
 
-The import collector records alias.name for ast.Import and node.module for absolute ast.ImportFrom; it never treats imported symbols such as pandas.DataFrame as submodules. A finder exception is converted to unavailable with a safe message.
+The import collector records alias.name for ast.Import and node.module for absolute ast.ImportFrom; it never treats imported symbols such as pandas.DataFrame as submodules. Locator exceptions are safe diagnostic failures, never proof of import unavailability.
 
-The shared dependency-code set is closed and exact:
-`UNSUPPORTED_STRATEGY_DEPENDENCY` and
-`STRATEGY_DEPENDENCY_UNAVAILABLE`. Debugger/tool/algorithm modules use the first
-code; finder absence or exception uses the second. Add spy tests proving:
+Task 4 static validation emits exactly one dependency code:
+`UNSUPPORTED_STRATEGY_DEPENDENCY`. Task 5's exact-interpreter child owns
+`STRATEGY_DEPENDENCY_UNAVAILABLE`; a non-importing filesystem finder is not a
+complete model of Python aliases and parent initialization. Add collector tests
+proving:
 
 - `import pandas.io.common` asks only for `pandas.io.common`;
 - `from pandas.io import common` asks only for `pandas.io`;
 - `from pandas import DataFrame` asks only for `pandas`;
-- unsupported `talib.child` never calls the finder;
-- platform-prefix matching is segment-boundary exact: `strategy_service.types`
-  and descendants may pass, while `strategy_service`,
+- platform-module matching is exact: `strategy_service.types` may pass, while
+  `strategy_service`, `strategy_service.types.child`,
   `strategy_service.wallet`, and `strategy_service.types_evil` do not;
-- a finder exception containing a path/secret returns only the fixed safe
-  unavailable message, with `issue.module` equal to the requested complete
-  module and no exception text.
+- `requests.packages.urllib3`, `os.path`, and `collections.abc` are not falsely
+  rejected statically; Task 5 proves their actual import in the exact target.
 
 For every shared issue, `issue.module` is exactly the source-requested complete
 `ImportedModule.module`, never its collapsed root. Assert
@@ -881,11 +903,117 @@ For every shared issue, `issue.module` is exactly the source-requested complete
 `(UNSUPPORTED_STRATEGY_DEPENDENCY, "talib.child")`.
 
 `iter_imported_modules` excludes every `ast.ImportFrom` whose `level > 0` and
-never calls the finder for it. The library and service adapters separately scan
+never presents it to dependency permission validation. The library and service adapters separately scan
 relative imports before shared dependency validation and preserve the existing
 safety code `forbidden_import`, including leading dots in `module`. Cover
 `from . import x`, `from .hushine_strategy import X`, and
 `from ..pandas import X` in both adapters.
+
+Add a shared platform-surface matrix. `PlatformImportPolicy` protects roots
+`hushine_strategy` and `strategy_service`; any `ast.Import` of either root or a
+descendant is ordinary `forbidden_import`, because it binds a module object.
+An absolute `ast.ImportFrom` is accepted only when both its exact module and
+every imported symbol appear in the immutable caller policy; star imports are
+forbidden. The library policy permits only the declared type/input/wallet
+symbols. The Hosted policy additionally permits only `strategy_service.types`
+symbols from that module's `__all__`. Explicitly reject, with child spawn zero:
+
+~~~python
+from hushine_strategy import runtime_dependencies as rd
+rd.importlib.import_module("kafka")
+
+from hushine_strategy.runtime_dependencies import subprocess
+subprocess.run(["true"])
+
+from hushine_strategy.notifier import Path
+Path("/tmp/escape").write_text("x")
+~~~
+
+Also reject `import hushine_strategy`, `import hushine_strategy.types as sdk`,
+`from hushine_strategy import LocalNotifier`, runtime profile/validator/replay
+symbols, `from strategy_service import StrategyEngine`, and any non-`__all__`
+`strategy_service.types` symbol. Preserve current user forms such as
+`from hushine_strategy import Exchange, Market, OrderDecision` and
+`from strategy_service.types import Exchange, MarketData, OrderDecision`.
+The platform-surface issue suppresses a second dependency issue for the same
+node. This closes direct installed-module handle leaks; the validator remains
+defense-in-depth rather than an object-graph sandbox.
+
+Add a shared, parameterized dynamic-loading safety matrix before implementation.
+The closed Hosted roots are `builtins`, `importlib`, `marshal`, `modulefinder`,
+`pickle`, `pkgutil`, `pydoc`, `runpy`, `shelve`, and `zipimport`; importing any
+of them produces ordinary `forbidden_import`, never a dependency code. The
+closed Hosted calls are `__import__`, `compile`, `eval`, `exec`, `globals`,
+`locals`, and `vars`; direct calls, `ImportFrom` aliases, assignment aliases,
+NamedExpr aliases, explicit `__builtins__`/`__dict__`/subscript access, and
+literal `getattr(..., "__import__")` smuggling produce ordinary
+`forbidden_call`/`forbidden_builtin_access`. A normal
+`getattr(strategy, "indicators", None)` remains valid. Parameterize identical
+library and service adapter expectations for:
+
+~~~python
+import importlib; importlib.import_module("kafka")
+from importlib import import_module as load; load("psycopg2")
+loader = __import__; loader("cryptography")
+(loader := __import__)("kafka")
+((loader,),) = ((__import__,),); loader("kafka")
+(safe, (loader,)) = (len, (__import__,)); loader("kafka")
+def run(loader=__import__): return loader("kafka")
+def run(*, loader=__import__): return loader("kafka")
+run = lambda loader=__import__: loader("kafka")
+(lambda loader: loader("kafka"))(__import__)
+[loader("kafka") for loader in [__import__]]
+for loader in [__import__]: loader("kafka")
+exec("import kafka")
+getattr(__builtins__, "__import__")("kafka")
+getattr(requests, "__builtins__")["__import__"]("kafka")
+getattr(requests, "__dict__").get("__builtins__").get("__import__")("kafka")
+vars(__builtins__)["__import__"]("kafka")
+globals()["__builtins__"]["__import__"]("kafka")
+~~~
+
+Each produces the applicable deterministic safety issue set for the
+dynamic-load attempt, performs no child availability probe, and never becomes
+a dependency code. Preserve existing multi-signal diagnostics: explicit
+`__builtins__` smuggling may report both `forbidden_builtin_access` and its
+dangerous `forbidden_call`, sorted/deduplicated by stable fields. Tests require
+the expected blocking categories rather than exactly one issue. Also prove a
+normal `getattr(data, "indicators", None)` remains valid, while literal
+`getattr(..., "__builtins__")` and `getattr(..., "__dict__")` are explicit
+builtins-container access and propagate through assignment/subscript/`.get`
+aliases. Also prove a normal static `import numpy` inside a callback remains visible to the AST
+dependency collector and passes. These enumerated checks close supported
+dynamic-loading mechanisms; the validator is dependency-contract
+defense-in-depth, not a Python object-graph security sandbox. Worker/process
+isolation and credential sanitization remain the security boundary, so docs and
+errors must not claim arbitrary reflection is impossible.
+
+Structurally matching tuple/list destructuring is paired recursively at every
+depth, including mixed tuple/list shapes; a forbidden leaf propagates only to
+its corresponding target name. Add the two nested examples above to shared,
+library, and Hosted RED/GREEN matrices, plus a normal nested assignment that
+must remain valid. Mismatched shapes fail conservatively without dropping a
+forbidden leaf, and the worklist complexity bound below includes recursive
+pairs.
+
+Acquiring a closed builtin callable handle is itself forbidden. Emit
+`forbidden_call` for every `ast.Name` Load of a closed callable or already-known
+forbidden alias, not only when that Name is the immediate callee; ordinary
+direct calls deduplicate normally. This exact rule covers positional and
+keyword-only defaults, lambda defaults/arguments, function-call arguments,
+comprehension bindings, and `for` bindings without scope-specific rescans. Add
+all examples above to shared/library/Hosted RED/GREEN tests, plus ordinary safe
+defaults/arguments. They emit dependency issue/child spawn zero; retain the
+worklist only to discover renamed handles.
+
+Alias propagation is monotonic and near-linear, not a whole-assignment
+fixed-point rescan. Add a reverse-ordered chain of at least 2,000 assignments
+ending at `__import__`, prove the first alias is rejected in both the shared and
+Hosted adapters, and instrument the internal origin-evaluation seam to require
+at most `12 * assignment_count + 100` evaluations. Do not use a flaky
+wall-clock-only assertion. A worklist/reverse-dependency graph must terminate
+for cycles and multiple assignments to one target, retain deterministic origin
+selection, and never oscillate between origins.
 
 - [ ] **Step 2: Run shared tests and verify RED**
 
@@ -923,26 +1051,108 @@ class DependencyValidationIssue:
     line: int
     message: str
 
+@dataclass(frozen=True)
+class DynamicImportSafetyIssue:
+    code: str
+    module: str
+    symbol: str
+    line: int
+    message: str
+
+@dataclass(frozen=True)
+class PlatformImportPolicy:
+    protected_roots: tuple[str, ...]
+    allowed_from_symbols: tuple[tuple[str, tuple[str, ...]], ...]
+
 def iter_imported_modules(tree: ast.AST) -> tuple[ImportedModule, ...]: ...
+
+def find_spec_without_import(module: str) -> object | None: ...
+
+def validate_dynamic_import_safety(
+    tree: ast.AST,
+    *,
+    forbidden_import_roots: AbstractSet[str] = HOSTED_DYNAMIC_IMPORT_ROOTS,
+    forbidden_calls: AbstractSet[str] = HOSTED_DYNAMIC_IMPORT_CALLS,
+) -> tuple[DynamicImportSafetyIssue, ...]: ...
+
+def validate_platform_import_safety(
+    tree: ast.AST,
+    *,
+    policy: PlatformImportPolicy,
+) -> tuple[DynamicImportSafetyIssue, ...]: ...
 
 def validate_dependency_imports(
     tree: ast.AST,
     *,
     profile: RuntimeDependencyProfile,
     stdlib_roots: AbstractSet[str],
-    platform_prefixes: tuple[str, ...],
-    finder: Callable[[str], object | None] = importlib.util.find_spec,
+    platform_modules: AbstractSet[str],
 ) -> tuple[DependencyValidationIssue, ...]: ...
 ~~~
 
-Permission first matches an exact platform prefix on a segment boundary
-(`module == prefix` or `module.startswith(prefix + ".")`). A platform prefix
-never authorizes its top-level root or siblings. Otherwise permission is
-decided by the top-level standard-library/profile root. Availability is decided
-using exactly the complete `ImportedModule.module`; permission failure never
-calls the finder. Sort issues by line, module, and code and deduplicate by
-`(line,module,code)` so Hosted and debugger results are byte-stable. Finder
-errors never expose exception text, environment, paths, or secrets.
+`find_spec_without_import()` checks built-in and frozen modules, then walks each
+module segment with `importlib.machinery.PathFinder` and the previous package's
+`submodule_search_locations`. It never calls `importlib.util.find_spec()` for a
+dotted name, never invokes a module loader, and never inserts a parent into
+`sys.modules`. Missing/non-package parents return None. Tests use a parent
+package whose `__init__.py` raises and writes a marker, proving lookup neither
+executes it nor creates the marker. This utility supports non-executing module
+source-origin resolution and optional diagnostics only; None is not treated as
+proof that a legal Python import is unavailable. Runtime aliases such as
+`requests.packages.urllib3`, `os.path`, and `collections.abc` can import even
+when segmented PathFinder cannot model them. Task 5 therefore owns all complete
+importability decisions under the exact worker interpreter. The library's
+separate forbidden-root policy still rejects `os.path`; Hosted permits it.
+
+`validate_platform_import_safety()` performs only the exact module/symbol form
+checks specified above and never imports a module or derives symbols from the
+installed package at validation time. Define immutable SDK/Hosted policies from
+literal public symbol sets in this shared module; do not use `__all__`, because
+operator-only runtime dependency exports are intentionally not strategy
+exports. The exact policy is:
+
+- `hushine_strategy`: `Exchange`, `InputView`, `Market`, `MarketData`,
+  `OrderDecision`, `OrderFill`, `OrderSide`, `OrderType`, `PositionSide`,
+  `StrategyInput`, `StrategyOrderTarget`;
+- `hushine_strategy.types`: `Exchange`, `Market`, `MarketData`,
+  `OrderDecision`, `OrderFill`, `OrderSide`, `OrderType`, `PositionSide`,
+  `OrderUpdateEvent`, and `OrderUpdateFill`;
+- `hushine_strategy.inputs`: `InputView`, `StrategyInput`,
+  `StrategyOrderTarget`, `StrategyRiskControls`;
+- `hushine_strategy.wallet` and `hushine_strategy.wallet.futures`:
+  `FuturesWallet` only;
+- Hosted-only `strategy_service.types`: `Exchange`, `ExecutionFeedback`,
+  `Market`, `MarketData`, `OrderDecision`, `OrderFill`, `OrderResponse`,
+  `OrderSide`, `OrderType`, `OrderUpdateEvent`, `OrderUpdateFill`, and
+  `PositionSide`.
+
+No function, module object, runtime profile helper, notifier, validator, replay
+engine, or platform star import is in this surface. Export immutable
+`SDK_PLATFORM_IMPORT_POLICY`, an explicitly equal
+`DEBUGGER_PLATFORM_IMPORT_POLICY`, and `HOSTED_PLATFORM_IMPORT_POLICY` (SDK plus
+`strategy_service.types`). Tests import all three constants, require the
+debugger policy to equal the SDK policy without adding a module or symbol, and
+require only the Hosted policy to contain `strategy_service.types`.
+`validate_dynamic_import_safety()` owns the alias/builtins walk now embedded in
+the library validator. It accepts caller policy sets, returns
+sorted/deduplicated safe issues, and handles direct/imported/assigned/walrus
+aliases plus the enumerated builtins smuggling without executing source. It may
+special-case a literal `getattr(..., forbidden_symbol)` but must not reject
+ordinary `getattr`. This is the only implementation of that scan;
+strategy-service consumes it rather than copying AST/dataflow rules.
+
+Permission first matches an exact member of `platform_modules`; it never
+authorizes descendants, a top-level root, or siblings. The platform-surface
+scanner must run first and suppress permission processing for its rejected
+nodes. Otherwise permission is
+decided by the top-level standard-library/profile root. Caller-authorized
+standard-library roots are authorized exactly like profile roots. Task 4 does
+not perform availability lookup. Dependency issues deduplicate by
+`(line,module,code)`; platform/dynamic safety issues deduplicate by
+`(line,module,symbol,code)`. Sort combined adapter results by
+line/module/symbol/code so multiple symbols on one line are never lost and
+Hosted/debugger results are byte-stable. Finder
+utility errors never expose exception text, environment, paths, or secrets.
 
 - [ ] **Step 4: Refactor the library validator without weakening safety rules**
 
@@ -962,7 +1172,17 @@ The library adapter classifies relative imports and every root in
 `FORBIDDEN_IMPORT_ROOTS` before shared dependency validation, emits exactly the
 existing `forbidden_import` issue, suppresses the corresponding shared issue,
 and never emits two categories for one AST import. Add `os` and `subprocess`
-tests requiring exactly one `forbidden_import` each and zero finder calls.
+tests requiring exactly one `forbidden_import` each. Add `collections.abc` as a
+valid limited-stdlib regression; `os.path` remains exactly one library
+`forbidden_import`.
+
+Refactor the existing forbidden-call/builtins alias logic to consume
+`validate_dynamic_import_safety` with the library's existing broader
+`FORBIDDEN_IMPORT_ROOTS` and `FORBIDDEN_CALLS`. Preserve every existing
+network/file/process/dangerous-call result. Adapter order is relative import,
+shared platform-surface safety, shared dynamic safety, then dependency
+permission; a safety-rejected AST node emits no
+second dependency issue and never reaches the Task 5 child probe.
 
 Update assertions so:
 
@@ -976,7 +1196,26 @@ assert dependency_codes(
 ) == []
 ~~~
 
-The dotted pandas import passes only when the finder resolves pandas.io.common.
+The dotted pandas import is authorized statically by its manifest root; Task 5
+proves exact import initialization before Hosted execution.
+Add real replay execution tests for allowed stdlib/third-party star imports,
+including `from requests import *`. The safe replay wrapper forwards the
+underlying module's deterministic `__all__` when present, including safe
+leading-underscore names explicitly declared there (for example NumPy
+`__version__`); only the no-`__all__` fallback filters leading underscores.
+Both paths exclude `__builtins__`, `__dict__`, wrapper internals, and forbidden
+exports after value safety checks. Platform-module star imports remain rejected
+before replay. Because ordinary literal-safe `getattr(data, "indicators",
+None)` is valid statically, expose `getattr` in replay's safe builtins and prove
+the same expression executes; literal forbidden targets remain rejected by the
+static scanner. Add a real dotted-alias regression for
+both `import requests.packages.urllib3 as u` and
+`from requests.packages import urllib3 as u`: neither CPython's `IMPORT_FROM`
+fallback nor `sys.modules` traversal may return the raw module. Accessing
+`u.util.ssl_.os` must fail before exposing `os`, while ordinary wrapped
+urllib3 attributes remain usable. Assert all parent/leaf modules visible to
+strategy code are `_SafeModule` values and no equivalent dotted/from form has
+different safety behavior.
 
 - [ ] **Step 5: Replace strategy-service constants with a shared profile adapter**
 
@@ -1001,15 +1240,24 @@ cached, immutable loader and reads build facts from
 `HUSHINE_RUNTIME_STRATEGY_LIBRARY_COMMIT`, and
 `HUSHINE_RUNTIME_IMAGE_BUILD_ID`. If all three are absent, set all three facts
 to the literal `local-dev`. If all three are non-empty, preserve them exactly.
-Any blank or partial combination raises a safe configuration error; a profile
+In the all-present case, each commit is exactly 40 lowercase hexadecimal
+characters and `image_build_id` matches the generated build grammar
+`[0-9a-f]{12}-[0-9a-f]{12}-[0-9a-f]{12}-<SemVer>-(executor|executor-coverage)`
+with the optional suffix `-dirty-[0-9a-f]{12}` and an absolute 96-byte ASCII
+cap. The first two short SHA segments equal the service/library full-commit
+prefixes and the SemVer segment equals the loaded profile version. CI overrides
+must use the same grammar and correlations. Any blank, partial, malformed, control/
+newline-containing, path-like, secret-like, or oversized combination raises a
+constant safe configuration error that never echoes the value; a profile
 must never mix real and local-dev identity. Expose an internal pure
 environment-to-profile helper or cache-reset seam so tests cover all-missing,
-all-present, every partial/blank combination without cache-order pollution.
+all-present, every partial/blank combination, poisoned paths/tokens/newlines,
+and boundary lengths without cache-order pollution.
 This adapter does not guess whether it is in an image; Task 9/startup gates
 reject `local-dev` in packaged Runtime mode.
 
 Before implementing the adapter, write `test_runtime_profile.py`, service
-validator, relative-import, safe-prefix-boundary, and saved-strategy preflight
+validator, relative-import, exact-platform-surface, and saved-strategy preflight
 tests, then run them RED against the existing constants/lowercase codes:
 
 ~~~bash
@@ -1024,16 +1272,32 @@ PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
 ~~~
 
 Expected: RED for the missing profile fields/all-or-none build facts, shared
-prefix/relative behavior, and old lowercase serialized dependency codes.
+platform-surface/relative behavior, and old lowercase serialized dependency codes.
 
 Refactor `strategy_service/strategy_validator.py` to reject relative imports
 with existing `forbidden_import`, then call `validate_dependency_imports` with
-`sys.stdlib_module_names` and platform prefixes `strategy_service.types` and
-`hushine_strategy`; append its existing INPUTS, ORDER_TARGETS, risk, and
+`sys.stdlib_module_names` and the exact Hosted policy modules; append its
+existing INPUTS, ORDER_TARGETS, risk, and
 OrderDecision checks unchanged. Replace only dependency codes with the exact
 uppercase closed set while preserving declaration/safety codes. Update
 `tests/test_strategy_validation_preflight.py` so serialized saved-strategy
 errors assert the new stable code and complete module.
+Extend `StrategyValidationIssue` with `symbol: str = ""`; dependency and
+declaration issues leave it empty, while platform/dynamic safety adapters
+preserve the shared symbol explicitly. Equality/serialization tests cover the
+new default without folding a symbol into a message.
+Prove `os.path`, `collections.abc`, and the runtime alias
+`requests.packages.urllib3` are accepted statically; their exact-interpreter
+import check is deliberately deferred to Task 5.
+
+Before dependency permission validation, call the shared platform-surface
+collector with `HOSTED_PLATFORM_IMPORT_POLICY`, then the shared dynamic safety
+collector with its closed Hosted defaults. Preserve ordinary safety
+code/module/symbol/line in `StrategyValidationIssue`; never translate it into a
+dependency code. Add RED/GREEN cases proving installed but non-public modules
+such as `kafka`/`psycopg2` cannot be reached by any enumerated dynamic mechanism,
+while the repository's existing strategy templates using normal `getattr`
+still validate.
 
 - [ ] **Step 6: Prove Hosted/library equality and non-expansion**
 
@@ -1057,78 +1321,449 @@ pass and the service assertion compares its sorted public modules directly to
 
 ~~~bash
 cd strategy-library
-git add hushine_strategy/import_validation.py hushine_strategy/validator.py hushine_strategy/__init__.py tests/hushine_strategy/test_import_validation.py tests/hushine_strategy/test_validator.py tests/hushine_strategy/test_replay.py
-test "$(git diff --cached --name-only)" = "$(printf '%s\n' hushine_strategy/__init__.py hushine_strategy/import_validation.py hushine_strategy/validator.py tests/hushine_strategy/test_import_validation.py tests/hushine_strategy/test_replay.py tests/hushine_strategy/test_validator.py | sort)"
+test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort )" = "$(printf '%s\n' hushine_strategy/__init__.py hushine_strategy/import_validation.py hushine_strategy/replay/engine.py hushine_strategy/validator.py tests/hushine_strategy/test_import_validation.py tests/hushine_strategy/test_replay.py tests/hushine_strategy/test_validator.py | sort)"
+git diff --cached --quiet
+git add hushine_strategy/import_validation.py hushine_strategy/validator.py hushine_strategy/__init__.py hushine_strategy/replay/engine.py tests/hushine_strategy/test_import_validation.py tests/hushine_strategy/test_validator.py tests/hushine_strategy/test_replay.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' hushine_strategy/__init__.py hushine_strategy/import_validation.py hushine_strategy/replay/engine.py hushine_strategy/validator.py tests/hushine_strategy/test_import_validation.py tests/hushine_strategy/test_replay.py tests/hushine_strategy/test_validator.py | sort)"
 git diff --cached --check
+git diff --quiet
+test -z "$(git ls-files --others --exclude-standard)"
 git commit -m "refactor: share strategy dependency validation"
+test -z "$(git status --short --untracked-files=all)"
 cd ../strategy-service
-git add strategy_service/runtime_profile.py strategy_service/strategy_validator.py tests/test_runtime_profile.py tests/test_strategy_validation_preflight.py tests/test_strategy_validator.py
-test "$(git diff --cached --name-only)" = "$(printf '%s\n' strategy_service/runtime_profile.py strategy_service/strategy_validator.py tests/test_runtime_profile.py tests/test_strategy_validation_preflight.py tests/test_strategy_validator.py | sort)"
+test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort )" = "$(printf '%s\n' strategy_service/grpc_server.py strategy_service/runtime_profile.py strategy_service/strategy_validator.py tests/test_runtime_profile.py tests/test_strategy_validation_preflight.py tests/test_strategy_validator.py | sort)"
+git diff --cached --quiet
+git add strategy_service/grpc_server.py strategy_service/runtime_profile.py strategy_service/strategy_validator.py tests/test_runtime_profile.py tests/test_strategy_validation_preflight.py tests/test_strategy_validator.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' strategy_service/grpc_server.py strategy_service/runtime_profile.py strategy_service/strategy_validator.py tests/test_runtime_profile.py tests/test_strategy_validation_preflight.py tests/test_strategy_validator.py | sort)"
 git diff --cached --check
+git diff --quiet
+test -z "$(git ls-files --others --exclude-standard)"
 git commit -m "refactor: consume shared runtime profile"
+test -z "$(git status --short --untracked-files=all)"
 ~~~
+
+### Task 4.5: Bound and Sanitize the Existing Installed-Profile Probe
+
+**Files:**
+- Modify: strategy-library/hushine_strategy/runtime_dependencies.py
+- Modify: strategy-library/scripts/check_runtime_dependency_contract.py
+- Modify: strategy-library/tests/hushine_strategy/test_runtime_dependencies.py
+- Modify: strategy-library/tests/test_runtime_dependency_contract.py
+
+**Interfaces:**
+- Consumes: an absolute normalized target-Python invocation path whose final
+  venv symlink is preserved, `None|3.13|>=3.12`, and an untrusted caller
+  environment.
+- Produces: the existing installed-profile result through one sanitized,
+  bounded, portable child transport; no caller secret, unbounded pipe, or
+  unreaped process crosses the boundary.
+
+This is a separate security repair after Task 4 and before Task 5. It does not
+depend on the not-yet-created neutral import-probe package. Task 5 later moves
+the verified low-level transport rather than copying it.
+
+- [ ] **Step 1: Write RED environment, protocol, and process-lifecycle tests**
+
+Before production edits, cover:
+
+1. Define the named `PROFILE_PROBE_ENV_KEYS` policy for this child. A poisoned
+   parent environment containing every `PYTHON*`, venv/UV,
+   DB/Kafka/core/order/control address, runtime/venue/auth/cloud credential,
+   proxy, Git variable, `LC_TOKEN`, mixed-case Windows key, and canary reaches
+   neither the child nor any error. Only `PATH`, `SOURCE_DATE_EPOCH`, `LANG`,
+   `LANGUAGE`, `LC_ADDRESS`, `LC_ALL`, `LC_COLLATE`, `LC_CTYPE`,
+   `LC_IDENTIFICATION`, `LC_MEASUREMENT`, `LC_MESSAGES`, `LC_MONETARY`,
+   `LC_NAME`, `LC_NUMERIC`, `LC_PAPER`, `LC_TELEPHONE`, `LC_TIME`, `TZ`, and
+   trusted Windows `SYSTEMROOT`/`WINDIR` may be copied. Runtime image build
+   facts are never copied: this child verifies installed metadata and manifest
+   bytes only, while Task 4's service-owned loader validates build facts.
+   `SOURCE_DATE_EPOCH` is bounded ASCII digits.
+   HOME/USERPROFILE and inherited temp values are never copied. Key comparison
+   is case-insensitive on Windows; lookalikes such as `LC_TOKEN` are rejected.
+2. The runner creates one private root with empty cwd/home/tmp. POSIX requires
+   mode 0700; native Windows requires a newly-created current-user-only temp
+   directory with no inherited writable ACL for other users, verified by the
+   native acceptance test. The runner
+   points HOME (and Windows USERPROFILE) plus TEMP/TMP/TMPDIR there, and uses
+   `shell=False`, `stdin=DEVNULL`, `close_fds=True`. Cleanup occurs on success,
+   launch failure, child failure, timeout, overflow, and parse failure.
+3. The executable is absolute/normalized without resolving its final symlink.
+   Constraint is exactly `None`, `3.13`, or `>=3.12`; argv is NUL-free and at
+   most 8 KiB UTF-8 before launch.
+   CLI/checker callers may provide a relative installed-Python path, but the
+   checker converts it once with `abspath(normpath)`—never `realpath`—before the
+   runner. Checker violations use fixed logical target `installed-runtime`,
+   never the local interpreter path.
+4. stdout and stderr are independently capped at 64 KiB with simultaneous
+   portable reader threads. A hang, either overflow, or both pipes filling
+   triggers terminate, bounded one-second wait, kill, final wait/reap, pipe
+   close, bounded joins, and private-root removal under one monotonic deadline.
+   Tests assert no live PID/thread/root remains and monkeypatch
+   `subprocess.run` to fail if called.
+5. Parse strict UTF-8 with duplicate-key rejection. stdout is exactly one
+   canonical `sort_keys=True,separators=(',',':')` object plus LF; stderr is
+   empty. The exact top-level keys are `schema_version`, `profile_name`,
+   `profile_version`, `hosted_python`, `debugger_python`, `contract_sha256`,
+   `public_import_roots`, `public_distributions`, `dependencies`,
+   `python_version`, `ok`, and `failures`; dependency and failure records each
+   have their existing exact four keys. Exit 0 requires `ok=true`; exit 1
+   requires `ok=false`; all other status/schema/extra/trailing/partial/invalid
+   output fails with a constant safe error.
+6. A dependency import that prints or raises with more than 64 KiB does not
+   grow a child `StringIO`, leak output, or deadlock. Valid exit-0 and exit-1
+   canonical payloads still preserve existing profile/failure semantics.
+
+Run the two focused suites and record independent REDs for environment leakage,
+the `subprocess.run(capture_output=True)` path, unbounded `StringIO`, and missing
+lifecycle cleanup:
+
+~~~bash
+cd strategy-library
+uv run --isolated --no-project --with-editable '.[test]' pytest \
+  tests/hushine_strategy/test_runtime_dependencies.py -q
+uv run --isolated --no-project --with-editable '.[test]' pytest \
+  tests/test_runtime_dependency_contract.py -q
+~~~
+
+- [ ] **Step 2: Implement one defense-in-depth environment and Popen runner**
+
+Replace `_probe_environment()` with an explicit case-normalized allowlist
+builder. `_run_installed_probe()` re-sanitizes any supplied mapping, so a caller
+cannot bypass the policy. Imported package output goes to devnull/bounded sinks,
+never `io.StringIO`; native fd output remains subject to the parent's bounds.
+Use `Popen` plus two reader threads and the single cleanup state machine above;
+do not use `subprocess.run`, unbounded `communicate`, selectors, POSIX-only
+signals, `preexec_fn`, or a shell. Safe failures never include argv,
+executable/cwd, environment, output, paths, or exception text.
+
+The contract checker must call this same environment builder/runner instead of
+maintaining a second policy. Profile probes have no stdin request; Task 5 alone
+adds a deadline-bound writer when it generalizes the transport.
+
+- [ ] **Step 3: Verify POSIX, native Windows, scope, and commit**
+
+~~~bash
+cd strategy-library
+test ! -e uv.lock
+uv run --isolated --no-project --with-editable '.[test]' pytest \
+  tests/hushine_strategy/test_runtime_dependencies.py \
+  tests/test_runtime_dependency_contract.py -q
+uv run --isolated --no-project --with-editable '.[test]' pytest -q
+test ! -e uv.lock
+test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort )" = "$(printf '%s\n' \
+  hushine_strategy/runtime_dependencies.py \
+  scripts/check_runtime_dependency_contract.py \
+  tests/hushine_strategy/test_runtime_dependencies.py \
+  tests/test_runtime_dependency_contract.py | sort)"
+git diff --cached --quiet
+git add hushine_strategy/runtime_dependencies.py \
+  scripts/check_runtime_dependency_contract.py \
+  tests/hushine_strategy/test_runtime_dependencies.py \
+  tests/test_runtime_dependency_contract.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
+  hushine_strategy/runtime_dependencies.py \
+  scripts/check_runtime_dependency_contract.py \
+  tests/hushine_strategy/test_runtime_dependencies.py \
+  tests/test_runtime_dependency_contract.py | sort)"
+git diff --cached --check
+git diff --quiet
+test -z "$(git ls-files --others --exclude-standard)"
+git commit -m "fix: bound runtime dependency probe transport"
+test -z "$(git status --short --untracked-files=all)"
+~~~
+
+Run the real timeout, dual-pipe overflow, terminate/kill/reap, and private-root
+cleanup tests on native Windows as a required acceptance gate; mocked Windows
+paths or cross-builds are insufficient.
 
 ### Task 5: Gate Complete Module Resolution and Import Initialization Before User Code
 
 **Files:**
+- Modify: strategy-library/pyproject.toml
+- Create: strategy-library/hushine_runtime_import_probe/__init__.py
+- Create: strategy-library/hushine_runtime_import_probe/__main__.py
+- Create: strategy-library/hushine_runtime_import_probe/protocol.py
+- Create: strategy-library/hushine_runtime_import_probe/transport.py
+- Modify: strategy-library/hushine_strategy/runtime_dependencies.py
+- Create: strategy-library/tests/hushine_strategy/test_import_probe.py
+- Modify: strategy-library/tests/hushine_strategy/test_runtime_dependencies.py
+- Modify: strategy-library/tests/test_runtime_dependency_contract.py
 - Create: strategy-service/strategy_service/strategy_imports.py
 - Modify: strategy-service/strategy_service/strategy/base.py
+- Modify: strategy-service/strategy_service/service.py
 - Modify: strategy-service/strategy_service/grpc_server.py
 - Create: strategy-service/tests/test_strategy_imports.py
+- Modify: strategy-service/tests/test_strategy_engine.py
+- Modify: strategy-service/tests/test_debug_strategy_sources.py
 - Modify: strategy-service/tests/test_grpc_server.py
+- Modify: strategy-service/tests/test_notification.py
+- Modify: strategy-service/tests/test_strategy_phase3_runtime.py
 
 **Interfaces:**
-- Consumes: validated strategy source, current RuntimeProfile, and the exact worker Python executable.
-- Produces: StrategyDependencyError with stable fields, StrategySourceGateResult preserving both validation issues and typed dependency detail, resolve_strategy_imports(), and probe_strategy_imports() which execute no user statements other than Python import statements.
+- Consumes: DB text, a source-file path, or a module path; current RuntimeProfile; and the absolute normalized invocation path of the already-running worker's `sys.executable`, preserving a virtualenv symlink.
+- Produces: one non-public strategy-library import-probe package shared by Hosted and debugger; immutable ResolvedStrategySource plus a sealed GatedStrategySource capability; StrategyDependencyError with stable fields; StrategySourceGateResult preserving every static issue and typed dependency detail; and a non-importing source resolver.
 
-- [ ] **Step 1: Write failure-classification and no-user-code tests**
+Record the exact strategy-library and strategy-service starting HEADs and full
+porcelain status. Both repositories in the isolated worktree must start
+completely clean; otherwise preserve/split the pre-existing changes and stop.
+This task does not create a new worker process for
+Preview/Run: the Python session worker already exists. Its guarantee is that a
+failed gate creates no strategy session state or child execution state inside
+that worker.
 
-Create an importable test package whose __init__ raises RuntimeError and inject it through the test path. Assert:
+- [ ] **Step 1: Write all source-resolution and loader bypass tests first**
+
+Extend `tests/test_strategy_engine.py` and
+`tests/test_debug_strategy_sources.py` before creating the new module. Cover
+every currently accepted source form:
+
+1. DB source text resolves to one immutable UTF-8 byte sequence and digest.
+2. A file is read exactly once; the gate and first load consume the same bytes.
+3. A module path is located segment-by-segment without importing its parent,
+   then its `.py` origin is read and executed from the captured source rather
+   than through `importlib.import_module()`.
+4. A missing/unreadable file, namespace-only package, bytecode-only/custom
+   loader, or module with no source fails closed before user code.
+5. `strategy_code=None` never means validation success; it resolves the file or
+   module and gates that source.
+6. Bare materialization resolves the generated file, gates those exact bytes,
+   and enables later file hot reload without re-reading for the first load.
+7. Replace a file after successful gating but before construction. The first
+   strategy instance must still execute the gated old bytes (TOCTOU proof).
+8. Initial loader entry points and `StrategyEngine.create_strategy()` cannot
+   accept an un-gated source token. Any compatibility wrapper must resolve and
+   gate internally rather than call `exec()` or import a module directly.
+9. A hot-reload edit with an unsupported, unavailable, broken-import, or syntax
+   failure keeps the old instance and declarations. A later valid edit gates,
+   loads, and swaps successfully. A declaration-changing valid edit remains
+   rejected under the existing restart-required behavior.
+10. DB/file/module source is at most 1 MiB of UTF-8 bytes before `ast.parse`.
+    File/module reads use a bounded `limit + 1` binary read, never an unbounded
+    `read()`/`read_bytes()`; oversize and invalid UTF-8 fail before AST or child.
+11. Core load/declaration/engine APIs accept only the read-only
+    `GatedStrategySource` protocol. The concrete token is a module-private,
+    exact-type, per-process sealed capability; a direct construction,
+    `SimpleNamespace`, copied fields, `dataclasses.replace`, pickle, copy, and
+    deepcopy all fail admission with zero `exec`. An API invocation containing
+    both a valid token A and raw/malicious source B is a `TypeError`; raw
+    compatibility is a separately named resolve-and-gate wrapper.
+12. Module/package sources execute with correct `__name__`, `__package__`,
+    `__spec__`, `__file__`, and package `__path__`. Module source uses its
+    canonical name under one process-wide re-entrant registration lock and may
+    reuse only the exact same captured digest; a same-name/different-digest
+    collision fails closed. Every canonical registration carries a
+    process-private loader seal plus digest in a private registry; reuse
+    requires the same module object, seal identity, and digest while holding
+    the same global lock. A foreign `sys.modules` insertion or mutation/removal
+    of the marker is rejected, never adopted as a prior gated load. Test both
+    attacks and concurrent register/reuse/cleanup races. DB/file sources use a private digest-qualified
+    module name, register only for the execution window, and restore the prior
+    `sys.modules` entry in `finally`. Dataclass and Pydantic class creation,
+    metadata introspection, two concurrent sessions, and exception cleanup
+    leave no private namespace pollution. Relative imports remain rejected by
+    Task 4 before the child; no test executes an ungated parent `__init__.py`.
+
+Use a module fixture whose parent `__init__.py` writes a marker and raises;
+resolving `parent.strategy` must not create the marker or add the parent to
+`sys.modules`. Use a read spy plus atomic file replacement to prove the digest,
+declaration extraction, and first construction all use the captured bytes.
+The resolver records immutable package/spec facts (`is_package`, package name,
+and normalized package search locations); it never retains or executes a
+custom loader object.
+
+- [ ] **Step 2: Write failure-classification and child-protocol tests**
+
+Create `strategy-library/tests/hushine_strategy/test_import_probe.py` for the
+shared child/client protocol and `strategy-service/tests/test_strategy_imports.py`
+for the Hosted adapter. Use actual packaged public roots for permission. Shadow
+one public root only through a private test-only request seam to create an
+importable package whose `__init__` imports an absent transitive module or
+raises RuntimeError. No test adds a production dependency root. Availability is
+never inferred from Task 4's finder: every assertion below invokes the exact
+target interpreter child. Assert:
 
 ~~~python
-def test_missing_allowed_submodule_is_unavailable():
-    error = resolve_strategy_imports(
+def test_missing_allowed_submodule_is_unavailable(worker_python):
+    resolved = resolve_strategy_source(
+        "<db>",
         "import google.hushine_missing\nraise AssertionError('must not execute')",
-        finder=lambda name: None if name == "google.hushine_missing" else object(),
-        profile=test_profile(),
+    )
+    error = probe_strategy_imports(
+        resolved,
+        python_invocation_path=worker_python,
     )
     assert error.code == "STRATEGY_DEPENDENCY_UNAVAILABLE"
     assert error.module == "google.hushine_missing"
 
 def test_import_initialization_failure_is_distinct(tmp_path):
+    resolved = resolve_strategy_source(
+        "<db>",
+        "import requests\nraise AssertionError('user body executed')",
+    )
     result = probe_strategy_imports(
-        "import broken_allowed\nraise AssertionError('user body executed')",
-        python_executable=sys.executable,
-        profile=profile_with_root("broken_allowed"),
+        resolved,
+        python_invocation_path=sys.executable,
         extra_python_path=(str(tmp_path),),
     )
     assert result.code == "STRATEGY_IMPORT_FAILED"
-    assert result.module == "broken_allowed"
+    assert result.module == "requests"
     assert "user body executed" not in result.message
 ~~~
 
-Add three distinct fixtures/tests:
+Add these distinct classifications and protocol assertions:
 
 1. The requested complete module or one of its parent packages is absent (`requested=google.cloud`, `missing=google.cloud` or `missing=google`): STRATEGY_DEPENDENCY_UNAVAILABLE, reporting only `google.cloud`.
-2. The requested module is found, but its initialization imports an unrelated absent transitive module (`requested=broken_allowed`, `missing=private_transitive`): STRATEGY_IMPORT_FAILED, reporting only `broken_allowed`; the internal missing name appears only in redacted server logs.
-3. A distribution/probe required by the packaged profile is absent before strategy validation: the Task 1 installed probe fails and Task 10 maps startup to RUNTIME_DEPENDENCY_PROFILE_INVALID; no Preview/Run worker or StrategyDependencyError is created.
+2. The requested module is found, but its initialization imports an unrelated absent transitive module (`requested=requests`, `missing=private_transitive`): STRATEGY_IMPORT_FAILED, reporting only `requests`; the internal missing name appears only in redacted server logs.
+3. A distribution/probe required by the packaged profile is absent before strategy validation: the Task 1 installed probe fails and Task 10 maps startup to RUNTIME_DEPENDENCY_PROFILE_INVALID, refuses worker startup before listener registration, and therefore creates neither a Preview/Run request nor a StrategyDependencyError.
 
-Also assert syntax and unsupported dependency are returned before subprocess creation, subprocess timeout is STRATEGY_IMPORT_FAILED, traceback/path/internal-missing text is absent from safe messages, the caller's PYTHONPATH/venv cannot leak into the child, and manifest-rendered all-public imports succeed.
+Also assert all of the following:
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- syntax, relative imports, and unsupported dependencies return before a child
+  process is spawned;
+- the exact argv is
+  `[worker_python_invocation_path, "-I", "-m",
+  "hushine_runtime_import_probe", "_probe-imports"]`, with `shell=False`;
+- production always passes an absolute/normalized `sys.executable` invocation
+  path explicitly and never replaces its final virtualenv symlink with
+  `realpath`; a
+  poisoned PATH, `VIRTUAL_ENV`, UV variables, and a second fake Python cannot
+  select another interpreter;
+- the child cwd is a newly-created empty private directory;
+- the shared transport owns two explicit named policies, never one union:
+  `PROFILE_PROBE_ENV_KEYS` retains Task 4.5's installed-profile allowlist and
+  `IMPORT_PROBE_ENV_KEYS` is used here. The import policy may copy only `LANG`,
+  `LC_ALL`, `LC_CTYPE`, `TZ`, and on Windows the
+  trusted `SYSTEMROOT`/`WINDIR`; it does not copy `COMSPEC`, `PATHEXT`, HOME,
+  USERPROFILE, or inherited temp values. The parent creates a private root and
+  sets `TEMP`, `TMP`, and `TMPDIR` to its private temp subdirectory. It contains
+  no `PYTHON*`, virtualenv/UV,
+  DB/Kafka/core/order/control-panel addresses, runtime or venue credentials,
+  auth tokens, cloud credentials, HOME, or proxy variables;
+- `extra_python_path` is encoded in the request only for hermetic fixture
+  tests and every production call uses the empty tuple;
+- the request is canonical UTF-8 JSON (`sort_keys=True`, separators `(',',
+  ':')`, `ensure_ascii=True`) followed by exactly one LF, at most 64 KiB, with at most 128 import
+  records and exact top-level keys `schema_version`, `expected_profile`,
+  `imports`, and `extra_python_path`. `expected_profile` has exact keys `name`,
+  `version`, and `contract_sha256`; the first two are at most 128 UTF-8 bytes
+  and the digest is exactly 64 lowercase hex characters. A module is at most
+  512 UTF-8 bytes; an imported name or alias is at most 256 bytes; a `from`
+  record has at most 128 ordered names. An `import` record has the exact keys
+  `kind`, `module`, `lineno`, and `col_offset`, with `kind="import"`, a
+  non-empty absolute dotted module, integer `lineno>=1`, and integer
+  `col_offset>=0`; one AST alias becomes one record and its local `asname` is
+  intentionally irrelevant to import initialization. A `from` record has the
+  exact keys `kind`, `module`, `names`, `lineno`, and `col_offset`, with
+  `kind="from"`, a non-empty absolute dotted `module`, the same integer bounds,
+  and a non-empty ordered names array. Each name object has exactly `name` and
+  `asname`: `name` is a non-empty imported identifier or `*`; `asname` is null
+  or a non-empty identifier, and `*` requires null. Empty arrays/modules/names,
+  booleans used as integers, duplicate keys, unknown kinds, and extra keys at
+  every level are rejected. The collector preserves lexical
+  `(lineno,col_offset)` and alias order and deduplicates only by the exact key
+  `('import', module)` or
+  `('from', module, ordered((name,asname)))`, retaining the first source
+  location. It never merges `import` with `from`, nor two `from` records with
+  different names or aliases;
+- `from` execution preserves Python semantics: `from requests import get`,
+  `from requests.packages import urllib3`, star imports, aliases, and multiple
+  ordered names are reconstructed as one record. The failure's
+  `requested_module` is always `node.module`, never a guessed symbol/submodule;
+  thus missing `google.cloud` in `from google.cloud import storage` can be
+  UNAVAILABLE, while missing `hushine_missing` in
+  `from google import hushine_missing` is an IMPORT_FAILED import/attribute
+  initialization result for the found requested module `google`;
+- the private test-only `extra_python_path` has at most eight absolute paths of
+  at most 1024 UTF-8 bytes each, rejects NUL/relative paths, and is inserted by
+  the child only after schema validation; production hard-asserts it is empty;
+- the child loads its own packaged manifest and requires exact expected
+  name/version/digest equality before imports. It echoes those verified facts;
+  a missing package or mismatch is a protocol/environment failure with an empty
+  public module, never UNAVAILABLE for user source;
+- a failure response's non-empty `requested_module` must equal the `module` of
+  one normalized request record. Success requires it to be empty. A child may
+  not invent, truncate, or return a parent/transitive module as the requested
+  module;
+- a child timeout is killed and reaped and becomes STRATEGY_IMPORT_FAILED with
+  the fixed empty module;
+  launch failure, nonzero internal exit, invalid UTF-8, malformed/duplicate or
+  extra JSON, schema mismatch, trailing stdout, oversized stdout/stderr, and
+  an incomplete response all fail closed with the same safe code;
+- stdout and stderr are independently capped at 64 KiB while the child runs.
+  The parent uses two portable reader threads plus bounded buffers/overflow
+  signals (not `selectors` and not an unbounded `communicate`), then on timeout
+  or overflow terminates, escalates to kill, waits/reaps, closes pipes, joins
+  both readers, and removes the private root in `finally`. Tests exercise that
+  cleanup on POSIX and a native Windows runner;
+- import stdout/stderr cannot become protocol output. Python-level output is
+  redirected in the child; any native/trailing output causes a safe failure;
+- traceback, paths, environment values, internal missing names, child output,
+  and injected canary secrets never appear in `str(error)`, RPC details, or
+  the returned message;
+- a found requested package whose initializer raises
+  `ModuleNotFoundError(name=requested_module)` is IMPORT_FAILED, not
+  UNAVAILABLE; the latter requires the child to report `static_found=false`;
+- the manifest-rendered imports for all eight public roots succeed under the
+  exact worker interpreter and isolated environment.
+- a real symlink-based virtualenv proves the child retains the worker's
+  `sys.prefix`, can locate the installed `strategy_service` and
+  `hushine_strategy` origins, and imports all eight public roots. Running the
+  symlink target directly must be a RED fixture because it loses that venv.
+
+- [ ] **Step 3: Write lifecycle assertions and run separate REDs**
+
+Before any production implementation, extend `tests/test_grpc_server.py` with
+recording fakes for session-manager create/discard, portfolio preflight/session
+persistence/update, market-data subscriptions, snapshots, `StrategyEngine`,
+and `threading.Thread`. Add the full failure matrix later listed in Step 8 and
+first prove the existing Preview/Run paths create forbidden side effects or
+cannot express the typed result.
 
 ~~~bash
+cd strategy-library
+uv run --isolated --no-project --with-editable '.[test]' pytest \
+  tests/hushine_strategy/test_import_probe.py -q
 cd strategy-service
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_strategy_engine.py tests/test_debug_strategy_sources.py -q
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/test_strategy_imports.py -q
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_grpc_server.py -q
 ~~~
 
-Expected: ModuleNotFoundError for strategy_service.strategy_imports.
+Run the existing-file behavior tests first, before importing the new module.
+They must fail because module/file/hot-reload paths bypass a shared gate and the
+first load re-reads mutable files. Capture independent collection REDs for the
+missing neutral `hushine_runtime_import_probe` package and missing Hosted
+adapter; then capture the gRPC side-effect RED. Do not let either collection
+error stand in for the behavior or lifecycle RED.
 
-- [ ] **Step 3: Implement typed errors and an import-only child probe**
+- [ ] **Step 4: Implement immutable source resolution and gate contracts**
 
 Use:
 
 ~~~python
+@dataclass(frozen=True)
+class ResolvedStrategySource:
+    filename: str
+    source_bytes: bytes
+    source_sha256: str
+    module_name: str
+    package_name: str
+    is_package: bool
+    package_search_locations: tuple[str, ...]
+    source_kind: Literal["db", "file", "module"]
+    hot_reload_path: str | None = None
+
+@runtime_checkable
+class GatedStrategySource(Protocol):
+    @property
+    def resolved(self) -> ResolvedStrategySource: ...
+    @property
+    def runtime_contract_sha256(self) -> str: ...
+    @property
+    def python_invocation_path(self) -> str: ...
+
 @dataclass(frozen=True)
 class StrategyDependencyError(Exception):
     code: str
@@ -1141,73 +1776,413 @@ class StrategyDependencyError(Exception):
 @dataclass(frozen=True)
 class StrategySourceGateResult:
     ok: bool
-    issues: tuple[ValidationIssue, ...]
+    issues: tuple[StrategyValidationIssue, ...]
     dependency_error: StrategyDependencyError | None = None
+    gated_source: GatedStrategySource | None = None
 
-def resolve_strategy_imports(
-    source: str,
+def resolve_strategy_source(
+    strategy_path: str,
+    strategy_code: str | None,
     *,
-    profile: RuntimeProfile | None = None,
-    finder: Callable[[str], object | None] = importlib.util.find_spec,
-) -> StrategyDependencyError | None: ...
+    hot_reload: bool = False,
+) -> ResolvedStrategySource: ...
 
 def probe_strategy_imports(
-    source: str,
+    resolved: ResolvedStrategySource,
     *,
-    python_executable: str = sys.executable,
+    python_invocation_path: str,
     profile: RuntimeProfile | None = None,
     timeout_seconds: float = 15.0,
     extra_python_path: tuple[str, ...] = (),
 ) -> StrategyDependencyError | None: ...
+
+def gate_strategy_source(
+    resolved: ResolvedStrategySource,
+    *,
+    python_invocation_path: str,
+) -> StrategySourceGateResult: ...
 ~~~
 
-`extra_python_path` exists only for hermetic fixture tests; production call sites always pass the default empty tuple. Build a new ast.Module containing only copied ast.Import and absolute ast.ImportFrom nodes, compile each requested module import separately in manifest/source order, and execute it in one sanitized child interpreter. The child emits one JSON object containing the requested module, whether static resolution found it, exception class, and (for diagnostics only) ModuleNotFoundError.name.
+`ResolvedStrategySource` is constructed from one immutable bounded byte read.
+Decode as UTF-8 without universal-newline rewriting for AST/compile and hash
+the exact bytes. DB text is encoded once as UTF-8. File paths and module origins
+are absolute real paths.
+Module resolution uses the Task 4 non-importing segmented finder, accepts only a
+source-backed `.py` origin, and never calls `importlib.import_module()` or a
+custom loader. The filename/module name are deterministic and no error string
+includes source contents.
 
-Classification is strict: ModuleNotFoundError is STRATEGY_DEPENDENCY_UNAVAILABLE only when `missing_name == requested_module` or `requested_module.startswith(missing_name + ".")`, meaning the requested full path or a parent package is absent. If the requested module was found but initialization lacks a child/unrelated transitive import, classify STRATEGY_IMPORT_FAILED. Every other import-time exception is also STRATEGY_IMPORT_FAILED. Profile-declared distribution/probe absence belongs to the startup verifier and becomes RUNTIME_DEPENDENCY_PROFILE_INVALID before any strategy request. Log exception type, internal missing name, and redacted traceback server-side, but construct the user message only from requested-module/profile facts; never expose the transitive module name.
+The public `GatedStrategySource` is a read-only Protocol only. Its sole concrete
+implementation is a module-private, slotted `_SealedGatedStrategySource`
+created by `gate_strategy_source` with a module-private identity seal. Every
+core loader requires `type(token) is _SealedGatedStrategySource` and the exact
+seal identity before reading fields. The class rejects copy/deepcopy/pickle and
+is not a dataclass, so callers cannot use `dataclasses.replace`. This prevents
+accidental/internal bypass; it is not presented as a sandbox against already
+executing hostile Python.
 
-- [ ] **Step 4: Put the gate immediately before all user-code load sites**
+The sealed token can exist only after static permission/safety validation,
+complete-path exact-child initialization, and source validation succeed. `ok`
+is true exactly when issues and dependency_error are empty and `gated_source`
+is present. Before `exec()`, the loader rechecks the captured-source digest,
+current runtime contract digest, exact invocation path, and optional resolved
+target device/inode identity against the token; mismatch fails closed. The
+invocation path is absolute and normalized
+but its final symlink is preserved so Python discovers the virtualenv's
+`pyvenv.cfg` and site-packages. A resolved target path/device/inode may be
+recorded only as tamper-detection identity; it is never substituted into argv.
+There is one policy source: `RuntimeProfile` is only the Hosted adapter around
+Task 1's `RuntimeDependencyProfile`, not another allowed-module list.
 
-In grpc_server.py create one helper used by source validation, Preview, and Run:
+- [ ] **Step 5: Implement the versioned import-only child protocol**
+
+The transport, request/response values, canonical JSON codec (including
+`ensure_ascii=True`), bounded reader,
+and child entry point live in the non-public top-level strategy-library package
+`hushine_runtime_import_probe`; `strategy_service.strategy_imports` owns only
+source resolution, the sealed capability, Hosted profile/error mapping, and
+load integration. Add `hushine_runtime_import_probe*` explicitly to the wheel's
+package include rules, but never to the public dependency roots. A cold wheel
+installation must pass `python -I -m hushine_runtime_import_probe
+_probe-imports`; user strategy source that imports this internal root remains
+unsupported. Task 6 calls this exact client/child rather than forking a debugger
+protocol.
+
+Move Task 4.5's already-tested stdlib-only private-root/environment/deadline/
+reader/kill/reap implementation into
+`hushine_runtime_import_probe.transport`; do not copy it. Extend that one
+transport with the deadline-bound stdin writer required by this protocol.
+`hushine_strategy.runtime_dependencies` calls the same neutral transport for
+its zero-stdin installed-profile probe, retaining all Task 4.5 behavior and
+tests. The neutral module exports distinct immutable
+`PROFILE_PROBE_ENV_KEYS` and `IMPORT_PROBE_ENV_KEYS`; callers select one exact
+policy and the transport rejects unknown policies rather than merging them.
+The transport module never imports `runtime_dependencies`; profile facts
+are passed into the higher-level protocol to avoid a cycle. Tests fail if a
+second `Popen`, environment allowlist, reader, or cleanup implementation remains
+in either high-level module.
+
+`extra_python_path` exists only for hermetic fixture tests; production call
+sites always pass the default empty tuple. Parse the already size-bounded source in the parent and
+normalize only `ast.Import` and absolute `ast.ImportFrom` nodes into a bounded,
+ordered, first-occurrence-unique JSON request. The protocol has schema version
+1 and uses only the exact record shapes and field types specified in Step 2;
+it never sends or executes arbitrary source text. The child
+revalidates the schema and constructs new AST import nodes itself.
+
+Invoke exactly:
 
 ~~~python
-def _validate_and_probe_strategy_source(code: str) -> StrategySourceGateResult:
-    static = validate_strategy_code(code)
-    if not static.ok:
-        return gate_result_from_static_validation(static)
-    if dependency_error := resolve_strategy_imports(code):
-        return gate_result_from_dependency_error(dependency_error)
-    if dependency_error := probe_strategy_imports(code):
-        return gate_result_from_dependency_error(dependency_error)
-    return StrategySourceGateResult(ok=True, issues=())
+subprocess.Popen(
+    [
+        python_invocation_path,
+        "-I",
+        "-m",
+        "hushine_runtime_import_probe",
+        "_probe-imports",
+    ],
+    cwd=private_empty_directory,
+    env=sanitized_allowlist_env,
+    shell=False,
+    stdin=PIPE,
+    stdout=PIPE,
+    stderr=PIPE,
+)
 ~~~
 
-`gate_result_from_static_validation` maps the first deterministically sorted issue with one of the dependency codes into `dependency_error` while retaining the full issue tuple; syntax/declaration-only failures leave dependency_error unset. Call the helper after code retrieval but before extract_strategy_declarations(), exec(), Session creation, background task insertion, or running progress. Preview/Run must attach `gate.dependency_error` to their gRPC/worker failure path rather than converting only `gate.issues[0].message` into a generic validation error. Validate returns all issues and the profile. In strategy/base.py re-raise StrategyDependencyError unchanged and wrap only non-dependency load exceptions. Do not return a generic ImportError for known dependency failures.
+Create one private root containing separate empty cwd and temp directories.
+Build the environment from copied locale/TZ values and trusted Windows
+`SYSTEMROOT`/`WINDIR` only, then set all of `TEMP`/`TMP`/`TMPDIR` to the private
+temp path. Start simultaneous stdout/stderr reader threads with independent
+64-KiB buffers and overflow events plus a bounded writer thread for the request;
+even a 64-KiB stdin write must share the overall deadline and cannot block the
+caller on a small Windows pipe. The writer closes stdin in `finally`. The single
+cleanup state machine terminates then kills when needed, waits/reaps exactly
+once, closes every pipe, joins all three threads with a bound, and removes the
+private root in `finally`; it must not use selectors or an unbounded
+`communicate`, so the same code runs on native Windows pipes.
 
-- [ ] **Step 5: Add lifecycle assertions around Preview and Run**
+The request limits and canonicalization are exactly those tested in Step 2;
+responses use the same `ensure_ascii=True`, sorted-key, compact-separator
+canonical JSON encoding.
+For exit 0 or 10 the child emits exactly one canonical schema-versioned JSON
+object plus one LF with the exact keys `schema_version`, `ok`,
+`profile_name`, `profile_version`, `contract_sha256`, `requested_module`,
+`static_found`, `exception_kind`, `exception_class`, and `missing_name`.
+The child loads `load_runtime_dependency_profile()` from its installed package,
+compares it to the request before importing anything, and echoes the verified
+facts. A mismatch/missing manifest exits 70 without an import response.
+Profile fields obey the request bounds; requested/missing names are at most 512
+UTF-8 bytes and exception class at most 128. `exception_kind` is the closed enum `none`,
+`module_not_found`, `import_error`, or `other`; success requires `none`, empty
+exception/name/requested-module strings, and `static_found=true`.
+On a failed import, `requested_module` must be the exact module from one request
+record; success requires it empty. `missing_name` is internal-only bounded
+diagnostic data needed for the parent to apply the classification below; it is
+never copied into an error/message/RPC/progress payload and is redacted before
+server logging. Exit 0 means all imports initialized; exit 10 requires
+`ok=false` and a non-`none` kind for the first failing record; exit 64 is an
+invalid request and exit 70 an internal probe failure. Exits 64/70 emit no
+protocol object. The parent accepts only the exact exit/schema combinations,
+drains both pipes with the Step 2 hard bounds, and completes portable
+kill/reap/close/join cleanup on every path. Any additional bytes, keys, or
+trailing whitespace are a protocol failure. The module entry point is
+importable under `-I` only because strategy-library is installed in the exact
+worker/debugger environment; absence is an environment-level hard failure with
+no PYTHONPATH or alternate-interpreter fallback.
 
-Extend tests/test_grpc_server.py with fakes that record create_session, task creation, status updates, context details, and worker state. For unsupported static, unavailable requested-path/parent ModuleNotFoundError, transitive ModuleNotFoundError import-failed, and other import-failed cases assert no session ID was allocated, no task was inserted, no running status was written, and `StrategySourceGateResult.dependency_error` reaches the RPC context with exact fields. A declaration-only validation error remains an ordinary validation response.
+Build each import statement from the normalized record and execute no user
+statements. Before each import, perform the non-executing segmented
+PathFinder/builtin/frozen lookup inside the exact child only to compute
+`static_found`; it never imports a parent. A clean missing segment is false and
+any lookup exception is treated as found/unknown, never as proof of absence.
+Execute the reconstructed import even when discovery says false so
+Python aliases can still succeed. Treat `static_found` as a classification
+fact on failures: if the real import succeeds, normalize it to true in the
+success response; if the import fails, return the pre-import non-executing
+lookup value. Add exact-child success regressions proving `os.path` and
+`requests.packages.urllib3` can have a false preliminary lookup, still execute
+successfully, and produce an accepted success response. Redirect Python and native import
+stdout/stderr to a null/bounded sink while retaining a duplicated private
+protocol descriptor for the final JSON. The parent
+accepts `missing_name` only as internal classification input, logs only its
+redacted form with exception class, and discards all captured import output. No
+traceback, path, environment value, or raw stderr crosses the child protocol.
 
-- [ ] **Step 6: Run focused and adjacent Python tests**
+Classification is strict and performed by the shared parent client from the
+validated response: `exception_kind=module_not_found` is
+STRATEGY_DEPENDENCY_UNAVAILABLE only when `static_found=false` and either
+`missing_name == requested_module` or
+`requested_module.startswith(missing_name + ".")`, meaning the requested full
+path or a parent package is absent. If `static_found=true`, even a
+ModuleNotFoundError naming the requested module is an initialization failure.
+If the requested module was found but initialization lacks a child/unrelated
+transitive import, classify STRATEGY_IMPORT_FAILED. `import_error` and every
+other import-time exception are also
+STRATEGY_IMPORT_FAILED. Profile-declared distribution/probe absence belongs to
+the startup verifier and becomes RUNTIME_DEPENDENCY_PROFILE_INVALID before any
+strategy request. Construct the user message only from requested-module/profile
+facts; never expose the transitive module name or raw child diagnostics.
+
+- [ ] **Step 6: Require a successful token at every user-code load site**
+
+In `strategy/base.py`, make every core `_load_strategy_instance*`, declaration
+extraction, `BaseStrategy` construction, and hot reload accept only a successful
+sealed `GatedStrategySource`. No core function accepts raw
+`strategy_path`/`strategy_code`, and a mixed token+raw invocation is rejected
+before compile/exec. If compatibility is required, expose a separately named
+wrapper whose only action is resolve+gate followed by the token-only core.
+Catch and re-raise a gate-produced `StrategyDependencyError` before broad
+handlers. After a successful gate, every exception raised while executing the
+user body—including explicit or helper-raised ModuleNotFoundError/ImportError—
+retains the existing generic strategy-load category; exception class/text does
+not retroactively become a dependency failure. Tests distinguish real child
+gate failures from top-level `raise ImportError` and redact both safely.
+
+Construct a fresh module namespace from the captured metadata. Module-path
+sources register under the canonical name while holding the shared registration
+lock, retain/reuse only an identical digest, and reject a digest collision.
+Package sources set immutable search locations in `__path__`; DB/file sources
+use a private digest-qualified name, temporarily register during execution for
+dataclass/Pydantic compatibility, and restore/remove in `finally`. Set
+`__name__`, `__package__`, source-backed `__spec__`, `__file__`, and `__path__`
+before compile/exec. Never invoke the resolver's loader object.
+
+`StrategyEngine.create_strategy()` accepts and forwards the token. Preview,
+declaration extraction, and the background Run construction use the same
+captured source object. If the backing file changes between them, the first
+session still runs the gated bytes. Hot reload performs a fresh read, gate and
+load, then swaps only after the existing declaration-compatibility checks. On
+failure it retains the prior instance, notifier, indicator writer and routing
+state.
+
+- [ ] **Step 7: Put the gate before all Preview/Run session side effects**
+
+In `grpc_server.py`, create one helper used by Preview and Run after DB/bare/
+file/module source selection:
+
+~~~python
+def _resolve_and_gate_strategy_source(
+    strategy_path: str,
+    strategy_code: str | None,
+    *,
+    hot_reload: bool,
+) -> StrategySourceGateResult:
+    resolved = resolve_strategy_source(
+        strategy_path, strategy_code, hot_reload=hot_reload
+    )
+    return gate_strategy_source(
+        resolved,
+        python_invocation_path=os.path.abspath(os.path.normpath(sys.executable)),
+    )
+~~~
+
+Map the first deterministically sorted Task 4
+`UNSUPPORTED_STRATEGY_DEPENDENCY` issue into `dependency_error` while retaining
+the complete static issue tuple. Syntax/declaration/safety-only failures leave
+dependency_error unset. The exact child alone adds
+STRATEGY_DEPENDENCY_UNAVAILABLE or STRATEGY_IMPORT_FAILED without exposing child
+facts. Launch/timeout/protocol/overflow failures use STRATEGY_IMPORT_FAILED with
+the fixed empty module.
+
+Task 7 owns the typed protobuf. Until then, Preview/Run encode a dependency
+failure as gRPC FAILED_PRECONDITION with the exact ASCII prefix
+`STRATEGY_DEPENDENCY_ERROR:` followed by one sort-key/compact JSON object with
+only the six `StrategyDependencyError` fields. `StrategyDependencyError.__str__`
+and this serializer are deterministic and safe. Ordinary static validation
+keeps the existing response/details category. Do not claim a Validate RPC here;
+Task 7 introduces it. The in-process gate result nevertheless retains all
+issues and current profile facts for that later adapter.
+
+Run the gate after source retrieval/materialization but before declaration
+execution, portfolio/market-data preflight calls that mutate state, session
+manager creation, subscriptions, persistence, snapshots, `StrategyEngine`, or
+thread creation. Pass the returned token through `_run_session()`; never pass
+only path/code and resolve again.
+
+- [ ] **Step 8: Make the prewritten Preview/Run lifecycle REDs GREEN**
+
+Use the Step 3 recording fakes for session-manager create/discard, portfolio
+preflight/session persistence/update, market-data subscriptions, snapshots,
+`StrategyEngine`, and `threading.Thread`. For
+unsupported static, unavailable requested-path/parent, transitive missing
+import, other import initialization failure, timeout, and malformed child
+protocol, assert:
+
+- no session-manager or DB/registry session row exists;
+- no subscription, snapshot, strategy engine, background thread, or RUNNING
+  state/progress exists;
+- no child strategy execution state is retained in the already-running Python
+  worker;
+- context code is FAILED_PRECONDITION and the safe envelope round-trips the
+  exact code/module/profile/version/image-build/message fields;
+- no canary path, secret, internal missing module, stderr, or traceback appears;
+- Preview and Run use identical gate behavior;
+- a declaration-only validation failure remains ordinary validation details.
+
+Also prove the successful Run passes the exact token/digest/interpreter to the
+background constructor and does not read the file a second time.
+
+Parameterize DB, file, module, Bare-materialized file, and hot-reload sources
+with every Task 4 dynamic-load bypass (`importlib` alias, `__import__`, exec,
+and builtins smuggling). Each rejection records child-spawn count zero and
+user-exec count zero; a hot-reload rejection retains the old instance and all
+session routing/writer/notifier state. A normal static `import numpy` inside a
+callback must pass permission and run the exact child before execution.
+
+- [ ] **Step 9: Run focused, adjacent, and full Python tests**
 
 ~~~bash
+cd strategy-library
+uv run --isolated --no-project --with-editable '.[test]' pytest \
+  tests/hushine_strategy/test_import_probe.py \
+  tests/hushine_strategy/test_import_validation.py \
+  tests/hushine_strategy/test_validator.py \
+  tests/hushine_strategy/test_runtime_dependencies.py \
+  tests/test_runtime_dependency_contract.py -q
+uv run --isolated --no-project --with-editable '.[test]' pytest \
+  tests/hushine_strategy -q
 cd strategy-service
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
   tests/test_strategy_imports.py \
+  tests/test_strategy_engine.py \
+  tests/test_debug_strategy_sources.py \
   tests/test_strategy_validator.py \
   tests/test_strategy_validation_preflight.py \
   tests/test_grpc_server.py \
-  tests/test_strategy_phase3_declarations.py -q
+  tests/test_strategy_phase3_declarations.py \
+  tests/test_notification.py \
+  tests/test_strategy_phase3_runtime.py -q
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
 ~~~
 
-Expected: all tests pass.
+Repeat the manifest-wide isolated probe with an empty caller PYTHONPATH and
+poisoned environment. Build the strategy-library wheel, install it plus
+strategy-service into a cold symlink-based venv, and require
+the shared client to send the exact canonical schema-1 empty-import request to
+`python -I -m hushine_runtime_import_probe _probe-imports` and receive a valid
+success response; do not invoke the stdin-requiring child bare. Require all
+eight roots to pass with no sibling PYTHONPATH. Run the real shared protocol, timeout,
+overflow, and cleanup smoke on native Windows PowerShell as a final acceptance
+gate (cross-build alone is insufficient). Check no child processes/private temp
+roots remain. Expected: all focused and full tests pass.
 
-- [ ] **Step 7: Commit the pre-execution gate**
+- [ ] **Step 10: Guard scope and commit the pre-execution gate**
 
 ~~~bash
+cd strategy-library
+test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort )" = "$(printf '%s\n' \
+  hushine_runtime_import_probe/__init__.py \
+  hushine_runtime_import_probe/__main__.py \
+  hushine_runtime_import_probe/protocol.py \
+  hushine_runtime_import_probe/transport.py \
+  hushine_strategy/runtime_dependencies.py \
+  pyproject.toml \
+  tests/hushine_strategy/test_import_probe.py \
+  tests/hushine_strategy/test_runtime_dependencies.py \
+  tests/test_runtime_dependency_contract.py | sort)"
+git diff --cached --quiet
+git add pyproject.toml hushine_runtime_import_probe \
+  hushine_strategy/runtime_dependencies.py \
+  tests/hushine_strategy/test_import_probe.py \
+  tests/hushine_strategy/test_runtime_dependencies.py \
+  tests/test_runtime_dependency_contract.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
+  hushine_runtime_import_probe/__init__.py \
+  hushine_runtime_import_probe/__main__.py \
+  hushine_runtime_import_probe/protocol.py \
+  hushine_runtime_import_probe/transport.py \
+  hushine_strategy/runtime_dependencies.py \
+  pyproject.toml \
+  tests/hushine_strategy/test_import_probe.py \
+  tests/hushine_strategy/test_runtime_dependencies.py \
+  tests/test_runtime_dependency_contract.py | sort)"
+git diff --cached --check
+git diff --quiet
+test -z "$(git ls-files --others --exclude-standard)"
+git commit -m "feat: add isolated strategy import probe"
+test -z "$(git status --short --untracked-files=all)"
+TASK5_STRATEGY_LIBRARY_HEAD=$(git rev-parse HEAD)
+
 cd strategy-service
-git add strategy_service/strategy_imports.py strategy_service/strategy/base.py strategy_service/grpc_server.py tests/test_strategy_imports.py tests/test_grpc_server.py
+test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort )" = "$(printf '%s\n' \
+  strategy_service/grpc_server.py \
+  strategy_service/service.py \
+  strategy_service/strategy/base.py \
+  strategy_service/strategy_imports.py \
+  tests/test_debug_strategy_sources.py \
+  tests/test_grpc_server.py \
+  tests/test_strategy_engine.py \
+  tests/test_notification.py \
+  tests/test_strategy_imports.py \
+  tests/test_strategy_phase3_runtime.py | sort)"
+git diff --cached --quiet
+git add strategy_service/strategy_imports.py strategy_service/strategy/base.py \
+  strategy_service/service.py strategy_service/grpc_server.py \
+  tests/test_strategy_imports.py tests/test_strategy_engine.py \
+  tests/test_debug_strategy_sources.py tests/test_grpc_server.py \
+  tests/test_notification.py tests/test_strategy_phase3_runtime.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
+  strategy_service/grpc_server.py \
+  strategy_service/service.py \
+  strategy_service/strategy/base.py \
+  strategy_service/strategy_imports.py \
+  tests/test_debug_strategy_sources.py \
+  tests/test_grpc_server.py \
+  tests/test_strategy_engine.py \
+  tests/test_notification.py \
+  tests/test_strategy_imports.py \
+  tests/test_strategy_phase3_runtime.py | sort)"
+git diff --cached --check
+git diff --quiet
+test -z "$(git ls-files --others --exclude-standard)"
 git commit -m "fix: reject unavailable strategy imports before execution"
+test -z "$(git status --short --untracked-files=all)"
+printf '%s\n' "$TASK5_STRATEGY_LIBRARY_HEAD"
 ~~~
+
+Record the printed post-Task-5 strategy-library SHA in the task report. Task 6
+must pin exactly that commit before it can consume the shared child.
 
 ### Task 6: Make Debugger Bootstrap Lock-Driven and Profile-Aware
 
@@ -1216,6 +2191,7 @@ git commit -m "fix: reject unavailable strategy imports before execution"
 - Modify generated lock: strategy-debugger-cli/uv.lock
 - Modify: strategy-debugger-cli/init.py
 - Create: strategy-debugger-cli/scripts/bootstrap-standalone.test.sh
+- Create: strategy-debugger-cli/scripts/bootstrap-standalone.test.ps1
 - Create: strategy-debugger-cli/src/hushine_debugger/runtime_profile.py
 - Modify: strategy-debugger-cli/src/hushine_debugger/cli.py
 - Modify: strategy-debugger-cli/src/hushine_debugger/init_workspace.py
@@ -1226,8 +2202,14 @@ git commit -m "fix: reject unavailable strategy imports before execution"
 - Modify: strategy-debugger-cli/tests/test_replay_cli.py
 
 **Interfaces:**
-- Consumes: a standalone strategy-debugger-cli checkout, its committed uv.lock with immutable strategy-library Git source, a Python 3.12+ bootstrap interpreter, workspace interpreter, and shared validator.
-- Produces: a staged/atomic workspace venv, ensure_workspace_runtime_profile(), profile JSON output, deterministic sync, and the same dependency code/module/profile facts as Hosted without requiring a sibling repository.
+- Consumes: a standalone strategy-debugger-cli checkout, its committed uv.lock
+  with immutable post-Task-5 strategy-library Git source, a Python 3.12+
+  bootstrap interpreter, the exact workspace interpreter invocation path, and
+  the shared platform/static validator plus exact import-only child.
+- Produces: a staged/atomic workspace venv,
+  ensure_workspace_runtime_profile(), profile JSON output, deterministic sync,
+  and the same per-source dependency code/module/profile facts as Hosted without
+  requiring a sibling repository.
 
 - [ ] **Step 1: Write debugger profile and workspace failure tests**
 
@@ -1250,17 +2232,36 @@ def test_workspace_preflight_names_missing_hosted_dependency(monkeypatch):
     ))
     with pytest.raises(DebuggerRuntimeProfileError) as exc:
         ensure_workspace_runtime_profile(Path("/workspace/.venv/bin/python"))
-    assert exc.value.code == "STRATEGY_DEPENDENCY_UNAVAILABLE"
+    assert exc.value.code == "RUNTIME_DEPENDENCY_PROFILE_INVALID"
     assert exc.value.module == "grpc"
 ~~~
 
-Add a subprocess-command recorder asserting init checks the lock, exports frozen requirements, creates a staging venv, uses uv pip sync, installs only the debugger project with --no-deps, and runs verify-installed in the staging interpreter before atomic replacement. Assert it never installs strategy-library from a local path, never calls pip install without --no-deps, never resolves an unlocked package, and leaves an existing workspace venv byte-for-byte untouched on export/sync/verification failure.
+The missing distribution/probe is an invalid workspace environment before any
+strategy source exists; it must never be labeled as a user strategy's
+UNAVAILABLE import. Add per-source replay fixtures separately: a permitted but
+missing requested path produces `STRATEGY_DEPENDENCY_UNAVAILABLE`; a found
+package with an unrelated transitive missing import or other initialization
+exception produces `STRATEGY_IMPORT_FAILED`. Require the same requested-module
+reporting, redaction, profile binding, timeout/overflow handling, and empty
+module for transport failures as Hosted.
+
+Add a subprocess-command recorder asserting init checks the lock, exports frozen
+requirements, creates a staging venv, uses uv pip sync, installs only the
+debugger project with --no-deps, and calls
+`ensure_workspace_runtime_profile` so the shared sanitized/bounded transport
+runs the installed probe before atomic replacement. Assert no direct
+`verify-installed` child is launched from inherited bootstrap environment, it
+never installs strategy-library from a local path, never calls pip install
+without --no-deps, never resolves an unlocked package, and leaves an existing
+workspace venv byte-for-byte untouched on export/sync/verification failure.
 
 - [ ] **Step 2: Run debugger tests and verify RED**
 
 ~~~bash
 cd strategy-debugger-cli
+LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
+  "$LIBRARY_COMMIT" \
   uv run --frozen --extra test pytest tests/test_runtime_profile.py tests/test_workspace.py tests/test_cli.py tests/test_replay_cli.py -q
 ~~~
 
@@ -1285,38 +2286,66 @@ def ensure_workspace_runtime_profile(
 ) -> RuntimeDependencyProfile: ...
 ~~~
 
-Reject Python below 3.12 before installation and check the workspace interpreter against the manifest's exact schema-1 debugger constraint inside the same installed-metadata/import probe process. image_build_id is local-debugger for CLI errors. Print repair text separately from structured JSON so stable fields do not contain local paths.
+Reject Python below 3.12 before installation and check the workspace interpreter
+against the manifest's exact schema-1 debugger constraint inside the same
+installed-metadata/import probe process. Preserve the absolute normalized
+workspace invocation path without resolving its final venv symlink.
+`image_build_id` is the fixed safe literal `local-debugger` for CLI errors.
+Print repair text separately from structured JSON so stable fields do not
+contain local paths.
 
 - [ ] **Step 4: Replace bootstrap resolution with the committed lock**
 
-Task 3's seed lock predates the shared validator implementation committed in Task 4. Before implementing bootstrap, repin the debugger's immutable Git source to the current strategy-library commit and regenerate the lock:
+Task 3's seed lock predates the shared validator and shared exact import probe.
+After Task 5 commits the probe, repin the debugger's immutable Git source to the
+recorded post-Task-5 strategy-library SHA and regenerate the lock:
 
 ~~~bash
 cd strategy-debugger-cli
 LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
 test "${#LIBRARY_COMMIT}" -eq 40
-./scripts/with-local-strategy-library-git.sh ../strategy-library \
+./scripts/with-local-strategy-library-git.sh ../strategy-library "$LIBRARY_COMMIT" \
   uv add --no-sync "hushine-strategy-library @ git+https://github.com/hushine-tech/strategy-library.git@${LIBRARY_COMMIT}"
-./scripts/with-local-strategy-library-git.sh ../strategy-library uv lock --check
+./scripts/with-local-strategy-library-git.sh ../strategy-library "$LIBRARY_COMMIT" \
+  uv lock --check --project "$(pwd -P)"
 ~~~
 
-This newer Task 4 commit is also intentionally unpublished. Assert again that the lock records only the canonical HTTPS URL/full commit, never the mirror transport.
+This newer Task 5 commit is also intentionally unpublished. Assert it equals
+the SHA recorded by Task 5 and that the lock records only the canonical HTTPS
+URL/full commit, never the mirror transport.
 
-Assert that this exact commit contains `hushine_strategy/import_validation.py`, `validator.py`, and the packaged manifest. The bootstrap then runs from `Path(__file__).resolve().parent`, requires `pyproject.toml` and `uv.lock` there, and never searches for `../strategy-library`. Its order is exact; `STAGING_VENV` and `WORKSPACE_TEMP` are new private paths on the same filesystem as the destination workspace:
+Assert that this exact commit contains `hushine_strategy/import_validation.py`,
+`validator.py`, the packaged manifest, and the wheel-included
+`hushine_runtime_import_probe` package. The bootstrap then runs from
+`Path(__file__).resolve().parent`, requires `pyproject.toml` and `uv.lock` there,
+and never searches for `../strategy-library`. Its order is exact;
+`PROJECT_DIR` is computed once as the absolute directory containing `init.py`
+(the shell tests use `pwd -P` after entering that directory); bootstrap works
+from an arbitrary caller cwd and never appends another
+`strategy-debugger-cli`. `STAGING_VENV` and `WORKSPACE_TEMP` are new private paths on the same filesystem
+as the destination workspace:
 
 ~~~bash
-uv lock --check --project strategy-debugger-cli
+uv lock --check --project "$PROJECT_DIR"
 uv export --frozen --no-dev --no-emit-project \
-  --project strategy-debugger-cli \
-  --output-file WORKSPACE_TEMP/runtime-requirements.txt
-uv venv --python BOOTSTRAP_PYTHON STAGING_VENV
-uv pip sync --python STAGING_PYTHON WORKSPACE_TEMP/runtime-requirements.txt
-uv pip install --python STAGING_PYTHON --no-deps --editable strategy-debugger-cli
-STAGING_PYTHON -I -m hushine_strategy.runtime_dependencies \
-  verify-installed --python-constraint '>=3.12' --json
+  --project "$PROJECT_DIR" \
+  --output-file "$WORKSPACE_TEMP/runtime-requirements.txt"
+uv venv --python "$BOOTSTRAP_PYTHON" "$STAGING_VENV"
+uv pip sync --python "$STAGING_PYTHON" "$WORKSPACE_TEMP/runtime-requirements.txt"
+uv pip install --python "$STAGING_PYTHON" --no-deps --editable "$PROJECT_DIR"
 ~~~
 
-The frozen export includes the immutable-Git strategy-library package repinned in this task (from the Task 3 seed lock); there is no `--no-emit-package` bypass and no subsequent local library install. Only after all commands and `ensure_workspace_runtime_profile(STAGING_PYTHON)` succeed, atomically rename the old `.venv` to a private backup, rename the staging venv to `.venv`, and remove the backup. Roll back the rename on any failure. Always remove temporary/backup paths in `finally`; never mutate the existing working environment in place. The manifest does not authorize per-strategy dependency installation.
+The frozen export includes the immutable-Git strategy-library package repinned
+in this task; there is no `--no-emit-package` bypass and no subsequent local
+library install. Do not launch `verify-installed` directly under the inherited
+bootstrap environment or capture it with an unbounded caller. Only the shared
+sanitized/bounded `ensure_workspace_runtime_profile(STAGING_PYTHON)` API may
+perform that installed check. Only after all commands and that safe API plus one real empty-import
+shared-client round trip succeed, atomically rename the old `.venv` to a private
+backup, rename the staging venv to `.venv`, and remove the backup. Roll back the
+rename on any failure. Always remove temporary/backup paths in `finally`; never
+mutate the existing working environment in place. The manifest does not
+authorize per-strategy dependency installation.
 
 - [ ] **Step 5: Prove clean standalone bootstrap on every currently released supported minor**
 
@@ -1336,21 +2365,68 @@ UV_CACHE_DIR="$TMP/cache-314" HUSHINE_DEBUG_WORKSPACE="$TMP/workspace-314" \
 "$TMP/workspace-314/.venv/bin/python" -m hushine_debugger.cli profile --json
 ~~~
 
-On Windows, use `Scripts/python.exe`; the shell test covers POSIX and the Python unit test covers path selection/atomic replacement on Windows. All three profile JSON documents must match the packaged digest and each bootstrap must succeed without reading the parent worktree. Pre-push library transport is only the isolated mirror; distribution network access remains lock-constrained. A second `--offline` run against each populated cache must also succeed. A separate `--network` mode refuses all Git rewrite/mirror variables and is intentionally deferred until the exact library commit has been pushed by the full-system workflow.
+On Windows, `scripts/bootstrap-standalone.test.ps1` uses
+`Scripts/python.exe` and performs the real standalone bootstrap, profile check,
+shared import-probe success, missing-module classification, timeout/kill/reap,
+bounded-pipe overflow, and temp cleanup—mocked path-selection tests or a
+cross-build are not acceptance. All profile JSON documents must match the
+packaged digest and each bootstrap must succeed without reading the parent
+worktree. Pre-push library transport is only the isolated mirror; distribution
+network access remains lock-constrained. A second `--offline` run against each
+populated cache must also succeed. A separate `--network` mode refuses all Git
+rewrite/mirror variables and is intentionally deferred until the exact library
+commit has been pushed by the full-system workflow.
 
 - [ ] **Step 6: Gate init completion and every replay**
 
-init_workspace calls ensure_workspace_runtime_profile only after sync succeeds and writes the existing workspace files only after closure passes. replay calls it before source validation/data loading. Map shared validator dependency issues to the same uppercase codes while retaining debugger-specific human repair guidance.
+`init_workspace` calls `ensure_workspace_runtime_profile` only after sync
+succeeds and writes existing workspace files only after closure passes. Every
+replay first verifies the workspace profile, performs the shared relative/
+platform/dynamic/permission AST validation with
+`DEBUGGER_PLATFORM_IMPORT_POLICY`, and then invokes Task 5's exact
+`hushine_runtime_import_probe` client with the normalized-but-symlink-preserving
+`sys.executable` and expected profile facts. Only after that child succeeds may
+it load market data, construct replay/session state, or execute strategy code.
+It never calls Task 4's finder for availability and never installs a
+per-strategy dependency.
+
+Tests assert `DEBUGGER_PLATFORM_IMPORT_POLICY == SDK_PLATFORM_IMPORT_POLICY`,
+that neither contains `strategy_service.types`, and that the debugger imports
+this constant from the SDK rather than defining a local policy table.
+
+Map static and child failures to the same uppercase code/module/profile facts
+as Hosted while retaining debugger-specific repair guidance outside structured
+fields. Parameterize unsupported/platform/dynamic/syntax failures with child
+spawn zero and replay/data-load side effects zero; parameterize UNAVAILABLE,
+IMPORT_FAILED, timeout, malformed protocol, and profile mismatch with execution
+and data-load counts zero. The request/response codec, subprocess transport,
+bounds, profile binding, and cleanup implementation are imported directly from
+the post-Task-5 strategy-library package—no debugger copy is allowed.
+
+Third-party dependency and dynamic-safety behavior is shared, but the platform
+surface is target-specific: standalone debugger ships only the approved
+`hushine_strategy` symbol surface and does not pretend that Hosted-only
+`strategy_service.types` is installed. A replay source using that legacy Hosted
+module fails before the child with ordinary platform `forbidden_import` and
+guidance to use equivalent `hushine_strategy` symbols. Hosted saved-source
+scan/Preview continues to permit canonical exact symbols from
+`strategy_service.types`.
 
 - [ ] **Step 7: Run the complete debugger and shared validator suites**
 
 ~~~bash
 cd strategy-debugger-cli
+LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
+  "$LIBRARY_COMMIT" \
   uv run --frozen --extra test pytest tests/ -q
 bash scripts/bootstrap-standalone.test.sh --library-repo ../strategy-library
 cd ../strategy-library
-uv run --isolated --no-project --with-editable '.[test]' pytest tests/hushine_strategy/test_validator.py tests/hushine_strategy/test_runtime_dependencies.py tests/hushine_strategy/test_import_validation.py -q
+uv run --isolated --no-project --with-editable '.[test]' pytest \
+  tests/hushine_strategy/test_validator.py \
+  tests/hushine_strategy/test_runtime_dependencies.py \
+  tests/hushine_strategy/test_import_validation.py \
+  tests/hushine_strategy/test_import_probe.py -q
 ~~~
 
 Expected: all tests pass, including requests accepted and internal tools rejected in strategy source.
@@ -1359,7 +2435,12 @@ Expected: all tests pass, including requests accepted and internal tools rejecte
 
 ~~~bash
 cd strategy-debugger-cli
-git add pyproject.toml uv.lock init.py scripts/with-local-strategy-library-git.sh scripts/bootstrap-standalone.test.sh src/hushine_debugger/runtime_profile.py src/hushine_debugger/cli.py src/hushine_debugger/init_workspace.py src/hushine_debugger/replay.py tests/test_runtime_profile.py tests/test_cli.py tests/test_workspace.py tests/test_replay_cli.py
+git add pyproject.toml uv.lock init.py scripts/with-local-strategy-library-git.sh \
+  scripts/bootstrap-standalone.test.sh scripts/bootstrap-standalone.test.ps1 \
+  src/hushine_debugger/runtime_profile.py src/hushine_debugger/cli.py \
+  src/hushine_debugger/init_workspace.py src/hushine_debugger/replay.py \
+  tests/test_runtime_profile.py tests/test_cli.py tests/test_workspace.py \
+  tests/test_replay_cli.py
 git commit -m "feat: verify locked debugger runtime profile"
 ~~~
 
@@ -1502,6 +2583,7 @@ message StrategyValidationIssueProto {
   string message = 2;
   string module = 3;
   int32 line = 4;
+  string symbol = 5;
 }
 
 message ValidateStrategySourceRequest {
@@ -2039,7 +3121,12 @@ Tests assert the generated AST roots/probes equal the loader projections. Shell,
 
 Extend tests/test_strategy_runtime_dockerfile.py to assert:
 
-- runtime-base copies both project trees before running `uv sync --frozen --no-dev`, installs the sibling `hushine-strategy-library` source recorded by the lock (with no `--no-install-package hushine-strategy-library` escape), then runs uv pip check, project/lock checker, verify-installed, SDK/worker/proto imports, and all-public validation;
+- runtime-base copies both project trees before running
+  `uv sync --frozen --no-dev --no-editable`, installs the service and sibling
+  `hushine-strategy-library` sources recorded by the lock as non-editable venv
+  distributions (with no `--no-install-package` escape), then runs uv pip
+  check, project/lock checker, verify-installed, SDK/worker/proto imports, and
+  all-public validation;
 - final Runtime `PYTHONPATH` does not contain `/app/strategy-library`, so source files cannot shadow the locked installed wheel; the verifier compares the installed package-resource manifest digest to the embedded source-derived digest;
 - executor and executor-coverage both inherit runtime-base;
 - executor-coverage installs only the named coverage extra and repeats uv pip check, checker, verify-installed, and bootstrap;
@@ -2135,7 +3222,7 @@ In `runtime-base`, copy `strategy-library/`, `strategy-service/pyproject.toml`, 
 
 ~~~dockerfile
 RUN cd /app/strategy-service \
- && uv sync --frozen --no-dev \
+ && uv sync --frozen --no-dev --no-editable \
  && uv pip check --python /app/strategy-service/.venv/bin/python
 ~~~
 
@@ -2157,7 +3244,12 @@ Then import strategy_service.session_worker_entry and generated strategy/worker/
 
 - [ ] **Step 4: Re-run closure after coverage instrumentation**
 
-executor-coverage uses the same runtime-base, replaces only the covered Go binary, installs --extra coverage with --frozen, and repeats every command from the common closure. It additionally proves importlib.metadata.version("coverage") exists while validate_strategy_code("import coverage...") returns UNSUPPORTED_STRATEGY_DEPENDENCY.
+executor-coverage uses the same runtime-base, replaces only the covered Go
+binary, installs `--extra coverage --frozen --no-editable`, and repeats every
+command from the common closure. It additionally proves
+importlib.metadata.version("coverage") exists while
+validate_strategy_code("import coverage...") returns
+UNSUPPORTED_STRATEGY_DEPENDENCY.
 
 The normal final image proves importlib.metadata.PackageNotFoundError for coverage. Both images report identical public roots/profile/digest.
 
@@ -2303,6 +3395,8 @@ git commit -m "build: close runtime images over dependency profile"
 ### Task 10: Fail Runtime Startup Before HELLO and Sign Exact Profile Facts
 
 **Files:**
+- Create: strategy-service/strategy_service/runtime_startup_probe.py
+- Create: strategy-service/tests/test_runtime_startup_probe.py
 - Create: strategy-service/internal/runtimeagent/dependency_profile.go
 - Create: strategy-service/internal/runtimeagent/dependency_profile_test.go
 - Modify: strategy-service/internal/runtimeagent/runtime_channel.go
@@ -2317,9 +3411,13 @@ git commit -m "build: close runtime images over dependency profile"
 - Create: strategy-service/internal/runtimeagent/startup_failure_report_test.go
 - Modify: strategy-service/cmd/runtime-agent/main.go
 - Modify: strategy-service/cmd/runtime-agent/main_test.go
+- Modify: strategy-service/scripts/start-bare-runtime-debugpy.sh
+- Modify: strategy-service/scripts/start-bare-runtime-debugpy.test.sh
 
 **Interfaces:**
-- Consumes: a pure resolved WorkerLaunchSpec, exact WorkerPythonInvocation, same-process Python/metadata/import JSON, HUSHINE_RUNTIME_* embedded facts, Runtime source, and credential HELLO signer.
+- Consumes: a pure resolved WorkerLaunchSpec, exact WorkerPythonInvocation, a
+  bounded service-owned startup-probe JSON, HUSHINE_RUNTIME_* embedded facts,
+  Runtime source, and credential HELLO signer.
 - Produces: verified strategy.v1.RuntimeDependencyProfile, RUNTIME_DEPENDENCY_PROFILE_INVALID startup error, RuntimeIdentity.DependencyProfile, signed HELLO/profile-bearing RESUME, a safe Hosted failure record, and one bounded signed Self-hosted failure report that never creates readiness.
 
 - [ ] **Step 1: Write verifier table tests**
@@ -2339,8 +3437,8 @@ func TestVerifyRuntimeDependencyProfileUsesExactWorkerInvocation(t *testing.T) {
     got, err := VerifyRuntimeDependencyProfile(
         context.Background(),
         WorkerPythonInvocation{
-            Executable: "uv",
-            ArgsPrefix: []string{"run", "python", "-Xfrozen_modules=off"},
+            Executable: "/app/.venv/bin/python",
+            ArgsPrefix: []string{"-I", "-Xfrozen_modules=off"},
             WorkDir: "/app/strategy-service",
         },
         EmbeddedRuntimeFacts{Source: "hosted", /* exact facts */},
@@ -2348,16 +3446,79 @@ func TestVerifyRuntimeDependencyProfileUsesExactWorkerInvocation(t *testing.T) {
     )
     if err != nil { t.Fatal(err) }
     wantArgs := []string{
-        "run", "python", "-Xfrozen_modules=off",
-        "-m", "hushine_strategy.runtime_dependencies",
-        "verify-installed", "--python-constraint", "3.13", "--json",
+        "-I", "-Xfrozen_modules=off",
+        "-m", "strategy_service.runtime_startup_probe",
+        "verify", "--source", "hosted",
+        "--expected-invocation-sha256", expectedInvocationSHA,
+        "--expected-workdir-sha256", expectedWorkDirSHA,
+        "--json",
     }
     if !slices.Equal(runner.args, wantArgs) { t.Fatalf("args = %v", runner.args) }
     if got.GetContractSha256() != expectedDigest { t.Fatalf("profile = %+v", got) }
 }
 ~~~
 
-Table cases reject nonzero child exit, timeout, malformed/non-JSON stdout, ok=false, a reported Python other than 3.13.x, missing profile distribution, a profile probe that raises ModuleNotFoundError during initialization, schema/name/version/digest mismatch, missing Hosted image facts, empty commit/build ID, and env-vs-loader mismatch. Both missing-profile cases map to RUNTIME_DEPENDENCY_PROFILE_INVALID before any listener/worker/strategy request exists; their safe startup message names only the manifest import root/distribution/probe and never the internal transitive missing name. Poison the parent with PYTHONPATH, PYTHONHOME, VIRTUAL_ENV, UV_PROJECT_ENVIRONMENT, DB/Kafka/core/order addresses, tokens, and credentials; the recorded child environment must contain only the WorkerLaunchSpec allowlist and none of the poisoned values. Hosted and Self-hosted specs may include the strategy-service work directory needed to import the worker, but must reject any `strategy-library` source directory and prove `hushine_strategy` resolves from installed distribution metadata outside `/app/strategy-library`. Bare internal development may explicitly allow the verified sibling source path. A bare source without image facts succeeds with loader facts plus local-dev commit/build fields; hosted and self_hosted never use that fallback.
+Table cases reject nonzero child exit, timeout, malformed/non-JSON stdout,
+ok=false, a reported Python other than 3.13.x, missing profile distribution, a
+profile probe that raises ModuleNotFoundError during initialization,
+schema/name/version/digest mismatch, missing Hosted image facts, malformed
+commit/build facts under Task 4's safe grammar, and env-vs-loader mismatch.
+Both missing-profile cases map to RUNTIME_DEPENDENCY_PROFILE_INVALID before any
+listener/worker/strategy request exists; their safe startup message names only
+the manifest import root/distribution/probe and never the internal transitive
+missing name. Poison the parent with PYTHONPATH, PYTHONHOME, VIRTUAL_ENV,
+UV_PROJECT_ENVIRONMENT, DB/Kafka/core/order addresses, tokens, credentials,
+paths/newlines, and oversized build facts; the recorded child environment and
+returned error contain none of the poisoned values.
+
+Every source uses an actual venv Python invocation path, not `uv run` or another
+launcher. `PYTHONPATH` is empty for the import closure. Hosted and Self-hosted
+require non-editable installed strategy-service and strategy-library origins
+inside that venv and reject sibling-source origins. Bare uses its guarded local
+worker venv and may install both repositories editable, but must prove through
+distribution metadata and an `-I` origin probe that both packages resolve via
+that venv's site-packages `.pth`; a raw sibling path/PYTHONPATH is never an
+alternative. A Bare source without image facts succeeds only with the validated
+literal local-dev facts; hosted and self_hosted never use that fallback.
+
+Write Python RED tests for `strategy_service.runtime_startup_probe` before the
+Go verifier. Its `verify` command calls the Task 4.5 installed-profile API with
+its own `sys.executable`, imports the Task 5 neutral probe package, loads
+`current_runtime_profile()`, and inspects installed distribution metadata plus
+`direct_url.json` for `hushine-strategy-service` and
+`hushine-strategy-library`. It emits exactly one canonical JSON object plus LF
+with exact top-level keys `schema_version`, `ok`, `source`, `python_version`,
+`dependency_profile`, `sys_prefix_sha256`, `sys_executable_sha256`,
+`workdir_sha256`, `packages`, and `failures`. A package record has exact keys
+`distribution`, `version`, `direct_url_present`, `editable`, `origin_kind`, and
+`origin_sha256`; paths themselves never cross the protocol. Hashes are exactly
+64 lowercase hex. Hosted/Self-hosted require both packages non-editable with
+`origin_kind=venv-site`; Bare permits `editable` but still requires installed
+metadata and `origin_kind=editable|venv-site`. The exact dependency-profile
+object carries the nine proto facts, already validated by Task 4. Failures use
+bounded constant-safe code/module/reason fields and never contain direct URLs,
+paths, environment values, or child output.
+
+The Go runner independently caps stdout and stderr at 64 KiB, drains both
+concurrently, and on overflow/deadline performs terminate/kill/wait/reap plus
+bounded goroutine joins on POSIX and native Windows. stdin is closed/DEVNULL;
+stderr must be empty. It accepts strict UTF-8 and exactly one canonical JSON
+object plus LF; canonical re-encoding detects duplicate keys/trailing data.
+No `Output`, `CombinedOutput`, unbounded `bytes.Buffer`, or sequential pipe read
+is permitted. Tests use real helper children that fill either/both pipes and
+hang, then assert fixed safe errors, no leaked path/output/canary, no process or
+goroutine leak, and exactly one reap.
+
+`ResolveWorkerLaunchSpec` injects `-I`; `HUSHINE_WORKER_PYTHON_ARGS` may contain
+only the exact optional token `-Xfrozen_modules=off`. Reject `-c`, `-m`, `--`,
+script paths, response files, repeated `-I`, and every other user-supplied
+prefix before verification. Coverage args are not read from that environment:
+the trusted `CoverageConfig` appends exactly `-m coverage run --parallel-mode`,
+one bounded absolute `--data-file=...`, and
+`--source=strategy_service`. Table-test the final verifier argv for both normal
+`[-I, optional -X, -m, startup_probe, ...]` and coverage
+`[-I, optional -X, -m, coverage, run, ..., -m, startup_probe, ...]`, and prove
+the real worker uses the identical prefix before its own `-m` entry point.
 
 - [ ] **Step 2: Write ordering and HELLO signature tests**
 
@@ -2382,31 +3543,83 @@ Add a Self-hosted failure case whose call order is resolve, verify, load credent
 
 ~~~bash
 cd strategy-service
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_runtime_startup_probe.py -q
 go test ./internal/runtimeagent -run 'DependencyProfile|RuntimeChannel' -count=1 -v
 go test ./cmd/runtime-agent -run 'DependencyGate|RuntimeIdentity' -count=1 -v
 ~~~
 
-Expected: verifier/profile fields do not exist and the current run path opens worker IPC before any dependency self-check.
+Expected: startup-probe module/schema and verifier/profile fields do not exist,
+and the current run path opens worker IPC before any dependency self-check.
 
 - [ ] **Step 4: Implement exact worker-invocation verification**
 
-Refactor `worker_environment.go` rather than duplicating its executable, path, and sanitization logic. Introduce a pure `ResolveWorkerLaunchSpec(config, runtimeSource, processEnv)` that resolves executable/symlinks once and returns the prefix, working directory, source-specific Python import path, and sanitized base environment without creating per-Session directories, opening a listener, or starting a process. Split the current directory/token work into `BuildWorkerSessionInvocation(spec, WorkerStartSpec)`, which creates the private home/tmp/cache root and adds only agent address, token, Session ID, and debug flags. `NewWorkerManager(spec, listener, ...)` consumes that exact immutable spec and never calls `LookPath`, `EvalSymlinks`, or rebuilds the base environment; `Invocation()` returns a defensive copy for regression tests. VerifyRuntimeDependencyProfile consumes the same pre-construction spec and appends only:
+Refactor `worker_environment.go` rather than duplicating its executable, path,
+and sanitization logic. Introduce a pure
+`ResolveWorkerLaunchSpec(config, runtimeSource, processEnv)` that resolves once
+and returns an absolute clean venv-Python invocation path, a prefix beginning
+with exactly one `-I`, working
+directory, an empty PythonPath/import-closure field, and sanitized base
+environment without creating per-Session directories, opening a listener, or
+starting a process. Reject `uv`/shell launchers and any source-only fallback. If
+the invocation is a virtualenv symlink, `EvalSymlinks` may be used only to
+record/verify target identity; `WorkerLaunchSpec.Executable` and every actual
+verifier/worker exec retain the original absolute symlink path so Python
+discovers `pyvenv.cfg`. Add real POSIX symlinked-venv and native Windows
+`Scripts/python.exe` regressions comparing `sys.prefix`, installed/editable
+package origins, and manifest digest between verifier and worker. Split the
+current directory/token work into
+`BuildWorkerSessionInvocation(spec, WorkerStartSpec)`, which creates the private
+home/tmp/cache root and adds only agent address, token, Session ID, and debug
+flags. `NewWorkerManager(spec, listener, ...)` consumes that exact immutable
+spec and never calls `LookPath`, substitutes an `EvalSymlinks` result into argv,
+or rebuilds the base environment; `Invocation()` returns a defensive copy for
+regression tests. `VerifyRuntimeDependencyProfile` consumes the same
+pre-construction spec and appends only:
 
 ~~~text
--m hushine_strategy.runtime_dependencies verify-installed --python-constraint 3.13 --json
+-m strategy_service.runtime_startup_probe verify
+--source <hosted|self_hosted|bare>
+--expected-invocation-sha256 <64hex>
+--expected-workdir-sha256 <64hex>
+--json
 ~~~
 
-Run with a 30-second context. Parse a single JSON object, require ok=true and Python 3.13.x, and compare embedded profile name/version/digest to loader output. The command receives precisely the same executable/prefix/workdir/base environment later used by session workers; the verifier adds no source path or inherited environment. For Hosted/Self-hosted, resolve PythonPath to strategy-service only and assert no path whose clean basename/path is `strategy-library`; run an origin probe in both verifier and a real worker child and require `hushine_strategy` plus its manifest to come from the installed distribution. Bare/debugger may opt into the local sibling path only under its existing guarded source. Convert every failure to:
+Run the Step 1 concurrent bounded Go transport with a 30-second context; the
+hash arguments are fixed safe data and no path is placed in argv/output. Require
+the exact startup-probe schema, `ok=true`, Python 3.13.x, matching path hashes,
+and compare every embedded profile fact to the configured/loader contract.
+The command receives precisely the same executable/prefix/workdir/base
+environment later used by session workers; the verifier adds no source path or
+inherited environment. Enforce the source-specific package/editable/origin
+policy from the response and run the same probe facts from one real worker
+child. Validate build facts with Task 4's exact grammar before serialization or
+HELLO.
+
+Update `start-bare-runtime-debugpy.sh` to stop exporting PYTHONPATH, select only
+the absolute local worker-venv Python (`bin/python` or `Scripts/python.exe`),
+and fail with a safe repair command unless both service and SDK distribution
+metadata are installed in that venv. It may pass the single approved
+`-Xfrozen_modules=off` flag but no arbitrary Python prefix. Its tracked shell
+test proves no sibling source path is present in the agent environment and that
+a missing/uninstalled venv fails before runtime-agent launch.
+
+Convert every failure to:
 
 ~~~go
 type RuntimeDependencyProfileError struct {
     Code string
+    Module string
     Message string
-    Actual *strategyv1.RuntimeDependencyProfile
 }
 ~~~
 
-Code is always RUNTIME_DEPENDENCY_PROFILE_INVALID. Message is safe and names the failed fact/probe without stdout, environment, workdir, or credential content.
+Code is always RUNTIME_DEPENDENCY_PROFILE_INVALID. Module is a stable empty or
+logical package/import name, never a path. Message is safe and names the failed
+fact/probe without stdout, environment, workdir, or credential content. Parse
+the child into a temporary value and retain none of it unless the entire
+schema, profile binding, and source/origin policy validates atomically; a
+partially validated child profile is never attached to this error.
 
 - [ ] **Step 5: Move the gate ahead of Runtime readiness**
 
@@ -2418,7 +3631,12 @@ In run(), keep argument/config parsing first, then resolve WorkerLaunchSpec and 
 4. load credentials/TLS;
 5. dial/send RuntimeChannel HELLO.
 
-On failure write one JSON line with only code, module, profile name/version, image build ID, source, and safe reason, then return 1. Do not print the child command, environment, stdout, workdir, or credential material. Hosted provisioners consume this JSON in Task 11. For Self-hosted only, load the existing credential/TLS after verification fails and attempt `ReportRuntimeStartupFailure` with a five-second total deadline, fresh nonce/timestamp, and canonical signature; failure to report is logged safely and never changes the exit or starts RuntimeChannel. Bare/debugger does not call the report RPC.
+On failure write one JSON line with only code, module, profile name/version,
+image build ID, source, and safe reason, then return 1. The profile/version/build
+fields come from the already schema-validated embedded expected facts (or a
+fully validated child response after exact equality), never from invalid or
+partially parsed child `Actual` data. Do not print the child command,
+environment, stdout, workdir, or credential material. Hosted provisioners consume this JSON in Task 11. For Self-hosted only, load the existing credential/TLS after verification fails and attempt `ReportRuntimeStartupFailure` with a five-second total deadline, fresh nonce/timestamp, and canonical signature; failure to report is logged safely and never changes the exit or starts RuntimeChannel. Bare/debugger does not call the report RPC.
 
 - [ ] **Step 6: Attach verified facts to RuntimeIdentity and HELLO**
 
@@ -2448,12 +3666,21 @@ The control-panel implementation in Task 11 uses the identical order. Add BuildR
 
 ~~~bash
 cd strategy-service
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_runtime_startup_probe.py -q
 go test ./internal/runtimeagent -run 'DependencyProfile|RuntimeChannel|WorkerManager' -count=1
 go test ./cmd/runtime-agent -run 'DependencyGate|RuntimeIdentity|WorkerPython' -count=1
 go vet ./internal/runtimeagent ./cmd/runtime-agent
+bash scripts/start-bare-runtime-debugpy.test.sh
 ~~~
 
 Expected: all commands pass.
+
+Repeat the focused Go tests on a native Windows runner after creating a guarded
+Bare venv whose `Scripts/python.exe` has editable strategy-service and
+strategy-library installations. Execute the real profile verifier and one real
+worker child with `-I`, empty PYTHONPATH, and the Windows TCP worker transport;
+cross-compilation or mocked path selection is not acceptance.
 
 - [ ] **Step 8: Rebuild both final images after the startup gate exists**
 
@@ -2509,7 +3736,23 @@ Expected: nonzero exit, stable invalid-profile code, and no started/HELLO-ready 
 
 ~~~bash
 cd strategy-service
-git add internal/runtimeagent/dependency_profile.go internal/runtimeagent/dependency_profile_test.go internal/runtimeagent/runtime_channel.go internal/runtimeagent/runtime_channel_test.go internal/runtimeagent/worker_manager.go internal/runtimeagent/worker_manager_test.go internal/runtimeagent/worker_environment.go internal/runtimeagent/worker_environment_test.go internal/runtimeagent/worker_environment_posix.go internal/runtimeagent/worker_environment_windows.go internal/runtimeagent/startup_failure_report.go internal/runtimeagent/startup_failure_report_test.go cmd/runtime-agent/main.go cmd/runtime-agent/main_test.go
+git add strategy_service/runtime_startup_probe.py \
+  tests/test_runtime_startup_probe.py \
+  internal/runtimeagent/dependency_profile.go \
+  internal/runtimeagent/dependency_profile_test.go \
+  internal/runtimeagent/runtime_channel.go \
+  internal/runtimeagent/runtime_channel_test.go \
+  internal/runtimeagent/worker_manager.go \
+  internal/runtimeagent/worker_manager_test.go \
+  internal/runtimeagent/worker_environment.go \
+  internal/runtimeagent/worker_environment_test.go \
+  internal/runtimeagent/worker_environment_posix.go \
+  internal/runtimeagent/worker_environment_windows.go \
+  internal/runtimeagent/startup_failure_report.go \
+  internal/runtimeagent/startup_failure_report_test.go \
+  cmd/runtime-agent/main.go cmd/runtime-agent/main_test.go \
+  scripts/start-bare-runtime-debugpy.sh \
+  scripts/start-bare-runtime-debugpy.test.sh
 git commit -m "feat: verify runtime profile before channel hello"
 ~~~
 
@@ -2800,7 +4043,22 @@ git commit -m "feat: explain runtime dependency failures"
 
 - [ ] **Step 1: Write shell contract and scanner tests first**
 
-runtime-dependency-contract.test.sh must fail if either normal or coverage image verification is skipped, profile/digest JSON differs, coverage becomes public, or the fault build succeeds. Scanner unit mode accepts JSON rows and asserts unsupported roots include strategy_id/name/import/line, allowed roots are omitted, source is never executed, ordering is deterministic, and input is unchanged. Add explicit negative tests proving `datetime`/`os`, `strategy_service.types`, and `hushine_strategy` imports never appear as affected findings; add one positive unsupported-root case beside each negative family so an accidentally disabled scanner cannot pass.
+runtime-dependency-contract.test.sh must fail if either normal or coverage image
+verification is skipped, profile/digest JSON differs, coverage becomes public,
+or the fault build succeeds. Scanner unit mode accepts JSON rows and asserts
+dependency, platform-surface, and dynamic-safety impacts include
+strategy_id/name/kind/code/module/symbol/line; source is never executed,
+ordering is deterministic, and input is unchanged. Negative cases are
+`datetime`/Hosted `os`, `from strategy_service.types import OrderDecision`, and
+`from hushine_strategy import Exchange`. Positive pairs include an unsupported
+third-party root, `import hushine_strategy`,
+`from hushine_strategy.runtime_dependencies import subprocess`,
+`from hushine_strategy.notifier import Path`, importlib alias, exec, and
+builtins smuggling, so an accidentally disabled safety scanner cannot pass.
+Add scanner fixtures for invalid syntax, a source larger than 1 MiB, a
+non-object/missing-field row, and an injected per-row exception; each later
+valid row must still be scanned. Add fatal DB/config fixtures and assert fixed
+safe output/exit status.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -2816,13 +4074,58 @@ Expected: script/scanner do not exist.
 Production mode accepts `--dsn-env PORTFOLIO_READONLY_DSN`, reads the value only from that named process environment variable, and performs only:
 
 ~~~sql
-SELECT strategy_id, user_id, name, version, code
+SELECT strategy_id,
+       user_id,
+       name,
+       version,
+       octet_length(code) AS code_octets,
+       CASE WHEN octet_length(code) <= 1048576 THEN code ELSE NULL END AS code
 FROM strategies
 WHERE archived = FALSE
 ORDER BY strategy_id
 ~~~
 
-Reject a missing/empty variable without printing its value. Never accept a DSN value as a CLI argument, include it in JSON, or log it. Parse the AST and call the shared `validate_dependency_imports` API with the loader profile, `sys.stdlib_module_names`, and the exact safe platform prefixes `("strategy_service.types", "hushine_strategy")`; do not reimplement scanner-specific root filtering from `iter_imported_modules`. Report only `UNSUPPORTED_STRATEGY_DEPENDENCY` findings as migration impact, while preserving stable line/module data. Standard-library imports and either platform prefix are therefore omitted even when an import finder cannot resolve them in the deploy tool's environment. Do not exec/import user code or issue write/DDL/lock statements. JSON includes profile/version/digest, scanned/affected counts, and sorted findings.
+Reject a missing/empty variable without printing its value. Never accept a DSN
+value as a CLI argument, include it in JSON, or log it. Open a transaction with
+driver read-only mode and execute `SET TRANSACTION READ ONLY` before the single
+SELECT. Use a server-side cursor with fetch batch size 100. The SQL length/CASE
+pair ensures the client never receives more than 1 MiB of any source; a null
+code with `code_octets > 1048576` deterministically becomes
+`STRATEGY_SOURCE_TOO_LARGE` without fetching the source. Stream bounded rows;
+issue no write/DDL/advisory-lock statement, and
+always rollback and close cursor/connection in `finally`, on success as well as
+every failure. Parse the AST and call,
+in order, shared `validate_platform_import_safety` with
+`HOSTED_PLATFORM_IMPORT_POLICY`, shared `validate_dynamic_import_safety` with
+Hosted defaults, and `validate_dependency_imports` with the loader profile,
+`sys.stdlib_module_names`, and the policy's exact allowed modules. Do not
+reimplement root/symbol/dataflow checks. If a platform issue already rejects an
+import at the same `(line,module)`, suppress only the duplicate dependency issue
+for that node.
+
+Emit separate deterministic migration kinds `platform_safety`,
+`dynamic_safety`, and `dependency`; preserve stable code/module/symbol/line
+(`symbol=""` when absent). Canonical approved from-symbol forms and standard
+library imports are omitted even when a finder cannot resolve them in the deploy
+environment. Do not exec/import user code or issue write/DDL/lock statements.
+JSON includes profile/version/digest, scanned/affected counts, per-kind counts,
+and findings sorted by strategy_id, line, kind, code, module, and symbol.
+
+Process every row independently in stable SELECT/input order. Source must be a
+string whose UTF-8 encoding is at most 1 MiB before `ast.parse`. Invalid syntax,
+oversize source, an unexpected row/type/missing field, or an unexpected scanner
+exception becomes one deterministic `scan_error` finding with respectively
+`INVALID_STRATEGY_SYNTAX`, `STRATEGY_SOURCE_TOO_LARGE`,
+`INVALID_STRATEGY_ROW`, or `STRATEGY_SCAN_FAILED`; module/symbol are empty and
+line is the bounded syntax line or zero. Use the row's bounded scalar identity
+when valid, otherwise the non-secret synthetic `row:<zero-padded ordinal>` and
+an empty name. Never include source or exception text, and continue with later
+rows. Top-level configuration, connection, transaction, profile, or output
+failure is fatal: emit one canonical safe fatal object, rollback/close, and
+exit 2. Exit 0 means no findings, exit 1 means one or more migration or
+`scan_error` findings, and exit 2 means the report itself could not be
+completed. Unit-mode JSON must be an array but bad members follow the same
+per-row rule.
 
 - [ ] **Step 4: Add exact Make acceptance targets**
 
@@ -2837,8 +4140,9 @@ runtime-dependency-envs:
 		python -c 'import hushine_strategy, pytest'
 	test ! -e strategy-library/uv.lock
 	uv sync --project strategy-service --python 3.13 --frozen --extra dev
-	cd strategy-debugger-cli && ./scripts/with-local-strategy-library-git.sh \
-		../strategy-library uv sync --frozen --extra test
+	cd strategy-debugger-cli && LIBRARY_COMMIT="$$(git -C ../strategy-library rev-parse HEAD)" && \
+		./scripts/with-local-strategy-library-git.sh \
+		../strategy-library "$$LIBRARY_COMMIT" uv sync --frozen --extra test
 
 runtime-dependency-contract: runtime-dependency-envs
 	cd strategy-library && uv run --isolated --no-project --with-editable '.[test]' \
@@ -2871,7 +4175,19 @@ The shell acceptance parses checker JSON and accepts baseline state `introduced`
 
 - [ ] **Step 5: Document contract, gates, rollout, and rollback**
 
-Document manifest ownership and generated projections, first-introduction/steady-state baseline behavior, direct locks, clean normal/coverage commands, source-dirty labels, startup/HELLO/RESUME/admission plus Hosted/Self-hosted failure-only reporting, runtime_id-only routing, Preview/Run/download-job validation order, five error codes, unchanged Strategy-first creation, exact optional HTTP Validate contract, standalone debugger bootstrap/profile/repair, read-only scan, ordered rollout, paired rollback, proto ordering with Indicator V2, and no database migration. Explain that the local bare-mirror wrapper is a pre-push development/acceptance transport only: it never enters pyproject/lock/user instructions. Release remains blocked until the coordinated full-system push is complete and the fresh no-mirror network bootstrap below passes; do not perform a partial early strategy-library push.
+Document manifest ownership and generated projections, first-introduction/
+steady-state baseline behavior, direct locks, clean normal/coverage commands,
+source-dirty labels, startup/HELLO/RESUME/admission plus Hosted/Self-hosted
+failure-only reporting, runtime_id-only routing, Preview/Run/download-job
+validation order, five error codes, unchanged Strategy-first creation, exact
+optional HTTP Validate contract, standalone debugger bootstrap/profile/repair,
+the target-specific Hosted/debugger platform symbol surfaces, the three-kind
+read-only compatibility scan, ordered rollout, paired rollback, proto ordering
+with Indicator V2, and no database migration. Explain that the local bare-mirror
+wrapper is a pre-push development/acceptance transport only: it never enters
+pyproject/lock/user instructions. Release remains blocked until the coordinated
+full-system push is complete and the fresh no-mirror network bootstrap below
+passes; do not perform a partial early strategy-library push.
 
 Preserve the current AGENTS-required strategy-service suite exactly: `PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q`. Document that it is a source-development regression, not image closure. Add a separate documented installed/frozen `python -I` gate with no PYTHONPATH for Runtime/debugger proof. Because the workspace root is not Git and its AGENTS.md is outside these repository commits, include a handoff block in `runtime-operator-flow.md` containing the exact new debugger bootstrap and installed-gate commands for the workspace owner to mirror into AGENTS.md after rollout; do not silently mutate that root file in this change.
 
@@ -2908,8 +4224,10 @@ cd /Users/xdy/Workplace/hushine-worktrees/medium-cleanup/strategy-debugger-cli
 LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
 test "${#LIBRARY_COMMIT}" -eq 40
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
+  "$LIBRARY_COMMIT" \
   uv add --no-sync "hushine-strategy-library @ git+https://github.com/hushine-tech/strategy-library.git@${LIBRARY_COMMIT}"
-./scripts/with-local-strategy-library-git.sh ../strategy-library uv lock --check
+./scripts/with-local-strategy-library-git.sh ../strategy-library \
+  "$LIBRARY_COMMIT" uv lock --check --project "$(pwd -P)"
 rg -n "https://github.com/hushine-tech/strategy-library.git.*${LIBRARY_COMMIT}" pyproject.toml uv.lock
 if rg -n 'file:|\.\./strategy-library|insteadOf|mirror' pyproject.toml uv.lock; then exit 1; fi
 bash scripts/bootstrap-standalone.test.sh --library-repo ../strategy-library
@@ -2917,7 +4235,13 @@ git add pyproject.toml uv.lock
 git commit -m "build: repin debugger to final dependency library"
 ~~~
 
-The standalone gate runs Python 3.12, 3.13, and 3.14 and verifies canonical direct-url metadata. No later task in this dependency plan may modify strategy-library. The ordered Spot plan intentionally adds later library behavior and therefore repeats this exact repin after its own final library commit.
+The standalone gate runs Python 3.12, 3.13, and 3.14 and verifies canonical
+direct-url metadata. This pin must always equal the latest dependency-plan
+strategy-library commit. If Task 15 fixes any library regression, its mandatory
+conditional loop recommits the library, repeats this repin, rebuilds both clean
+images, and reruns the affected/full acceptance before handoff. The ordered
+Spot plan intentionally adds later library behavior and therefore repeats this
+exact repin after its own final library commit.
 
 - [ ] **Step 8: Run focused acceptance from clean commits**
 
@@ -2948,7 +4272,9 @@ Expected: checker reports a valid first-introduction baseline against the immuta
 cd strategy-library
 uv run --isolated --no-project --with-editable '.[test]' pytest tests/ -q
 cd ../strategy-debugger-cli
+LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
+  "$LIBRARY_COMMIT" \
   uv run --frozen --extra test pytest tests/ -q
 bash scripts/bootstrap-standalone.test.sh --library-repo ../strategy-library
 cd ../strategy-service
@@ -3096,7 +4422,8 @@ Record request/runtime/Session/profile/digest/build IDs without credentials, env
 - [ ] **Step 7: Run saved-strategy scan read-only**
 
 ~~~bash
-PYTHONPATH=strategy-library strategy-service/.venv/bin/python \
+env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV \
+  strategy-service/.venv/bin/python -I \
   hushine-deploy/scripts/scan-saved-strategy-imports.py \
   --dsn-env PORTFOLIO_READONLY_DSN \
   --output /tmp/hushine-runtime-dependency-scan.json
@@ -3107,6 +4434,15 @@ Expected: no writes. Report affected strategies; do not install packages or rewr
 - [ ] **Step 8: Review and reverify**
 
 Invoke superpowers:requesting-code-review, process findings with superpowers:receiving-code-review, rerun affected tests plus Steps 1–5, then invoke superpowers:verification-before-completion with fresh outputs.
+
+If review or any Task 15 regression requires a strategy-library change, do not
+reuse the previous debugger pin or image evidence. Complete this loop before
+continuing: commit the library fix; repeat Task 14 Step 7 against that exact new
+SHA; rerun the debugger's full and standalone 3.12/3.13/3.14 gates; rebuild and
+verify both clean normal/coverage images; rerun Tasks 14 Steps 8 and Task 15
+Steps 1–7 plus affected tests; then request fresh review. Repeat until no later
+library commit exists. Report the final library SHA, debugger pin, and rebuilt
+image IDs as one consistent evidence set.
 
 Pre-push evidence in this dependency plan uses only the isolated bare-mirror wrapper for the intentionally unpublished strategy-library SHA. Record the following mandatory deferred gate in the full-system handoff; do not execute it by pushing one repository early. After the main workflow has completed its coordinated pushes for all affected repositories/ordered plans, run from a fresh directory with no URL rewrite, no sibling checkout, a clean HOME, and a clean uv cache:
 

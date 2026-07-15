@@ -21,7 +21,8 @@ Hosted Runtime 曾出现策略通过静态校验、但 worker 启动后才因 Py
 
 本设计只收口已经公开的 Hosted Runtime Python 依赖契约，不扩大 Hosted 的八个公开 import root。当前
 更宽或更窄的离线校验器都收敛到同一公开集合：删除离线端虚假的算法库能力，并让离线端接受 Hosted
-已经公开的 root。不改变策略 API、订单、指标或 Portfolio/Venue 业务行为。RuntimeChannel 仍只按
+已经公开的 root。不改变已批准的策略类型/声明 API、订单、指标或 Portfolio/Venue 业务行为；平台 SDK
+合法用户导入收敛为精确模块和精确公开符号，禁止取得内部模块对象。RuntimeChannel 仍只按
 `runtime_id` 路由 Session；本变更只在 Runtime admission/HELLO 中增加依赖 profile 元数据，用于在
 启动前拒绝该 runtime_id 对应的不兼容镜像，不引入第二个路由键。
 
@@ -35,6 +36,17 @@ Hosted Runtime 曾出现策略通过静态校验、但 worker 启动后才因 Py
   不形成另一套用户策略依赖能力。
 - 构建阶段必须在两个镜像中逐项执行真实 import；只要有一个声明的模块无法导入，镜像构建和发布失败。
 - worker 在执行用户策略以及发布 `running` 状态前，必须完成导入策略校验和目标环境可用性检查。
+- Hosted/Self-hosted/Bare 都使用实际 venv Python invocation；保留最终 venv symlink，并以 `-I`、空
+  PYTHONPATH 验证。Bare 可在受控 worker venv 中 editable 安装 service/SDK，但不再把 sibling source path
+  当作导入闭包；POSIX 与原生 Windows `Scripts/python.exe` 都必须跑真实 verifier/worker 测试。
+- 静态校验只判断 import 权限；完整路径解析和模块初始化必须由目标解释器的共享 import-only 子进程判定，
+  不能把 PathFinder/find_spec 的无副作用近似结果当作 Python import 真值。
+- 为防止公开依赖清单被显式动态加载入口绕过，Hosted 与离线校验共用一份动态加载安全扫描器；它拒绝
+  importlib/runpy/builtins 等加载入口以及 `__import__`/exec/eval/compile 等列举机制，但不把 AST 校验
+  宣称为 Python 安全沙箱。
+- 平台 SDK 不再以 `hushine_strategy.*`/`strategy_service.*` 前缀整体授权。策略只可使用精确的
+  `from <approved module> import <approved symbol>` 表面；绑定整个平台模块、star import、notifier、
+  runtime_dependencies、validator/replay 或非公开符号会在子进程前以普通 safety issue 拒绝。
 - 依赖缺失错误必须包含具体 import 名、Runtime profile、镜像构建标识和稳定错误码，不得留下假
   `running` Session。
 - debugpy、coverage、pytest、pyarrow 等工具或平台内部依赖不因“已经安装”而自动成为用户策略允许
@@ -56,7 +68,12 @@ Hosted Runtime 曾出现策略通过静态校验、但 worker 启动后才因 Py
 - 不把 strategy-debugger-cli 的内部依赖公开给用户策略。
 - 不允许用户在运行时执行 pip/uv 安装，也不恢复任意 requirements 或动态插件安装。
 - 不保证任意拼写错误或不存在的第三方子模块可导入；策略预检必须把这类问题明确返回给用户。
-- 不改变标准库允许规则、危险 import/调用限制、网络与文件系统沙箱策略。
+- 不改变标准库 root 的依赖权限、网络与文件系统隔离边界。批准的最小行为收紧只有两类：拒绝此前
+  Hosted 校验器可接受的显式动态模块/代码加载入口及其别名走私；拒绝绑定整个平台 SDK 模块对象、
+  star import 或导入非公开平台符号。这两类都能绕过公开依赖契约。现有
+  `from strategy_service.types import OrderDecision`、
+  `from hushine_strategy import Exchange` 和普通 `getattr` 模板行为保持可用。部署前只读扫描必须分别
+  报告两类影响。
 - 不要求 control-panel、quant-handler 或 core-service 安装用户策略的 Python 依赖。
 
 ## 4. 唯一依赖契约
@@ -118,8 +135,9 @@ public = true
 | `requests` | `requests` | `requests` |
 | `yaml` | `PyYAML` | `yaml` |
 
-标准库、`strategy_service.types` 和 `hushine_strategy` 继续由现有平台/SDK 规则管理，不伪装成第三方
-distribution 条目。debugpy、coverage 等只在工具配置中声明，不能进入上表。
+标准库继续由标准库规则管理；`strategy_service.types` 和 `hushine_strategy` 使用共享的精确模块/符号
+策略表，不再按前缀授权，也不伪装成第三方 distribution 条目。debugpy、coverage 等只在工具配置中
+声明，不能进入上表。
 
 ### 4.3 安装和锁文件关系
 
@@ -135,6 +153,13 @@ Runtime 依赖，lock 再记录完整解析结果；手工修改投影但不修�
 4. 已安装 distribution 版本能通过 metadata 查到，且 probe 能在隔离 Python 进程中真实导入；
 5. `pyproject.toml`、lock 或环境里多出的平台内部依赖不会被推导成用户允许 import。
 
+所有由 Python 管理的 installed-profile 与 source import 子进程共用一套跨平台有界 transport，并由同一
+中立包提供两个不合并的命名环境策略（profile probe 与 import probe）：显式环境白名单、私有
+cwd/home/tmp、保留 venv invocation symlink、stdout/stderr 64-KiB 上限、deadline、terminate/kill/reap 和
+严格 canonical JSON。不得使用继承环境、无界 `capture_output`/`StringIO` 或只适用于 Unix pipe 的实现。
+Runtime-agent 的启动探针由 Go 执行，不能复用 Python transport；它必须实现并测试等价的双管并发
+64-KiB 上限、单一 deadline、terminate/kill/reap、严格 schema/canonical JSON 与安全环境契约。
+
 `runtime_dependencies.toml` 发生变化时必须同时更新相关 lock，并提升 `profile_version`。只修改锁文件、
 校验常量或 Dockerfile，不能改变用户依赖范围。CI 对 contract checker 的失败一律 fail closed。
 
@@ -146,15 +171,27 @@ Runtime 依赖，lock 再记录完整解析结果；手工修改投影但不修�
 `runtime_version`、`runtime_profile` 和允许模块列表来自同一对象；列表必须稳定排序，便于 UI 和测试
 比较。
 
-静态规则分为两层：
+校验分为两层，但只有第一层是静态权限判断：
 
 1. **策略权限检查**：import root 不在公开集合时返回 `UNSUPPORTED_STRATEGY_DEPENDENCY`；
-2. **目标环境检查**：允许 root 下的策略实际 import 路径必须可由当前 worker Python 解析，否则返回
+2. **目标环境检查**：允许 root 下的策略实际 import 路径必须由当前 worker Python 的 import-only 子进程
+   初始化，否则返回
    `STRATEGY_DEPENDENCY_UNAVAILABLE`。
 
-第二层以策略 AST 中的完整 import 路径执行 `importlib.util.find_spec`/等价无用户代码检查。例如 root
-`google` 属于公开范围，但策略写入未安装的 `google.cloud` 时仍在执行用户代码前被拒绝。最终加载策略
-时若模块自身初始化失败，则返回 `STRATEGY_IMPORT_FAILED`，不能把异常折叠为通用 worker failure。
+第二层从策略 AST 重建且只执行 `Import`/绝对 `ImportFrom` 语句，在目标虚拟环境的同一解释器中以
+`-I` 启动共享、版本化、边界受限的子进程；它不执行任何其他用户语句。无导入 finder 只可用于安全的
+source-origin 查找或诊断，不能可靠判断 `requests.packages.urllib3`、`os.path`、`collections.abc` 等
+运行时 alias。若请求模块或父包确实不存在，返回 `STRATEGY_DEPENDENCY_UNAVAILABLE`；路径已找到但
+初始化缺少传递模块或抛出其他异常时返回 `STRATEGY_IMPORT_FAILED`。该中性协议放在 strategy-library
+发行物的非公开顶层内部包中，由 Hosted 和 debugger 复用；它不属于用户可 import 的 SDK root。
+
+静态层先运行共享平台导入表面扫描器：`hushine_strategy` 与 `strategy_service` 下只允许精确模块的
+精确公开符号 `ImportFrom`，禁止 module-object import、star、notifier/runtime_dependencies/validator/replay
+和非公开符号。随后运行共享动态加载安全扫描器，拒绝列举的
+importlib/runpy/builtins/pickle 等入口、`__import__`/exec/eval/compile 及其明确别名/`__builtins__` 走私，
+最后才做第三方 dependency permission。安全错误保留 code/module/symbol/line，仍是普通 safety issue，
+不伪装成 dependency error；被安全层拒绝的节点不会再产生重复依赖错误，也不会启动子进程。这些措施
+不替代 worker 进程隔离、环境清洗或凭据边界。
 
 ### 5.2 strategy-library 和 strategy-debugger-cli
 
@@ -164,7 +201,11 @@ strategy-library 不再维护 pandas-ta、scipy、sklearn、statsmodels、`ta` �
 离线回放仍可通过独立的网络、文件、进程和危险调用策略限制副作用，但不能重定义依赖集合。
 
 strategy-debugger-cli 的用户策略校验同样读取共享 profile，并在初始化/升级工作区时验证本地解释器的
-公开依赖闭合。调试器自己的 pyarrow、zstandard、debugpy 或测试工具即使已安装，也不能因此被用户
+公开依赖闭合；每条 replay source 在加载数据/执行前还必须运行同一共享实现的动态安全、依赖权限和
+精确解释器 import-only 子进程。平台表面按目标配置：standalone debugger 只提供
+`hushine_strategy` 精确公开符号，不伪装已安装 Hosted-only `strategy_service.types`；后者在 debugger
+中会在子进程前给出迁移提示，Hosted 保存策略/Preview 仍接受其规范公开符号。调试器自己的
+pyarrow、zstandard、debugpy 或测试工具即使已安装，也不能因此被用户
 策略校验器接受。Hosted 与本地调试的错误码和模块名保持一致，CLI 可以增加本地修复提示，但不能
 悄悄放宽允许集合。本次对旧 debugger allow/deny-list 的收口只对齐既有 Hosted profile，不批准第 4.2
 节以外的新包。
@@ -183,7 +224,10 @@ Dockerfile 在共同的 `runtime-base` 完成 locked dependency 安装和契约�
 - image build ID。
 
 这些事实进入 OCI labels、Runtime HELLO/capability 和启动错误，不包含 Git 凭证、仓库地址中的秘密或
-宿主机路径。coverage 只影响采样，不改变 profile 名、公开依赖或策略行为。
+宿主机路径。两个 commit 必须是 40 位小写十六进制；image build ID 必须符合三仓短 SHA、SemVer、
+target 和可选 dirty digest 组成的 96-byte 上限语法。任何路径、换行、控制字符、超长或不合语法值在
+进入错误/HELLO 前 fail closed 且不回显；前两段短 SHA 必须匹配 service/library commit，版本段必须匹配
+profile version。coverage 只影响采样，不改变 profile 名、公开依赖或策略行为。
 
 ## 6. 三层 Fail-Closed Gate
 
@@ -218,8 +262,8 @@ Preview 和 Run 都必须遵循：
 ```text
 收到请求
   -> 读取当前 Runtime profile
-  -> AST 权限校验
-  -> 完整 import 路径可用性校验
+  -> AST 平台导入表面 + 动态加载安全 + import 权限校验
+  -> 目标解释器 import-only 子进程完成路径解析与初始化校验
   -> 编译/加载用户策略
   -> worker READY
   -> control-panel 才可发布 Session running
@@ -239,7 +283,7 @@ Preview 和 Run 都必须遵循：
   "module": "example.missing",
   "runtime_profile": "platform-python-3.13",
   "runtime_profile_version": "1.0.0",
-  "image_build_id": "opaque-build-id",
+  "image_build_id": "111111111111-222222222222-333333333333-1.0.0-executor",
   "message": "Python module 'example.missing' is not available in this Runtime profile"
 }
 ```
@@ -247,8 +291,8 @@ Preview 和 Run 都必须遵循：
 稳定错误码包括：
 
 - `UNSUPPORTED_STRATEGY_DEPENDENCY`：模块不属于公开契约；
-- `STRATEGY_DEPENDENCY_UNAVAILABLE`：模块属于允许 root，但当前解释器无法解析完整路径；
-- `STRATEGY_IMPORT_FAILED`：模块解析存在，但导入/初始化失败；
+- `STRATEGY_DEPENDENCY_UNAVAILABLE`：模块属于允许 root，但 import-only 子进程确认请求路径/父包不存在；
+- `STRATEGY_IMPORT_FAILED`：模块路径已找到，但导入/初始化失败，或子进程协议/超时失败；
 - `RUNTIME_DEPENDENCY_PROFILE_INVALID`：镜像自身不满足声明契约；
 - `RUNTIME_DEPENDENCY_PROFILE_MISMATCH`：Runtime 报告的 profile/digest 不满足路由要求。
 
@@ -266,7 +310,14 @@ Preview 和 Run 都必须遵循：
 - 每个公开 root 被接受，未知模块和已禁止模块继续被拒绝；
 - pandas-ta、scipy、sklearn、statsmodels、TA-Lib 和 `ta` 不因本次修复变成公开依赖；
 - debugpy、coverage、pytest、pyarrow 等内部/工具模块不会出现在用户允许列表；
-- 完整子模块不存在时返回 `STRATEGY_DEPENDENCY_UNAVAILABLE`，而不是在 exec 阶段崩溃；
+- 完整子模块不存在时由目标解释器 import-only 子进程返回
+  `STRATEGY_DEPENDENCY_UNAVAILABLE`，而不是用 PathFinder 近似或等到 user exec 崩溃；
+- 运行时 alias 可用，模块初始化异常/传递缺失稳定返回 `STRATEGY_IMPORT_FAILED`；
+- importlib/`__import__`/exec 等列举动态加载绕过在子进程前以普通 safety issue 拒绝，普通模板
+  `getattr` 不受影响；
+- `import hushine_strategy`、`runtime_dependencies.subprocess/importlib`、`notifier.Path`、star 和非公开
+  平台符号在子进程前拒绝；规范的 `from hushine_strategy import Exchange` 与
+  Hosted `from strategy_service.types import OrderDecision` 保持通过，debugger 对后者给出 SDK 迁移提示；
 - profile 名、版本、digest 和稳定排序列表在 Hosted 响应与 debugger CLI 输出中一致。
 
 ### 8.2 锁文件和安装环境
@@ -291,7 +342,8 @@ Preview 和 Run 都必须遵循：
 
 ### 8.4 本地调试与常规回归
 
-- strategy-debugger-cli 初始化的干净环境执行公开依赖闭包和代表性策略；
+- strategy-debugger-cli 初始化的干净环境执行公开依赖闭包和代表性策略，并对每条 source 复用 Hosted
+  同一个 import-only 子进程协议与错误分类；
 - Hosted 可通过而本地缺包的 fixture 必须在 workspace preflight 中明确失败；
 - 运行 strategy-service、strategy-library、strategy-debugger-cli 的完整 pytest 套件；
 - 运行 strategy-service Go 测试、vet、两个 tracked shell tests 和 Runtime 容器 smoke；
@@ -299,18 +351,23 @@ Preview 和 Run 都必须遵循：
 
 ## 9. 部署与兼容
 
-本变更没有数据库 schema 或历史数据迁移。部署顺序为：
+本变更没有数据库 schema 或历史数据迁移。仓库交付必须先按主验收流程协调推送所有受影响仓库；不得
+为了让 debugger 获取 library 而提前单独发布 strategy-library。协调推送完成并通过无 mirror 的新鲜
+网络 bootstrap 后，制品与部署顺序为：
 
-1. 发布包含 schema-1 contract 的 strategy-library；
-2. 更新 strategy-service 与 strategy-debugger-cli lock，并通过各自闭包测试；
-3. 构建、验证并推送同一 profile/digest 的普通和覆盖率 Runtime 镜像；
-4. control-panel 配置期望 profile/digest，只把新 Session 路由到已验证 Runtime；
-5. 升级 Hosted Runtime，待旧 Session 自然结束后回收旧镜像；
-6. 发布 debugger CLI，并在用户手册中记录 profile/version 查看方式和依赖错误解释。
+1. 从已协调推送的精确 strategy-library、strategy-service 和 strategy-debugger-cli SHA 验证
+   schema-1 contract 与两个 lock 的闭包；
+2. 构建、验证并推送同一 profile/digest 的普通和覆盖率 Runtime 镜像；
+3. control-panel 配置期望 profile/digest，只把新 Session 路由到已验证 Runtime；
+4. 升级 Hosted Runtime，待旧 Session 自然结束后回收旧镜像；
+5. 发布 debugger CLI，并在用户手册中记录 profile/version 查看方式和依赖错误解释。
 
-部署前对现有保存策略执行只读 import 扫描。当前 Hosted 已公开 root 保持不变，因此合法策略无需改写；
-若扫描发现过去仅被另一份漂移校验器接受、但不属于 Hosted profile 的模块，明确报告受影响策略并在
-Preview/Run 中 fail closed，不通过临时安装扩大本轮范围。
+部署前对现有保存策略执行只读平台导入表面、动态加载入口与 dependency permission 扫描。扫描器调用
+同一共享实现并分别输出 `platform_safety`、`dynamic_safety` 与
+`UNSUPPORTED_STRATEGY_DEPENDENCY` 影响，包含稳定 code/module/symbol/line，绝不执行用户代码。当前 Hosted
+八个公开 root 保持不变；规范的精确 `from ... import approved symbol` 策略无需改写。若扫描发现模块对象、
+内部平台符号、动态加载走私，或过去仅被漂移校验器接受但不属于 Hosted profile 的模块，明确报告受影响
+策略并在 Preview/Run 中 fail closed，不通过临时安装扩大本轮范围。
 
 回滚时普通与覆盖率镜像必须按成对的 profile/digest 回滚，control-panel 同步恢复对应 admission 版本。
 不能只回滚一个镜像 tag 或只放宽校验器。已有运行中 Session 不因 profile 发布被强制终止；新 Session
