@@ -30,9 +30,12 @@
 - control-panel compares HELLO and RESUME to one typed expected profile configuration before registry upsert, channel registration, or route availability. Session routing remains exclusively runtime_id; profile metadata is an admission fact, never a second route key.
 - Hosted Preview and Run, optional explicit ValidateStrategySource, and debugger replay use the same shared AST dependency rules. Complete imported module paths are checked against the selected worker interpreter before user code is executed.
 - Stable dependency codes are exactly UNSUPPORTED_STRATEGY_DEPENDENCY, STRATEGY_DEPENDENCY_UNAVAILABLE, STRATEGY_IMPORT_FAILED, RUNTIME_DEPENDENCY_PROFILE_INVALID, and RUNTIME_DEPENDENCY_PROFILE_MISMATCH.
-- A dependency error preserves code, module, runtime_profile, runtime_profile_version, image_build_id, and a safe message across worker startup, synchronous Preview/Run/Validate, asynchronous download-and-run jobs, RuntimeChannel, gRPC, quant-handler HTTP, and the frontend. Tracebacks are logged with existing redaction and are never returned to the browser.
+- A dependency error preserves code, module, runtime_profile, runtime_profile_version, image_build_id, and a safe message across worker startup, synchronous Preview/Run/Validate, asynchronous download-and-run jobs, RuntimeChannel, gRPC, quant-handler HTTP, and the frontend. Tracebacks are never returned to the browser. Because strategy-service currently has no repository-wide redaction filter, Task 5 logs only fixed event codes plus numeric/session identifiers and never logs exception values, paths, source, child diagnostics, or `exc_info`; richer traceback logging requires a later explicit redaction facility.
 - A worker process HELLO is not strategy readiness. Run returns success only after validation, import, and user strategy load have completed and SessionProgress reports running.
 - Dependency/import failure before running terminates the one-shot or session worker generation, clears agent pending maps/aliases, and leaves no running Session.
+- In the completed plan after the atomic Task 5B2/Task 8 cutover, every new Run Session is born `pending` and non-active. Its exact lifecycle is synchronous gate/prepare/single-attempt claim, local pending registration, blocked-runner readiness, durable pending Save, durable `strategy_start` snapshot, all fallible dormant activation, `activation_ready`, foreground durable-plus-local running update, `RunStrategy` return while the user loop remains blocked, a shared Session publication CAS, successful submission of the running frame to the worker's ordered outbound stream, and only then an infallible local release gate and user callbacks/bars. No new acknowledgement frame is introduced: the Agent still reports external Run success only when it receives and accepts that running frame. A failure before the successful Save aborts and discards the local Session with no durable row. A failure after Save but before the durable running update transitions pending to failed. After the durable/local running update, terminal ownership may transition the row `running -> failed` before any external running frame is submitted; if publication has already been claimed, the ordered running submission precedes exactly one later failed event. Stream loss before or after Agent acceptance is reconciled by generation cleanup, and no path may publish running after terminal ownership wins.
+- A non-`Exception` `BaseException` from user code is terminal for that Session, never a recoverable callback result. Intermediate layers clean up and re-raise; the outer session boundary owns exactly-once failed finalization. Callback threads report through a fatal latch governed by the same Session lock/publication state as the external-running claim: fatal-first forbids running publication, while publication-first orders the claimed running frame before exactly one later failed terminal event.
+- Runtime-agent generation cleanup ownership continues after accepted running until `FinalStatus` is acknowledged or an explicit stop is acknowledged. Unexpected child/process/stream loss before or after running closes and drains admissions, reconciles the owned canonical pending/running Session to failed exactly once, and retains a retryable cleanup tombstone whenever durable state is ambiguous; it never overwrites finished/stopped or explicit-stop semantics.
 - Existing CreateStrategy remains valid without runtime_id and preserves the current product sequence: create/save Strategy first, then create/select Runtime when starting it. The design phrase "save-time validation" is resolved as an optional editor action against an already selected runtime, exposed through HTTP ValidateStrategySource; storage-only Create never invokes it, never requires runtime_id, and is never blocked by Runtime availability. Preview and Run always validate on their selected runtime.
 - A Hosted startup-profile failure is captured by the platform provisioner as a structured admission failure without registering or routing the Runtime. A Self-hosted startup-profile failure may send one bounded credential-authenticated failure report that creates no HELLO, lease, registry entry, or route; local stderr remains authoritative if reporting cannot connect. Bare/debugger stays an internal local-log path.
 - The change adds no database table, column, migration, compatibility alias, dynamic pip/uv install, or requirements upload.
@@ -65,6 +68,7 @@
 - strategy-service/strategy_service/runtime_profile.py — immutable adapter over the packaged shared profile plus image facts.
 - strategy-service/strategy_service/strategy_validator.py — Phase 3 declaration checks combined with shared import issues.
 - strategy-service/strategy_service/strategy_imports.py — complete-path resolution and isolated import-initialization preflight.
+- strategy-service/strategy_service/debug_strategy_sources.py — race-free atomic Bare first materialization before immutable resolution.
 - strategy-service/strategy_service/grpc_server.py — ValidateStrategySource plus Preview/Run pre-running validation/load gate.
 - strategy-service/strategy_service/platform_proxy.py and portfolio_client.py — carry the pending startup state through hosted/proxied and direct/Bare SaveSession paths.
 - strategy-service/strategy_service/strategy/base.py — preserves typed strategy import failures instead of flattening them.
@@ -85,7 +89,7 @@
 - strategy-service/scripts/smoke_strategy_runtime.sh — representative all-public strategy smoke.
 - strategy-service/scripts/fixtures/runtime_dependency_strategy_body.py — dependency-neutral Phase 3 strategy body; smoke code prepends probes read from the packaged TOML.
 - strategy-service/scripts/runtime_dependency_worker_smoke.py — actual one-shot session-worker/loopback-agent validation harness.
-- strategy-service/tests/test_runtime_profile.py, test_strategy_validator.py, test_strategy_imports.py, test_grpc_server.py, test_session_worker_entry.py, test_strategy_runtime_dockerfile.py — Python contract and lifecycle tests.
+- strategy-service/tests/test_runtime_profile.py, test_strategy_validator.py, test_strategy_imports.py, test_grpc_server.py, test_session.py, test_session_worker_entry.py, test_strategy_runtime_dockerfile.py — Python contract and lifecycle tests.
 - strategy-service/internal/runtimeagent/dependency_profile_test.go, runtime_channel_test.go, agent_test.go and strategy-service/cmd/runtime-agent/main_test.go — startup/admission metadata/error/cleanup Go tests.
 - strategy-service/Makefile and strategy-service/README.md — contract/image verification entry points and operator-facing behavior.
 
@@ -1385,7 +1389,7 @@ Before production edits, cover:
    directory with no inherited writable ACL for other users, verified by the
    native acceptance test. The runner
    points HOME (and Windows USERPROFILE) plus TEMP/TMP/TMPDIR there, and uses
-   `shell=False`, `stdin=DEVNULL`, `close_fds=True`. Cleanup occurs on success,
+   `shell=False`, `stdin=DEVNULL`, `close_fds=True`, and `bufsize=0`. Cleanup occurs on success,
    launch failure, child failure, timeout, overflow, and parse failure.
 3. The executable is absolute/normalized without resolving its final symlink.
    Constraint is exactly `None`, `3.13`, or `>=3.12`; argv is NUL-free and at
@@ -1478,17 +1482,22 @@ paths or cross-builds are insufficient.
 
 ### Task 5: Gate Complete Module Resolution and Import Initialization Before User Code
 
-**Files:**
-- Modify: strategy-library/pyproject.toml
-- Create: strategy-library/hushine_runtime_import_probe/__init__.py
-- Create: strategy-library/hushine_runtime_import_probe/__main__.py
-- Create: strategy-library/hushine_runtime_import_probe/protocol.py
-- Create: strategy-library/hushine_runtime_import_probe/transport.py
-- Modify: strategy-library/hushine_strategy/runtime_dependencies.py
-- Create: strategy-library/tests/hushine_strategy/test_import_probe.py
-- Modify: strategy-library/tests/hushine_strategy/test_runtime_dependencies.py
-- Modify: strategy-library/tests/test_runtime_dependency_contract.py
+**Frozen Task 5A input — consume unchanged at reviewed commit
+`953ff880e262cf514f0532e58ab99bf03c50f541`:**
+- Verify only: strategy-library/pyproject.toml
+- Verify only: strategy-library/hushine_runtime_import_probe/__init__.py
+- Verify only: strategy-library/hushine_runtime_import_probe/__main__.py
+- Verify only: strategy-library/hushine_runtime_import_probe/protocol.py
+- Verify only: strategy-library/hushine_runtime_import_probe/transport.py
+- Verify only: strategy-library/hushine_strategy/runtime_dependencies.py
+- Verify only: strategy-library/tests/hushine_strategy/test_import_probe.py
+- Verify only: strategy-library/tests/hushine_strategy/test_runtime_dependencies.py
+- Verify only: strategy-library/tests/test_runtime_dependency_contract.py
+
+**Task 5B1 files:**
 - Create: strategy-service/strategy_service/strategy_imports.py
+- Modify: strategy-service/strategy_service/debug_strategy_sources.py
+- Modify: strategy-service/strategy_service/session.py
 - Modify: strategy-service/strategy_service/strategy/base.py
 - Modify: strategy-service/strategy_service/service.py
 - Modify: strategy-service/strategy_service/grpc_server.py
@@ -1499,11 +1508,18 @@ paths or cross-builds are insufficient.
 - Modify: strategy-service/tests/test_input_universe.py
 - Modify: strategy-service/tests/test_notification.py
 - Modify: strategy-service/tests/test_periodic_sample_trigger.py
+- Create: strategy-service/tests/test_session.py
 - Modify: strategy-service/tests/test_strategy_phase3_runtime.py
 
 **Interfaces:**
 - Consumes: DB text, a source-file path, or a module path; current RuntimeProfile; and the absolute normalized invocation path of the already-running worker's `sys.executable`, preserving a virtualenv symlink.
-- Produces: one non-public strategy-library import-probe package shared by Hosted and debugger; immutable ResolvedStrategySource plus a sealed GatedStrategySource capability; StrategyDependencyError with stable fields; StrategySourceGateResult preserving every static issue and typed dependency detail; and a non-importing source resolver.
+- Produces: one non-public strategy-library import-probe package shared by
+  Hosted and debugger; immutable ResolvedStrategySource, a sealed
+  GatedStrategySource, and a sealed single-attempt PreparedStrategy capability;
+  closed StrategySourceResolutionError/StrategySourceLoadError/runtime-fatal
+  boundaries; StrategyDependencyError with stable fields; StrategySourceGateResult
+  preserving every static issue and typed dependency detail; and a
+  non-importing source resolver.
 
 Record the exact strategy-library and strategy-service starting HEADs and full
 porcelain status. Both repositories in the isolated worktree must start
@@ -1513,10 +1529,87 @@ Preview/Run: the Python session worker already exists. Its guarantee is that a
 failed gate creates no strategy session state or child execution state inside
 that worker.
 
-- [ ] **Step 1: Write all source-resolution and loader bypass tests first**
+**Authoritative delivery split and dependency order:** Task 5A is complete and
+independently reviewed at exact commit
+`953ff880e262cf514f0532e58ab99bf03c50f541`; Task 5B1 must verify and consume
+that clean commit without editing, staging, or recommitting a strategy-library
+path. Task 5B1 then changes only the
+strategy-service paths listed above: it lands resolution, capabilities,
+single-attempt synchronous claim, hot-reload safety, `SessionManager.prepare`/
+`register`, and passes the already-created engine/strategy into the current
+runner, while explicitly retaining the current durable-running Save protocol.
+Task 5B1 is an intermediate, non-releasable unit and its tests cannot claim the
+final Run lifecycle or “Task 5 complete.” Next execute Task 6 and Task 7. Only
+then execute Task 8 together with the deferred Task 5B2 Run-lifecycle cutover
+as one atomic usable unit across strategy-service, core-service, generated
+protocol, and runtime-agent paths. All final Task 5 lifecycle acceptance is
+deferred to Task 8's pre-implementation RED batches, publication cutover, and
+final verification; Task 9 and later are blocked until that
+combined cutover passes. This ordering overrides any shorter “Task 5 complete”
+wording elsewhere in a task report.
+
+- [ ] **Step 1A: Add one delayed-import surface RED without a collection error**
+
+First modify only `tests/test_strategy_imports.py`. Do not import the not-yet-
+created production module at file scope. The first executable test imports it
+inside the test body, so pytest collects the file and reports one ordinary test
+failure rather than hiding the batch behind collection:
+
+~~~python
+import importlib
+
+
+def test_strategy_imports_surface_is_importable():
+    module = importlib.import_module("strategy_service.strategy_imports")
+    assert tuple(
+        name
+        for name in (
+            "ResolvedStrategySource",
+            "GatedStrategySource",
+            "StrategyDependencyError",
+            "StrategySourceResolutionError",
+            "StrategySourceLoadError",
+            "StrategySourceGateResult",
+            "resolve_strategy_source",
+            "probe_strategy_imports",
+            "gate_strategy_source",
+        )
+        if not hasattr(module, name)
+    ) == ()
+~~~
+
+Run only that test:
+
+~~~bash
+cd strategy-service
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_strategy_imports.py::test_strategy_imports_surface_is_importable -q
+~~~
+
+Expected: pytest collects one test and it fails inside the test with
+`ModuleNotFoundError: strategy_service.strategy_imports`. A collection error,
+failure to import the frozen Task 5A package, or failure in an unrelated test
+does not count.
+
+- [ ] **Step 1B: Add the minimal importable module shell and make only the surface test GREEN**
+
+Create `strategy_service/strategy_imports.py` with the exact data/error/
+Protocol declarations and function signatures printed in Steps 4 and 6. The
+temporary resolver implementation raises only
+`StrategySourceResolutionError(reason="unsupported_source")`; the temporary
+probe/gate implementations return their closed non-success values without
+reading a path, parsing/compiling source, creating a private directory, or
+spawning a child. This shell exists only to let behavior tests collect; no
+Preview/Run call is wired to it in this batch.
+
+Run the exact Step 1A command again. Expected: one pass. Then run
+`git diff --check`; do not proceed if any other production path changed.
+
+- [ ] **Step 1C: Write resolver, Bare, fresh-module, and loader-bypass behavior REDs**
 
 Extend `tests/test_strategy_engine.py` and
-`tests/test_debug_strategy_sources.py` before creating the new module. Cover
+`tests/test_debug_strategy_sources.py` before filling the shell or editing any
+resolver/Bare/engine production behavior. Cover
 every currently accepted source form:
 
 1. DB source text resolves to one immutable UTF-8 byte sequence and digest.
@@ -1542,28 +1635,42 @@ every currently accepted source form:
 10. DB/file/module source is at most 1 MiB of UTF-8 bytes before `ast.parse`.
     File/module reads use a bounded `limit + 1` binary read, never an unbounded
     `read()`/`read_bytes()`; oversize and invalid UTF-8 fail before AST or child.
-11. Core load/declaration/engine APIs accept only the read-only
-    `GatedStrategySource` protocol. The concrete token is a module-private,
-    exact-type, per-process sealed capability; a direct construction,
+11. Core prepare APIs accept only the read-only `GatedStrategySource`; core
+    declaration/engine APIs accept only the read-only single-attempt
+    `PreparedStrategy`. Both concrete capabilities are module-private,
+    exact-type, per-process sealed objects; a direct construction,
     `SimpleNamespace`, copied fields, `dataclasses.replace`, pickle, copy, and
     deepcopy all fail admission with zero `exec`. An API invocation containing
     both a valid token A and raw/malicious source B is a `TypeError`; raw
     compatibility is a separately named resolve-and-gate wrapper.
 12. Module/package sources execute with correct `__name__`, `__package__`,
-    `__spec__`, `__file__`, and package `__path__`. Module source uses its
-    canonical name under one process-wide re-entrant registration lock and may
-    reuse only the exact same captured digest; a same-name/different-digest
-    collision fails closed. Every canonical registration carries a
-    process-private loader seal plus digest in a private registry; reuse
-    requires the same module object, seal identity, and digest while holding
-    the same global lock. A foreign `sys.modules` insertion or mutation/removal
-    of the marker is rejected, never adopted as a prior gated load. Test both
-    attacks and concurrent register/reuse/cleanup races. DB/file sources use a private digest-qualified
-    module name, register only for the execution window, and restore the prior
-    `sys.modules` entry in `finally`. Dataclass and Pydantic class creation,
-    metadata introspection, two concurrent sessions, and exception cleanup
-    leave no private namespace pollution. Relative imports remain rejected by
-    Task 4 before the child; no test executes an ungated parent `__init__.py`.
+    `__spec__`, `__file__`, and package `__path__`. Every prepare creates a
+    fresh module object and executes the captured bytes exactly once; no module
+    object or global state is cached/reused across Preview or Run RPCs, even for
+    the same digest. Module source uses its canonical name only inside one
+    process-wide re-entrant execution window. Under the same lock, save any
+    prior `sys.modules` entry, install the fresh sealed/digest-marked module,
+    reject nested/re-entrant active registration for that canonical name, and
+    restore the exact prior entry (or absence) in `finally`. A foreign prior
+    entry is never executed or adopted as a gated load. Mutation/removal of the
+    active marker fails closed and cleanup still restores the prior entry.
+    Test foreign insertion, nested registration, same/different digest,
+    concurrent serialized execution, and exception cleanup. DB/file sources
+    use a private digest-qualified name under the same execution-window rule.
+    Dataclass and Pydantic class creation, metadata introspection, two
+    concurrent sessions, and cleanup leave no private namespace pollution.
+    Relative imports remain rejected by Task 4 before the child; no test
+    executes an ungated parent `__init__.py`.
+13. Prepared claim follows the irreversible private state machine
+    `UNCLAIMED -> CLAIMING -> CLAIMED`; any `BaseException` during claim or
+    binding changes `CLAIMING -> INVALID`, never back to `UNCLAIMED`. A
+    concurrent caller that observes `CLAIMING` and every later retry against
+    `CLAIMED` or `INVALID` fail with the same
+    `StrategySourceLoadError(reason="gated_source_invalid")`. Failure commits
+    no engine, router, callback, writer, or other live field. Tests inject
+    ordinary exceptions plus `SystemExit`, `KeyboardInterrupt`, and
+    `GeneratorExit` at each claim/binding stage and assert an invalid token,
+    fixed subsequent rejection, and zero caller-visible state.
 
 Use a module fixture whose parent `__init__.py` writes a marker and raises;
 resolving `parent.strategy` must not create the marker or add the parent to
@@ -1573,11 +1680,34 @@ The resolver records immutable package/spec facts (`is_package`, package name,
 and normalized package search locations); it never retains or executes a
 custom loader object.
 
+Name the first four behavior tests
+`test_resolver_reads_hot_file_once_and_executes_captured_bytes`,
+`test_bare_materialization_is_atomic_under_concurrency`,
+`test_prepare_uses_a_fresh_temporary_canonical_module`, and
+`test_core_load_entrypoints_reject_raw_source`. Run them before the production
+edits:
+
+~~~bash
+cd strategy-service
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_strategy_engine.py::test_resolver_reads_hot_file_once_and_executes_captured_bytes \
+  tests/test_debug_strategy_sources.py::test_bare_materialization_is_atomic_under_concurrency \
+  tests/test_strategy_engine.py::test_prepare_uses_a_fresh_temporary_canonical_module \
+  tests/test_strategy_engine.py::test_core_load_entrypoints_reject_raw_source -q
+~~~
+
+Expected: all four tests collect; the shell's fixed unsupported-source result,
+the current racy fixed-temp Bare write, current raw loader, and current module
+reuse/bypass produce four assertion failures. No failure may be a missing
+module, missing frozen Task 5A API, or pytest collection error.
+
 - [ ] **Step 2: Write failure-classification and child-protocol tests**
 
-Create `strategy-library/tests/hushine_strategy/test_import_probe.py` for the
-shared child/client protocol and `strategy-service/tests/test_strategy_imports.py`
-for the Hosted adapter. Use actual packaged public roots for permission. Shadow
+Do not edit the already-reviewed
+`strategy-library/tests/hushine_strategy/test_import_probe.py`; run it unchanged
+at `953ff880e262cf514f0532e58ab99bf03c50f541` as frozen Task 5A verification.
+Extend only `strategy-service/tests/test_strategy_imports.py` for the Hosted
+adapter. Use actual packaged public roots for permission. Shadow
 one public root only through a private test-only request seam to create an
 importable package whose `__init__` imports an absent transitive module or
 raises RuntimeError. No test adds a production dependency root. Availability is
@@ -1586,9 +1716,10 @@ target interpreter child. The two source-level examples below belong to
 `strategy-service/tests/test_strategy_imports.py`: `ResolvedStrategySource`,
 `probe_strategy_imports`, and `StrategyDependencyError` are Hosted adapter
 interfaces and must not be moved into or imported by strategy-library. The
-library RED instead builds the equivalent normalized import records plus
-primitive expected-profile facts, invokes the neutral client, and asserts its
-closed result code/requested-module classification. Assert:
+frozen library suite already builds the equivalent normalized import records
+plus primitive expected-profile facts, invokes the neutral client, and asserts
+its closed result code/requested-module classification. The service RED
+asserts:
 
 ~~~python
 def test_missing_allowed_submodule_is_unavailable(worker_python):
@@ -1621,7 +1752,7 @@ def test_import_initialization_failure_is_distinct(tmp_path):
 Add these distinct classifications and protocol assertions:
 
 1. The requested complete module or one of its parent packages is absent (`requested=google.cloud`, `missing=google.cloud` or `missing=google`): STRATEGY_DEPENDENCY_UNAVAILABLE, reporting only `google.cloud`.
-2. The requested module is found, but its initialization imports an unrelated absent transitive module (`requested=requests`, `missing=private_transitive`): STRATEGY_IMPORT_FAILED, reporting only `requests`; the internal missing name appears only in redacted server logs.
+2. The requested module is found, but its initialization imports an unrelated absent transitive module (`requested=requests`, `missing=private_transitive`): STRATEGY_IMPORT_FAILED, reporting only `requests`; the internal missing name is discarded after classification and is neither logged nor returned.
 3. A distribution/probe required by the packaged profile is absent before strategy validation: the Task 1 installed probe fails and Task 10 maps startup to RUNTIME_DEPENDENCY_PROFILE_INVALID, refuses worker startup before listener registration, and therefore creates neither a Preview/Run request nor a StrategyDependencyError.
 
 Also assert all of the following:
@@ -1745,39 +1876,111 @@ Also assert all of the following:
   `hushine_strategy` origins, and imports all eight public roots. Running the
   symlink target directly must be a RED fixture because it loses that venv.
 
-- [ ] **Step 3: Write lifecycle assertions and run separate REDs**
+- [ ] **Step 3: Write every capability, config, registry, cursor, lifecycle, and fatal RED before its production edit**
 
-Before any production implementation, extend `tests/test_grpc_server.py` with
-recording fakes for session-manager create/discard, portfolio preflight/session
-persistence/update, market-data subscriptions, snapshots, `StrategyEngine`,
-and `threading.Thread`. Add the full failure matrix later listed in Step 8 and
-first prove the existing Preview/Run paths create forbidden side effects or
-cannot express the typed result.
+The Step 1B shell is now importable, and frozen Task 5A must already pass. Before
+editing `session.py`, `strategy/base.py`, `service.py`, `grpc_server.py`, or any
+notification/runner behavior, add all of these executable tests:
+
+- `tests/test_session.py` defines
+  `test_prepare_none_generates_lowercase_hex_and_records_ownership`,
+  `test_prepare_rejects_noncanonical_session_id`,
+  `test_register_requires_exact_id_and_state`,
+  `test_register_first_attempt_consumes_capability_after_collision`,
+  `test_discarded_state_cannot_reregister_after_id_reuse`,
+  `test_raced_stale_reregister_cannot_beat_fresh_state_after_id_reuse`,
+  `test_list_ids_is_a_sorted_snapshot`,
+  `test_discard_is_expected_state_cas`, and
+  `test_mark_terminal_and_expiry_are_expected_state_cas`,
+  `test_set_thread_is_expected_state_cas`, plus
+  `test_direct_session_state_constructor_stays_compatible_but_cannot_register`;
+- `tests/test_strategy_engine.py` defines
+  `test_prepared_claim_failure_is_irreversibly_invalid`,
+  `test_indicator_config_exact_grammar_limits_and_alias_detachment`,
+  `test_indicator_config_rejects_subclasses_and_hooks_without_calling_them`,
+  and `test_order_cursor_activation_is_idempotent_and_observable`;
+- `tests/test_notification.py` defines
+  `test_callback_thread_fatal_latch_wakes_the_session_loop_once`;
+- `tests/test_grpc_server.py` defines
+  `test_finalizer_baseexception_emits_one_terminal_result` plus the complete
+  Preview/Run gate-side-effect matrix from Step 8, using recording fakes for
+  registry prepare/register/discard, portfolio preflight/persistence/update,
+  subscriptions, snapshots, `StrategyEngine`, and `threading.Thread`.
+
+Use real exact built-ins and zero-call hook counters in the config tests. Race
+the first claim while it is `CLAIMING`, inject all four required
+`BaseException` classes at each binding stage, and assert no live candidate.
+The cursor test records the 500-limit seed call, injects an order-client
+exception, and requires a closed safe activation error rather than the current
+swallowed exception. The two fatal tests use a real independent callback
+thread and inject a second fatal plus finalizer fatal while counting terminal
+state/progress writes.
+
+The first single-use registry test registers an occupant, prepares a candidate
+for the same canonical ID, proves the candidate's first `register()` attempt
+fails `session_id_in_use`, discards the occupant, and proves retrying that exact
+candidate is permanently `state_mismatch`. The sequential reuse test registers
+and discards an old state, registers and discards a freshly prepared state under
+the same ID, then proves the now-free ID cannot resurrect the old state. The
+raced test releases stale-old and fresh-new `register()` calls from one real
+`threading.Barrier`; only the fresh issuance may win, the stale result is fixed
+`state_mismatch`, and the mapping is the fresh state. Every assertion uses the
+real manager lock and public registry API, not test mutation of private tokens.
+
+Run the frozen Task 5A proof first; it is expected GREEN and is not a RED:
 
 ~~~bash
 cd strategy-library
+test "$(git rev-parse HEAD)" = 953ff880e262cf514f0532e58ab99bf03c50f541
+test -z "$(git status --short --untracked-files=all)"
 uv run --isolated --no-project --with-editable '.[test]' pytest \
   tests/hushine_strategy/test_import_probe.py -q
-cd strategy-service
-PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
-  tests/test_strategy_engine.py tests/test_debug_strategy_sources.py -q
-PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/test_strategy_imports.py -q
-PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
-  tests/test_grpc_server.py -q
 ~~~
 
-Run the existing-file behavior tests first, before importing the new module.
-They must fail because module/file/hot-reload paths bypass a shared gate and the
-first load re-reads mutable files. Capture independent collection REDs for the
-missing neutral `hushine_runtime_import_probe` package and missing Hosted
-adapter; then capture the gRPC side-effect RED. Do not let either collection
-error stand in for the behavior or lifecycle RED.
+Then capture the focused single-use RED followed by four independent service
+RED batches so one failure cannot mask another:
+
+~~~bash
+cd strategy-service
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_session.py::test_register_first_attempt_consumes_capability_after_collision \
+  tests/test_session.py::test_discarded_state_cannot_reregister_after_id_reuse \
+  tests/test_session.py::test_raced_stale_reregister_cannot_beat_fresh_state_after_id_reuse -q
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_session.py -q
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_strategy_engine.py::test_prepared_claim_failure_is_irreversibly_invalid \
+  tests/test_strategy_engine.py::test_indicator_config_exact_grammar_limits_and_alias_detachment \
+  tests/test_strategy_engine.py::test_indicator_config_rejects_subclasses_and_hooks_without_calling_them \
+  tests/test_strategy_engine.py::test_order_cursor_activation_is_idempotent_and_observable -q
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_notification.py::test_callback_thread_fatal_latch_wakes_the_session_loop_once \
+  tests/test_grpc_server.py::test_finalizer_baseexception_emits_one_terminal_result -q
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_grpc_server.py -k 'strategy_source_gate or dependency_gate' -q
+~~~
+
+Expected respectively: missing manager-held single-use prepare issuance and
+permanent stale-state rejection; missing the remaining two-phase/CAS registry
+API; missing sealed claim, shallow/unbounded config and swallowed cursor
+failure; callback continuation or duplicate terminalization; and current
+Preview/Run side effects before a shared gate. Every selected test must collect
+and execute. A missing module, frozen Task 5A API failure, unrelated fixture
+failure, or top-level collection error does not satisfy any RED batch.
 
 - [ ] **Step 4: Implement immutable source resolution and gate contracts**
 
 Use:
 
 ~~~python
+@dataclass(frozen=True, slots=True)
+class CapturedFileSignature:
+    device: int
+    inode: int
+    mtime_ns: int
+    ctime_ns: int
+    size: int
+
 @dataclass(frozen=True)
 class ResolvedStrategySource:
     filename: str
@@ -1789,6 +1992,7 @@ class ResolvedStrategySource:
     package_search_locations: tuple[str, ...]
     source_kind: Literal["db", "file", "module"]
     hot_reload_path: str | None = None
+    hot_reload_signature: CapturedFileSignature | None = None
 
 @runtime_checkable
 class GatedStrategySource(Protocol):
@@ -1808,10 +2012,35 @@ class StrategyDependencyError(Exception):
     image_build_id: str
     message: str
 
+@dataclass(frozen=True, slots=True)
+class StrategySourceResolutionError(Exception):
+    reason: Literal[
+        "missing",
+        "unreadable",
+        "too_large",
+        "invalid_utf8",
+        "unsupported_source",
+    ]
+
+@dataclass(frozen=True, slots=True)
+class StrategySourceLoadError(Exception):
+    reason: Literal[
+        "compile_or_exec_failed",
+        "strategy_class_missing",
+        "strategy_construction_failed",
+        "declaration_failed",
+        "binding_failed",
+        "gated_source_invalid",
+    ]
+
 @dataclass(frozen=True)
 class StrategySourceGateResult:
     ok: bool
     issues: tuple[StrategyValidationIssue, ...]
+    runtime_profile: str
+    runtime_profile_version: str
+    contract_sha256: str
+    image_build_id: str
     dependency_error: StrategyDependencyError | None = None
     gated_source: GatedStrategySource | None = None
 
@@ -1846,38 +2075,107 @@ def gate_strategy_source(
 ) -> StrategySourceGateResult: ...
 ~~~
 
-`ResolvedStrategySource` is constructed from one immutable bounded byte read.
+`ResolvedStrategySource` comes from one immutable bounded byte read.
 Decode as UTF-8 without universal-newline rewriting for AST/compile and hash
 the exact bytes. DB text is encoded once as UTF-8. File paths and module origins
-are absolute real paths.
+are absolute real paths. A hot-reloadable file is opened once, bounded-read
+through that descriptor, and `fstat`ed before and after the read; a changed
+signature during capture fails closed, and the equal post-read device/inode/
+mtime/ctime/size becomes `hot_reload_signature`. The initial `BaseStrategy`
+state uses this captured signature, never a later `stat()` result. Thus gate-v1
+→ atomic replace-v2 → construct executes captured v1, and the first reload
+checkpoint observes the signature mismatch, freshly gates v2, and swaps to v2;
+add that exact regression.
 Module resolution uses the Task 4 non-importing segmented finder, accepts only a
 source-backed `.py` origin, and never calls `importlib.import_module()` or a
 custom loader. The filename/module name are deterministic and no error string
 includes source contents.
 
+Every source-resolution failure uses the exact frozen
+`StrategySourceResolutionError` reason enum above. Its `str()` is a fixed safe
+message derived only from the reason: `missing` → `strategy source was not
+found`; `unreadable` → `strategy source could not be read`; `too_large` →
+`strategy source exceeds the 1048576-byte limit`; `invalid_utf8` → `strategy
+source must be valid UTF-8`; and `unsupported_source` → `strategy source format
+is unsupported`. No path, module finder exception, source bytes, environment
+value, or traceback is retained. Missing/unreadable files,
+the 1 MiB limit, invalid UTF-8 (including an unencodable DB string), and
+namespace/bytecode/custom-loader/no-source modules are independently tested.
+Preview and Run map every such error to `FAILED_PRECONDITION` with the same
+fixed safe `strategy source invalid: ...` detail; it is an ordinary source
+failure, never a dependency-error envelope.
+
+Bare first materialization is part of the same source boundary. Replace the
+fixed `*.tmp` filename with a same-directory, mode-0600 unique temporary file,
+flush and `fsync` it, close it, and atomically `os.replace()` the stable debug
+path with `finally` cleanup. Concurrent Preview/Run materialization of the same immutable
+strategy version must both return the complete file without
+`FileNotFoundError`, partial content, or a leftover temp file. An already
+existing local debug file remains authoritative as today. This requires the
+explicitly owned `strategy_service/debug_strategy_sources.py`; it is not left
+as a known race outside Task 5.
+
+`DebugStrategySourceError` is also a closed safe boundary: invalid identity,
+missing code, and materialization failure have fixed internal reason values and
+never embed a path, OS exception, environment value, user input, or source.
+Preview and Run log only a fixed `BARE_STRATEGY_SOURCE_ERROR` event plus numeric
+user/strategy/session identifiers and map every such expected
+Bare failure to `FAILED_PRECONDITION` with the exact detail `failed to
+materialize bare debug strategy source` (no appended exception text), before
+resolution/gating or platform side effects. Inject canary-path permission,
+write, fsync, and replace failures and require symmetric details, no leak, no
+temp file, and no downstream call.
+
+Wrap the complete Bare source-selection/materialization call, including root
+resolution and temp-path construction. Any unexpected exception logs only the
+fixed `BARE_STRATEGY_SOURCE_INTERNAL` event plus numeric identifiers, sets gRPC
+`INTERNAL`, and returns the distinct fixed
+detail `strategy source materialization failed`; it never becomes UNKNOWN or
+includes exception text. Preview/Run canary tests require the same result and
+zero resolver, gate, or platform/session call.
+
 The public `GatedStrategySource` is a read-only Protocol only. Its sole concrete
 implementation is a module-private, slotted `_SealedGatedStrategySource`
-created by `gate_strategy_source` with a module-private identity seal. Every
-core loader requires `type(token) is _SealedGatedStrategySource` and the exact
-seal identity before reading fields. The class rejects copy/deepcopy/pickle and
-is not a dataclass, so callers cannot use `dataclasses.replace`. This prevents
-accidental/internal bypass; it is not presented as a sandbox against already
-executing hostile Python.
+created by `gate_strategy_source` with a module-private identity seal and a
+captured all-field fingerprint. That fingerprint contains filename, the
+original source bytes and digest, module/package name, package flag/search
+locations, source kind, hot-reload path, and every captured-signature field.
+Every core load/declaration/hot-reload admission requires
+`type(token) is _SealedGatedStrategySource`, the exact seal identity, an exact
+current metadata fingerprint match, and a recomputed source-bytes digest before
+reading fields or executing. Mutating a frozen `ResolvedStrategySource` via
+`object.__setattr__` cannot retarget canonical `sys.modules`, package metadata,
+or hot reload. Add zero-execution tests for each metadata family plus changing
+both source bytes and its public digest. The class rejects copy/deepcopy/pickle
+and is not a dataclass, so callers cannot use `dataclasses.replace`. This
+prevents accidental/internal bypass; it is not presented as a sandbox against
+already executing hostile Python.
 
 The sealed token can exist only after static permission/safety validation,
-complete-path exact-child initialization, and source validation succeed. `ok`
-is true exactly when issues and dependency_error are empty and `gated_source`
-is present. Before `exec()`, the loader rechecks the captured-source digest,
-current runtime contract digest, exact invocation path, and optional resolved
-target device/inode identity against the token; mismatch fails closed. The
+complete-path exact-child initialization, and source validation succeed. Every
+gate result carries the current profile name/version/digest/image-build fields,
+including ordinary-validation and dependency failures, so Task 7 never
+reconstructs them. `ok` is true exactly when issues and dependency_error are
+empty and `gated_source` is present. Before `exec()`, the loader rechecks the
+captured-source digest, current runtime contract digest, exact invocation path,
+and optional resolved interpreter-target device/inode identity against the
+token; mismatch fails closed. The
 invocation path is absolute and normalized
 but its final symlink is preserved so Python discovers the virtualenv's
-`pyvenv.cfg` and site-packages. A resolved target path/device/inode may be
-recorded only as tamper-detection identity; it is never substituted into argv.
+`pyvenv.cfg` and site-packages. A resolved Python interpreter target
+path/device/inode may be recorded only as tamper-detection identity; it is
+never substituted into argv. This identity never refers to the strategy backing
+file: after the one bounded resolution read, the first declaration/load/exec
+does not re-read or re-stat that file, even if it is replaced.
 There is one policy source: `RuntimeProfile` is only the Hosted adapter around
 Task 1's `RuntimeDependencyProfile`, not another allowed-module list.
 
-- [ ] **Step 5: Implement the versioned import-only child protocol**
+- [ ] **Step 5: Verify and consume the frozen versioned import-only child protocol**
+
+Task 5B1 does not reopen this implementation. Everything in this step is the
+consumption and regression contract of reviewed strategy-library commit
+`953ff880e262cf514f0532e58ab99bf03c50f541`; any mismatch blocks Task 5B1 and
+returns to independent Task 5A review rather than silently editing the pin.
 
 The transport, request/response values, canonical JSON codec (including
 `ensure_ascii=True`), bounded reader,
@@ -1891,8 +2189,8 @@ _probe-imports`; user strategy source that imports this internal root remains
 unsupported. Task 6 calls this exact client/child rather than forking a debugger
 protocol.
 
-The stable neutral client surface consumed by Task 5's Hosted adapter and Task
-6's debugger adapter is:
+The stable neutral root-package client surface consumed by Task 5's Hosted
+adapter and Task 6's debugger adapter is exactly five symbols:
 
 ~~~python
 @dataclass(frozen=True, slots=True)
@@ -1902,15 +2200,10 @@ class ExpectedProfile:
     contract_sha256: str
 
 @dataclass(frozen=True, slots=True)
-class ImportName:
-    name: str
-    asname: str | None
-
-@dataclass(frozen=True, slots=True)
 class ImportRecord:
     kind: Literal["import", "from"]
     module: str
-    names: tuple[ImportName, ...]
+    names: tuple["ImportName", ...]
     lineno: int
     col_offset: int
 
@@ -1930,7 +2223,7 @@ class ImportProbeResult:
 def collect_import_records(tree: ast.AST) -> tuple[ImportRecord, ...]: ...
 
 def probe_import_records(
-    imports: Sequence[ImportRecord],
+    imports: tuple[ImportRecord, ...],
     *,
     python_invocation_path: str,
     expected_profile: ExpectedProfile,
@@ -1938,12 +2231,36 @@ def probe_import_records(
 ) -> ImportProbeResult: ...
 ~~~
 
-For `kind="import"`, `names` is exactly empty; for `kind="from"`, it is
-non-empty. The collector returns only these exact frozen value types, and the
-public client accepts only them; raw mappings are accepted only by private
-protocol-codec tests. `ImportRecord` is not a Hosted source or error type.
-Protocol codecs remain in the non-public `protocol` module and do not expand
-this adapter surface. Both adapters import the five stable symbols
+`hushine_runtime_import_probe.protocol` additionally defines the
+protocol-private frozen `ImportName(name: str, asname: str | None)` used inside
+`ImportRecord.names`; it is produced by `collect_import_records()` and by
+private codec tests, but is absent from the root package attributes and
+`__all__`. For `kind="import"`, `names` is exactly the built-in empty tuple; for
+`kind="from"`, it is a non-empty exact built-in tuple of exact `ImportName`
+instances. `ImportRecord` is not a Hosted source or error type.
+
+The root package exports and exposes only `ExpectedProfile`, `ImportRecord`,
+`ImportProbeResult`, `collect_import_records`, and `probe_import_records`;
+tests assert that exact five-name surface and specifically that `ImportName`
+is not root-accessible. Every neutral value object's `__post_init__` enforces
+exact built-in field types and its declared immutable tuple shape. At the
+first public-client instruction, before timeout normalization, private-root
+creation, filesystem inspection, or process work, `probe_import_records()`
+requires `type(imports) is tuple`, `type(expected_profile) is ExpectedProfile`,
+`type(python_invocation_path) is str`, `type(record) is ImportRecord` for every
+element, `type(record.names) is tuple`, and `type(name) is ImportName` for every
+nested name. It rejects a list, tuple subclass, any other `Sequence`,
+an `ExpectedProfile`/`ImportRecord`/`ImportName` subclass, nested
+`str`/tuple/list subclasses,
+mutable list-backed fields, booleans in integer positions, and
+post-construction mutation aliases. Its module-private fixture client applies
+the same exact-value validation before its test-only path handling. Raw
+mappings are accepted only by lower private codec functions used in codec
+tests and can never reach a child through either client entry. Add no-spawn,
+no-private-directory tests for every rejected outer and nested shape.
+
+Protocol codecs and `ImportName` remain in the non-public `protocol` module and
+do not expand this adapter surface. Both adapters import the five stable symbols
 `ExpectedProfile`, `ImportRecord`, `ImportProbeResult`,
 `collect_import_records`, and `probe_import_records` directly from the
 `hushine_runtime_import_probe` root package; codecs and test seams are not root
@@ -1955,7 +2272,13 @@ The production client has no
 `extra_python_path` parameter. Hermetic child fixtures use a separately named,
 module-private `_probe_import_records_for_test(..., extra_python_path=...)`
 seam; production code cannot select it, and ordinary calls hard-code the empty
-array.
+array. That seam accepts only `type(extra_python_path) is tuple` whose values
+have exact built-in `str` type; it rejects list/other `Sequence`, tuple and
+string subclasses, and nested value subclasses before private-root,
+filesystem, or process work. Lower private codec/decoded-JSON functions may
+consume their schema-required exact built-in list/tuple representations, but
+neither public nor fixture client accepts a generic sequence. Add no-spawn and
+no-filesystem tests for every rejected container/value subclass.
 
 Move Task 4.5's already-tested stdlib-only private-root/environment/deadline/
 reader/kill/reap implementation into
@@ -1983,10 +2306,17 @@ ordered, first-occurrence-unique JSON request. The protocol has schema version
 it never sends or executes arbitrary source text. The child
 revalidates the schema and constructs new AST import nodes itself.
 
-Invoke exactly:
+Keep the executable/protocol argv and isolation arguments exactly as follows.
+The reviewed implementation creates the private root and sanitized environment
+first, then starts the child with the platform containment creation flags. It
+does not pre-create a Windows Job owner:
 
 ~~~python
-subprocess.Popen(
+private_root = create_private_probe_root(environment_policy)
+environment = _private_probe_environment(
+    environment_policy, copied_environment, private_root
+)
+process = subprocess.Popen(
     [
         python_invocation_path,
         "-I",
@@ -1994,14 +2324,41 @@ subprocess.Popen(
         "hushine_runtime_import_probe",
         "_probe-imports",
     ],
-    cwd=private_empty_directory,
-    env=sanitized_allowlist_env,
+    cwd=str(private_root / "cwd"),
+    env=environment,
     shell=False,
     stdin=PIPE,
     stdout=PIPE,
     stderr=PIPE,
+    close_fds=True,
+    bufsize=0,
+    **_process_containment_popen_kwargs(),
 )
+containment = _establish_process_containment(process)
+# Reader/writer threads may start only after containment establishment returns.
 ~~~
+
+On Windows, `_process_containment_popen_kwargs()` supplies exactly
+`CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP`. The real order is: private
+root/environment, suspended `Popen`, kernel API acquisition, Job creation,
+kill-on-close Job configuration, process-to-Job assignment, one primary-thread
+resume, and only then reader/writer startup. Use the reviewed stdlib/`ctypes`
+Job, Toolhelp/thread-open, and `ResumeThread` implementation. On POSIX the
+kwargs supply `start_new_session=True` before `Popen` and containment records
+the resulting process-group ID.
+
+Inject failures independently at private-root/environment preparation,
+`Popen`, Windows kernel API acquisition, Job creation/configuration, Job
+assignment, and primary-thread resume. Only failures before or during `Popen`
+claim that no child was created. Every Windows failure after `Popen` occurs
+while the child is still suspended: explicitly terminate and reap that direct
+child, dispose every acquired Job/thread/process handle, close every pipe,
+remove the private root, and write zero request bytes so no import can run.
+Job-create/configure/assign/resume failure must not rely on closing a partially
+initialized Python object. Every stage collapses to the fixed
+`ProbeTransportError` without paths, handles, or OS error text. Tests must not
+assert the false pre-created-owner property or “Job creation failure launches
+no process.”
 
 Create one private root containing separate empty cwd and temp directories.
 Build the environment from copied locale/TZ values and trusted Windows
@@ -2014,6 +2371,29 @@ cleanup state machine terminates then kills when needed, waits/reaps exactly
 once, closes every pipe, joins all three threads with a bound, and removes the
 private root in `finally`; it must not use selectors or an unbounded
 `communicate`, so the same code runs on native Windows pipes.
+
+Every environment key/value and argv item must be an exact built-in `str`
+before any `.upper()`, containment, normalization, or UTF-8 encoding; a
+subclass cannot override those operations to recategorize a disallowed key or
+understate its encoded size. Thread objects are registered for cleanup before
+`start()`. Cleanup handles never-started, start-then-raise, partly-started, and
+running threads without allowing join/close/remove errors to escape or skip a
+later phase; all such failures collapse to the fixed `ProbeTransportError`.
+
+The Windows Job owns the whole spawned process tree. On POSIX the child starts
+in a new session/process group, and cleanup signals and confirms termination of
+descendants that still inherit that session/process group even when the direct
+child has exited while a forked descendant retains stdout/stderr or the private
+protocol descriptor. POSIX process groups do not prevent a deliberately
+executing descendant from calling `setsid()` and escaping; this transport is
+not a sandbox and the plan makes no containment guarantee for such an escape.
+It still covers ordinary fork descendants holding a pipe or inherited protocol
+fd. Cleanup always reaps the direct child, closes containment resources, and
+bounds group/Job termination and confirmation by the one deadline. Add real
+POSIX forked grandchild-held-pipe and inherited-protocol-fd RED/GREEN tests,
+without a false `setsid`-escape assertion, plus deterministic portable Windows
+`Popen`/kernel/Job-create/configure/assign/resume/close failure tests. Native Windows execution
+remains the explicit deferred final gate and is not inferred from mocks.
 
 The request limits and canonicalization are exactly those tested in Step 2;
 responses use the same `ensure_ascii=True`, sorted-key, compact-separator
@@ -2031,9 +2411,9 @@ UTF-8 bytes and exception class at most 128. `exception_kind` is the closed enum
 exception/name/requested-module strings, and `static_found=true`.
 On a failed import, `requested_module` must be the exact module from one request
 record; success requires it empty. `missing_name` is internal-only bounded
-diagnostic data needed for the parent to apply the classification below; it is
-never copied into an error/message/RPC/progress payload and is redacted before
-server logging. Exit 0 means all imports initialized; exit 10 requires
+diagnostic data needed for the parent to apply the classification below; after
+classification it is discarded and never copied into a log, error, message,
+RPC, or progress payload. Exit 0 means all imports initialized; exit 10 requires
 `ok=false` and a non-`none` kind for the first failing record; exit 64 is an
 invalid request and exit 70 an internal probe failure. Exits 64/70 emit no
 protocol object. The parent accepts only the exact exit/schema combinations,
@@ -2062,8 +2442,8 @@ regressions proving `os.path` and
 successfully, and produce an accepted success response. Redirect Python and native import
 stdout/stderr to a null sink while retaining a duplicated private
 protocol descriptor for the final JSON. The parent
-accepts `missing_name` only as internal classification input, logs only its
-redacted form with exception class, and discards all captured import output. No
+accepts `missing_name` only as internal classification input and immediately
+discards it with exception class and all captured import output. No
 traceback, path, environment value, or raw stderr crosses the child protocol.
 
 Classification is strict and performed by the shared parent client from the
@@ -2083,39 +2463,450 @@ facts; never expose the transitive module name or raw child diagnostics.
 
 - [ ] **Step 6: Require a successful token at every user-code load site**
 
-In `strategy/base.py`, make every core `_load_strategy_instance*`, declaration
-extraction, `BaseStrategy` construction, and hot reload accept only a successful
-sealed `GatedStrategySource`. No core function accepts raw
-`strategy_path`/`strategy_code`, and a mixed token+raw invocation is rejected
-before compile/exec. If compatibility is required, expose a separately named
-wrapper whose only action is resolve+gate followed by the token-only core.
+In `strategy/base.py`, make the sole core load/prepare entry accept only a
+successful sealed `GatedStrategySource`; it returns the separate exact prepared
+capability below. `BaseStrategy`, `StrategyEngine.create_strategy`, declaration
+consumers, and hot-reload swap accept only that prepared capability. No core
+function accepts raw `strategy_path`/`strategy_code`, a bare gated token where a
+prepared capability is required, or mixed token+raw input; every mismatch is
+rejected before compile/exec or live-state mutation. If compatibility is
+required, expose a separately named wrapper whose only action is resolve, gate,
+prepare, then call the capability-only core.
 Catch and re-raise a gate-produced `StrategyDependencyError` before broad
 handlers. After a successful gate, every exception raised while executing the
 user body—including explicit or helper-raised ModuleNotFoundError/ImportError—
 retains the existing generic strategy-load category; exception class/text does
 not retroactively become a dependency failure. Tests distinguish real child
-gate failures from top-level `raise ImportError` and redact both safely.
+gate failures from top-level `raise ImportError` and prove neither user text nor
+traceback is logged or returned.
 
-Construct a fresh module namespace from the captured metadata. Module-path
-sources register under the canonical name while holding the shared registration
-lock, retain/reuse only an identical digest, and reject a digest collision.
-Package sources set immutable search locations in `__path__`; DB/file sources
-use a private digest-qualified name, temporarily register during execution for
-dataclass/Pydantic compatibility, and restore/remove in `finally`. Set
+That generic category is the exact closed `StrategySourceLoadError` above.
+Its `str()` is always `strategy could not be loaded`; its reason is one of the
+six fixed enum values and it stores no original exception, source, path,
+module, environment value, user text, traceback, `__cause__`, or diagnostic
+field. Wrap only the user-code boundaries: compile/exec, `MyStrategy` lookup
+and validation, constructor invocation, declaration/property/custom-container
+inspection, and notifier/indicator binding. Re-raise
+`StrategyDependencyError` before the broad handler. Catch `BaseException` at
+each narrow user boundary so top-level, constructor, `__getattribute__`, custom
+container, or `__setattr__` `SystemExit`, `KeyboardInterrupt`, and
+`GeneratorExit` cannot terminate the long-lived worker; convert the failure to
+the fixed error only after leaving the `except` block so no implicit exception
+context is retained. Tests require both `__cause__ is None` and `__context__ is
+None`. This pre-Session conversion aborts the whole Preview/Run request before
+registration; it is not recovery or continuation of that Session. Once a
+Session is registered, the terminal fatal-latch/outer-boundary rule below
+applies instead. Process-fatal behavior such as `os._exit()` is outside this in-process
+contract and remains worker-generation failure handling.
+Canonical-module and temporary-module cleanup still runs in `finally` before
+the safe error is raised.
+
+No Task 5 source-resolution/gate/load path logs the original user exception or
+uses `exc_info`.
+Preview and every synchronous Run/load boundary map
+`StrategySourceLoadError` to `FAILED_PRECONDITION` with the exact detail
+`strategy could not be loaded`. The asynchronous `_run_session` path receives
+an already-created strategy and must never load, bind, catch, store, or emit
+this category. Synchronous paths log only the fixed
+`STRATEGY_SOURCE_LOAD_FAILED` event plus numeric/session identifiers. They never
+interpolate the error object because a later implementation must not be able to
+weaken the fixed contract by changing `__str__`. Add canary
+source/path/secret cases for compile error, missing class, constructor
+`RuntimeError`, `ImportError`, `SystemExit`, `KeyboardInterrupt`, and
+`GeneratorExit`; assert fixed RPC output, no created session/state/progress,
+no traceback/log leak, no dependency-error relabeling, no worker exit, and no
+continuation past the failed load. A genuine gate-produced
+`StrategyDependencyError` retains its typed dependency envelope and is not
+flattened into this category.
+
+Use this public read-only shape, backed by only one module-private exact class:
+
+~~~python
+@runtime_checkable
+class PreparedStrategy(Protocol):
+    @property
+    def gated_source(self) -> GatedStrategySource: ...
+    @property
+    def declarations(self) -> StrategyDeclarations: ...
+    @property
+    def indicator_definitions(self) -> tuple[IndicatorDefinition, ...]: ...
+
+def prepare_strategy(gated_source: GatedStrategySource) -> PreparedStrategy: ...
+~~~
+
+`prepare_strategy()` validates the exact gated-source seal/fingerprint, executes
+the captured bytes, constructs `MyStrategy`, and normalizes declarations and
+indicator definitions exactly once. Its module-private, slotted
+`_SealedPreparedStrategy` captures the original gated-token identity and
+fingerprint, the one instance, immutable normalized declaration/indicator
+snapshots, a private seal, and one lock-protected state in the exact private
+enum `UNCLAIMED`, `CLAIMING`, `CLAIMED`, or `INVALID`. Public properties return
+recursively detached copies and never expose the instance, seal, state, or
+claim operation. Internally, declaration lists are stored as
+tuples/frozensets of immutable value objects.
+
+Each indicator config root is snapshotted with a custom bounded traversal over
+this exact JSON-like grammar only: exact `None`, exact `bool`, exact `int`, finite exact
+`float`, exact `str`, exact `dict` with exact `str` keys and recursively valid
+values, and exact `list` with recursively valid values. The root is depth 1;
+any node deeper than 16 or any traversal exceeding 4,096 visited nodes is
+rejected. Every occurrence counts, including every node below a repeated
+shared alias. Cycles are rejected using only the current ancestor chain;
+non-cyclic shared aliases are accepted but traversed and copied separately, so
+the two detached branches share no mutable identity. After traversal, encode
+the detached built-ins with
+`json.dumps(..., ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+allow_nan=False).encode("utf-8")`; more than 65,536 bytes is rejected. Store a
+private frozen representation and give each property read and writer binding a
+new exact built-in dict/list tree.
+
+Reject tuple/set/frozenset, dict/list/string/numeric subclasses, custom
+objects, dataclasses, Pydantic objects, reducers, and objects with copy,
+deepcopy, pickle, or attribute hooks. Dispatch on `type(value)` before any
+user-overridable operation and traverse exact containers through built-in
+operations; never call `copy.deepcopy`, pickle, `__reduce__`, `__getstate__`,
+or a custom hook. Any grammar, cycle, depth, node, canonical-size, or hook-
+bearing value failure becomes `StrategySourceLoadError(reason="declaration_failed")`
+inside the closed declaration boundary. Tests cover every scalar/container
+type, NaN/infinities, depth 16/17, node 4,096/4,097, byte 65,536/65,537,
+cycles, shared aliases copied apart and counted by occurrence, every relevant
+subclass/custom hook with a zero-call counter, and nested mutation isolation.
+
+The prepared capability itself rejects copy/deepcopy/pickle and is not a
+dataclass. Claim acquires its lock, accepts only `UNCLAIMED`, and irreversibly
+changes it to `CLAIMING` before fingerprint verification or binding. A caller
+observing `CLAIMING`, `CLAIMED`, or `INVALID` gets the same
+`StrategySourceLoadError(reason="gated_source_invalid")`. Claim rechecks the
+captured token fingerprint/digest and constructs every engine/router/notifier/
+indicator/callback binding in unattached local candidate state. Only after all
+candidate work succeeds does it atomically change `CLAIMING -> CLAIMED` and
+return the complete bound result for its caller to commit. Any `BaseException`
+during claim or binding runs cleanup, atomically changes `CLAIMING -> INVALID`,
+discards all candidates, and re-raises; it never rolls back to `UNCLAIMED` and
+commits no live field. Tests race two claims while the first is `CLAIMING`,
+cover successful `CLAIMED` reuse, and inject `Exception`, `SystemExit`,
+`KeyboardInterrupt`, and `GeneratorExit` at every fingerprint/binding stage;
+every failure leaves `INVALID`, fixed retry rejection, and zero engine/router/
+writer/callback/live-state commit.
+
+Within one Preview RPC, prepare once, read the normalized declarations, and
+discard the unclaimed object. Within one Run RPC, allocate one canonical UUID
+up front (reuse the current `preflight_session_id` as the final ID), gate and
+prepare once, and use those exact declarations for routes/snapshots/risk/
+preflight. Use this explicit two-phase registry API:
+
+~~~python
+@dataclass(frozen=True, slots=True)
+class SessionRegistrationError(Exception):
+    reason: Literal[
+        "invalid_session_id",
+        "state_mismatch",
+        "session_id_in_use",
+    ]
+
+    def __str__(self) -> str:
+        return "session registration failed"
+
+def prepare(
+    self,
+    *,
+    session_id: str | None = None,
+    environment: int = 0,
+    user_id: int = 0,
+    portfolio_id: int = 0,
+    runtime_id: str = "",
+    runtime_source: str = "",
+    runtime_name: str = "",
+) -> tuple[str, SessionState]: ...  # unregistered
+
+def register(self, session_id: str, state: SessionState) -> None: ...
+
+def list_ids(self) -> tuple[str, ...]: ...
+
+def discard(self, session_id: str, expected_state: SessionState) -> bool: ...
+
+def set_thread(
+    self,
+    session_id: str,
+    expected_state: SessionState,
+    thread: threading.Thread,
+) -> bool: ...
+
+def mark_terminal(
+    self,
+    session_id: str,
+    expected_state: SessionState,
+) -> bool: ...
+~~~
+
+The canonical ID grammar is exactly an exact built-in `str` of 32 lowercase
+hexadecimal characters matching `[0-9a-f]{32}`. `session_id=None` is the only
+generation form and produces `uuid.uuid4().hex`; empty, uppercase, hyphenated,
+short/long, subclass, bytes, or other values raise the fixed
+`SessionRegistrationError(reason="invalid_session_id")`. `prepare()` records
+that ID and a fresh module-private ownership-token identity on the unregistered
+`SessionState`; neither value can later be rebound. Under the same manager lock,
+`SessionManager` records a non-retaining issuance from that opaque token to the
+exact state. The state-held token alone is not authority: only the manager-held
+live issuance is the registration capability, and an abandoned unregistered
+state must not be kept alive by the issuance table.
+
+To preserve the 21 current direct `SessionState(...)` constructions, including
+`tests/test_session_worker_entry.py` outside Task 5B1 ownership, the two new
+fields have compatibility defaults `session_id: str = ""` and a private
+ownership token of `None` (excluded from repr/comparison). Such directly
+constructed states remain valid for isolated transition/worker tests but are
+not manager-owned and can never pass `register()`; only `prepare()` fills a
+canonical ID and non-None manager token. End-scan every production/test
+`SessionState(` call and require no unrelated fixture migration.
+
+`register()` is atomic single-use under the manager lock. It first requires the
+exact `SessionState` and a live manager issuance whose value is that exact state;
+otherwise it raises `state_mismatch`. Presenting that valid issuance is its
+first and only registration attempt: `register()` deletes the manager issuance
+before validating the supplied ID, ID equality, or collision. It then raises
+`invalid_session_id` for a noncanonical supplied ID, `state_mismatch` for an ID
+different from `state.session_id`, or `session_id_in_use` for an occupied ID;
+only a fully valid attempt inserts the mapping. All of those first-attempt
+outcomes consume the issuance. No failure, `discard()`, expiry, `restore()`, or
+ID reuse recreates it, so every later `register()` call for that state checks
+the missing issuance first and raises fixed `state_mismatch`, even while the
+original mapping still exists or after the ID becomes free. Retrying after a
+collision requires a new `prepare()` and a new state; concurrent registration
+of one prepared state has exactly one issuance consumer.
+
+`list_ids()` returns an exact built-in tuple of the currently registered IDs in
+lexical sort order under the manager lock. `discard(session_id,
+expected_state)` is an identity CAS under that same lock: it removes the mapping
+and completion timestamp only when the current value `is expected_state`,
+returns `True` on removal, and otherwise returns `False`. `set_thread()` and
+`mark_terminal()` require the same expected state identity and return `False`
+without mutation after ID reuse. Completion retention stores `(expected_state
+identity, completed_at)` rather than a bare timestamp; expiry removes only when
+both the current mapping and retained identity are still that exact state.
+There is no ID-only terminal-discard wrapper. Task 5B1 migrates every owned
+`grpc_server.py` startup, runner, cancellation, failure, thread-assignment,
+terminal-mark, and retention cleanup call to the expected-state APIs. Every
+such path retains its exact state; an old generation can never mutate, remove,
+or re-register over a newly reused ID. Race tests pause old discard, thread
+assignment, terminal mark, expiry, and stale re-registration in turn, register
+a new state after safe removal/reuse, then prove each stale operation returns
+`False` or fixed `state_mismatch` and leaves the replacement intact. These
+registry methods perform no persistence.
+
+In the Task 5B1 intermediate unit, the state retains the current
+running-compatible default because neither the portfolio wire/client nor
+core-service is in Task 5B1 scope. Existing legacy `create()` remains a
+compatibility composition of `prepare()` plus `register()`, and recovery-only
+`restore()` is never used to register a new Session. Task 8 extends this exact
+API with
+`initial_status: Literal["pending", "running"] = "running"`; only then does new
+Run use `prepare(initial_status="pending")`, while legacy `create()` composes
+`prepare(initial_status="running")` plus `register()`.
+
+Synchronously claim/bind through `StrategyEngine.create_strategy()` against
+that unregistered state and final ID before the first SessionManager
+register, DB/subscription/snapshot-write/thread side effect. Claim builds only
+unattached local candidate state. After claim succeeds, register the local
+current-compatible state and pass the already-created engine and `BaseStrategy`
+into `_run_session()`; the background path must not load, prepare, construct,
+extract declarations, or claim again. A load or binding failure therefore maps
+synchronously to the fixed FAILED_PRECONDITION detail and leaves the prepared
+state unregistered with no session row/state/subscription/thread. Tests prove
+Get/List cannot observe the state before register. Duplicate/concurrent
+register is fail-closed, existing `create()` still works, and neither failure
+nor cancellation calls `restore()`.
+
+BaseStrategy construction/claim performs zero order-service lifecycle calls.
+Task 5B1 replaces the constructor-coupled private initializer with this exact
+Task 8-consumable interface in `strategy/base.py`:
+
+~~~python
+@dataclass(frozen=True, slots=True)
+class StrategyActivationError(Exception):
+    reason: Literal["order_cursor_failed"]
+
+    def __str__(self) -> str:
+        return "strategy activation failed"
+
+def activate_order_event_cursor(self) -> None: ...
+~~~
+
+`activate_order_event_cursor()` is lock-protected and successful calls are
+idempotent: the first call performs the existing bounded 500-event seed and
+commits the maximum cursor only after the whole read succeeds; every later call
+returns without another order API call. An ordinary order-client exception is
+not swallowed. The method drops the original object outside the `except`
+scope, logs at most fixed `STRATEGY_ORDER_CURSOR_ACTIVATION_FAILED` plus the
+safe Session ID (no value, traceback, path, or `exc_info`), and raises a fresh
+closed `StrategyActivationError(reason="order_cursor_failed")` with no retained
+cause/context. Task 5B1 invokes it only after the current Save and
+`strategy_start` snapshot; on failure it safely transitions the already-
+running durable row to failed, releases only owned subscriptions, performs the
+exact-state registry CAS cleanup, and never starts `_run_session`. Failures
+before persistence never call the order lifecycle API. Task 8 calls this same
+method as an injectable fallible activation seam and does not edit
+`strategy/base.py` again.
+
+Task 5B1 also keeps deferred runtime-error callbacks inert until after
+persistence. Because current Save hard-codes durable running, this is an
+intermediate compatibility order, not the final non-active activation barrier
+and not release evidence.
+
+The executable Task 5B1 order is therefore: initial read-only snapshot/source
+selection -> resolve/gate/prepare -> read-only preflights -> unregistered
+`SessionManager.prepare(final_id)` -> synchronous claim/bind and non-persistent
+guards -> exact `register()` -> current Demo subscriptions -> current
+`SaveSession` (durable running) -> `strategy_start` snapshot -> idempotent order
+cursor -> arm deferred persistence callbacks -> start `_run_session` with the
+already-created engine/strategy. This unit proves failures before register are
+invisible and that no background load/prepare/claim remains, but it must not be
+called “Task 5 complete,” shipped, or used as pending/readiness evidence.
+
+After Task 6 and Task 7, Task 8 owns the atomic 5B2 lifecycle cutover to the
+final order: gate/prepare/claim -> register local pending -> start blocked
+runner -> `worker_ready` -> Save pending -> `strategy_start` snapshot -> every
+fallible cursor/subscription/callback/dormant-publication activation ->
+`activation_ready` -> foreground durable-plus-local running update ->
+`RunStrategy` returns while the user loop remains blocked -> worker-entry
+publication CAS -> running frame submitted to the ordered outbound stream ->
+infallible local release -> user callbacks/bars. Agent receipt of the running
+frame remains the only external Run success signal. Task 8 removes the
+intermediate current-running order in the same commit that adds the wire/core/
+Agent support; no repository state between those changes is an acceptance
+candidate.
+Add a source whose top level and constructor increment independent counters and
+would fail or change declarations on a second call; one Run must observe exactly
+one of each, and the running instance, subscriptions, risk facts, and
+declarations must all derive from that one prepared object. Preview is a
+separate execution request and does not cache user instances across RPCs.
+
+Hot reload performs resolve → gate → prepare once into local candidate state,
+compares the prepared normalized declarations, atomically claims/binds once,
+then swaps all live fields together. A preparation, declaration, claim, or
+binding failure retains the old instance and every old derived field.
+
+User-controlled runtime boundaries remain guarded after startup. Attribute
+lookup, `on_market_data`, order callbacks, notifier/indicator callbacks, any
+iteration of a returned container/iterator, and decision normalization are
+each narrow `BaseException` boundaries. Existing ordinary-`Exception`
+recoverable/failure behavior is preserved, while a non-`Exception`
+`BaseException` becomes this closed fixed error:
+
+~~~python
+@dataclass(frozen=True, slots=True)
+class StrategyUserCodeFatalError(BaseException):
+    stage: Literal[
+        "attribute",
+        "callback",
+        "result_iteration",
+        "decision_normalization",
+    ]
+
+    def __str__(self) -> str:
+        return "strategy user code terminated"
+~~~
+
+It inherits `BaseException` directly so existing `except Exception` handlers
+cannot accidentally flatten it, and it is raised outside the original
+`except` block with no cause/context or original value. It is never recoverable:
+no intermediate engine/router/notifier/indicator/session layer may catch it and
+continue. Intermediate layers may disarm resources or restore local invariants
+in `finally`, then must re-raise the same fatal error. The outermost session
+boundary surrounds both the complete business loop and ordinary finalization;
+it catches `StrategyUserCodeFatalError` before one last raw `BaseException`
+safety net and owns a lock/CAS-protected exactly-once terminalization record.
+The typed branch logs only `STRATEGY_USER_CODE_FATAL` plus numeric/session
+identifiers and selects exactly `strategy user code terminated`; the final
+safety net logs only `STRATEGY_SESSION_FATAL` plus identifiers and selects
+exactly `strategy session terminated`. Neither records the exception value or
+`exc_info`. A `BaseException` raised by cleanup/finalization is caught by that
+same outer safety net and cannot cause a second terminal progress/update.
+
+Callbacks that run on an external notifier/indicator/order thread cannot
+finalize or continue locally. Their narrow boundary atomically stores only the
+first fixed `StrategyUserCodeFatalError.stage` in a session-owned fatal latch,
+disarms all callback entry, and wakes the session loop. The latch and Task 8's
+running-publication claim use the same `SessionState` lock and publication
+state. If fatal wins while publication is merely ready, it takes terminal
+ownership and the entry cannot submit a running frame. If the entry has already
+claimed publication, fatal is recorded as pending while the ordered running
+send completes: send failure becomes one failed terminal without release; send
+success preserves running-before-failed order and then terminalizes exactly
+once without releasing user work when fatal was already pending. After normal
+release, a later fatal is an ordinary ordered `running -> failed` terminal.
+The callback thread itself returns without invoking another user callback or
+emitting progress. Before publication/release and before every later callback/
+bar, the session loop consumes the latch into the one outer terminal boundary.
+No state transition or frame may report running after terminal ownership has
+won.
+
+Add `__getattribute__`, `__setattr__`, callback, list-subclass/iterator,
+decision-field, and ordinary-finalization `SystemExit`, `KeyboardInterrupt`,
+and `GeneratorExit` regressions. Add a real independent callback-thread race:
+after one callback latches fatal, no second callback/bar/order or running
+progress occurs, the loop wakes and emits exactly one failed terminal result,
+and the worker remains live. Inject a second fatal and a finalizer fatal to
+prove the terminal update/progress count remains exactly one. None may kill the
+worker, leave the background thread without a terminal state, or leave the
+session loop reporting running.
+
+Construct a fresh module namespace from the captured metadata for every
+prepare. Module-path sources temporarily register that fresh object under the
+canonical name while holding the shared execution-window lock; never reuse a
+prior same-digest object across RPCs. Save/restore any prior entry exactly and
+reject a nested active registration before execution. Package sources set
+immutable search locations in `__path__`; DB/file sources use a private
+digest-qualified name under the same temporary rule for dataclass/Pydantic
+compatibility. Every path restores/removes in `finally`. Set
 `__name__`, `__package__`, source-backed `__spec__`, `__file__`, and `__path__`
 before compile/exec. Never invoke the resolver's loader object.
 
-`StrategyEngine.create_strategy()` accepts and forwards the token. Preview,
-declaration extraction, and the background Run construction use the same
-captured source object. If the backing file changes between them, the first
-session still runs the gated bytes. Hot reload performs a fresh read, gate and
-load, then swaps only after the existing declaration-compatibility checks. On
-failure it retains the prior instance, notifier, indicator writer and routing
-state. Migrate all fourteen raw `create_strategy(..., strategy_code=...)`
-fixtures in `tests/test_input_universe.py` to construct and pass a successful
-sealed token. Migrate `tests/test_periodic_sample_trigger.py` recording fakes
-and `_run_session()` invocations to accept and forward that same token; neither
-test file may preserve the raw path/code compatibility signature.
+`StrategyEngine.create_strategy()` accepts and atomically claims the prepared
+capability; it never accepts or forwards raw source or a bare gated token.
+Preview and Run each prepare their own request once, and one Run's declaration
+extraction and ready instance are the same prepared object. If the backing file
+changes after capture, the first session still runs the gated bytes. Hot reload
+performs a fresh read, gate and single prepare into local candidate state.
+Candidate declarations, notifier binding,
+indicator writer, and every other derived field must all finish successfully
+before one lock-protected swap; no live field is changed during candidate
+construction. On failure it retains the prior instance, declarations, notifier,
+indicator writer and routing state. The file-change signature includes at least
+device, inode, nanosecond mtime/ctime, and size, so a same-size atomic replace
+with preserved mtime is still gated; add that exact regression.
+
+The base audit found 100 raw/token-sensitive sites across the owned tests: two
+`_load_strategy_instance` calls, 30 `BaseStrategy` constructions, 59
+`.create_strategy` calls, nine `_run_session` calls, and ten recording
+`FakeEngine.create_strategy` interfaces (some sites belong to more than one
+count). Migrate every owned production/core signature and every owned test
+site, not only the fourteen calls in `tests/test_input_universe.py`; an end
+scan must find no raw path/code core signature. Tests that expect a successful
+load construct a real successful sealed token through the gate and then call
+the real prepare entry; they never forge either capability. Tests whose
+source is intentionally invalid—three declaration fixtures in
+`test_input_universe.py`, missing-module/bad-side/missing-`MyStrategy` cases in
+`test_strategy_engine.py`, and similar cases—assert the ordinary gate failure,
+no token and zero execution instead of forging a token. Existing successful
+OrderDecision fixtures missing Phase-3 exchange/order-type/market fields or
+using numeric quantity literals are updated to complete valid string-valued
+declarations. Runtime-guard tests that intentionally need numeric quantity or
+price use a statically non-evaluable expression whose runtime value remains
+invalid, preserving runtime coverage without being rejected by the static
+gate. Migrate `tests/test_periodic_sample_trigger.py` recording fakes and
+`_run_session()` invocations to accept the already-created engine/strategy; no
+owned test may preserve the raw compatibility signature or a background
+load/claim path.
+
+To migrate this matrix efficiently without creating a test-only bypass, an
+ordinary test helper calls the real public `resolve_strategy_source()`,
+`gate_strategy_source()`, and `prepare_strategy()` and may monkeypatch only the neutral
+`probe_import_records()` result to a valid correlated success. It never imports
+the concrete sealed class, seal object, private gate constructor, or private
+fixture-path seam. Focused adapter/protocol and lifecycle integration tests run
+the real exact child. An end scan rejects any private-seal shortcut in tests or
+production.
 
 - [ ] **Step 7: Put the gate before all Preview/Run session side effects**
 
@@ -2146,6 +2937,24 @@ STRATEGY_DEPENDENCY_UNAVAILABLE or STRATEGY_IMPORT_FAILED without exposing child
 facts. Launch/timeout/protocol/overflow failures use STRATEGY_IMPORT_FAILED with
 the fixed empty module.
 
+Callers wrap only `StrategySourceResolutionError` from the resolve phase and
+map its closed reason to the fixed ordinary `FAILED_PRECONDITION` source detail
+defined in Step 4. Unexpected resolver exceptions log only the fixed
+`STRATEGY_SOURCE_RESOLUTION_INTERNAL` event plus numeric identifiers, set gRPC
+`INTERNAL`, and return the fixed detail `strategy source resolution failed`;
+neither branch exposes a path or gets mislabeled as
+`STRATEGY_IMPORT_FAILED`.
+
+Likewise, expected gate outcomes return `StrategySourceGateResult`; they do not
+raise. Any unexpected exception from the profile adapter, collector, neutral
+probe adapter, result construction, or dependency serializer logs only the
+fixed `STRATEGY_SOURCE_GATE_INTERNAL` event plus numeric identifiers, sets gRPC
+`INTERNAL`, and returns the fixed detail
+`strategy source gate failed` before every platform/session side effect. Add
+Preview/Run-symmetric canary-exception tests proving no exception text,
+traceback, source, path, session, subscription, snapshot, engine, or thread
+escapes. An internal bug is never relabeled as `STRATEGY_IMPORT_FAILED`.
+
 Task 7 owns the typed protobuf. Until then, Preview/Run encode a dependency
 failure as gRPC FAILED_PRECONDITION with the exact ASCII prefix
 `STRATEGY_DEPENDENCY_ERROR:` followed by one sort-key/compact JSON object with
@@ -2157,11 +2966,29 @@ issues and current profile facts for that later adapter.
 
 Run the gate after source retrieval/materialization but before declaration
 execution, portfolio/market-data preflight calls that mutate state, session
-manager creation, subscriptions, persistence, snapshots, `StrategyEngine`, or
-thread creation. Pass the returned token through `_run_session()`; never pass
-only path/code and resolve again.
+manager creation, subscriptions, the post-gate required-symbol snapshot read,
+any snapshot synchronization/persistence, `StrategyEngine`, or thread creation.
+Preserve the existing prerequisite order: one read-only initial portfolio
+snapshot is allowed before the gate to derive environment/profile, as are the
+read-only active-strategy and capability lookups needed to select source. A
+failure performs exactly that one initial snapshot read and zero post-gate
+snapshot reads or writes. Recording fakes track `initial_snapshot_reads`,
+`post_gate_snapshot_reads`, and `snapshot_writes` separately. After successful
+prepare and read-only preflight, synchronously claim/bind the exact prepared
+object before the first write/session/thread effect. Pass the exact
+already-created engine and strategy instance through `_run_session()`; never
+pass path/code, a bare token, or an unclaimed prepared object and resolve/load
+again.
+The only pre-gate stateful write allowed by Task 5 is the explicitly specified
+Bare first materialization above; every other stateful platform/session effect
+remains behind the gate.
 
 - [ ] **Step 8: Make the prewritten Preview/Run lifecycle REDs GREEN**
+
+This is only the Task 5B1 gate/prepare/claim side-effect matrix under the
+current durable-running Save protocol. It excludes pending persistence,
+blocked-runner readiness, activation ordering, and pre-external-running Agent
+cleanup; those RED/GREEN tests are Task 8 Steps 1, 2, 5, and 9.
 
 Use the Step 3 recording fakes for session-manager create/discard, portfolio
 preflight/session persistence/update, market-data subscriptions, snapshots,
@@ -2171,8 +2998,9 @@ import, other import initialization failure, timeout, and malformed child
 protocol, assert:
 
 - no session-manager or DB/registry session row exists;
-- no subscription, snapshot, strategy engine, background thread, or RUNNING
-  state/progress exists;
+- exactly one prerequisite read-only initial snapshot occurs, with no post-gate
+  required-symbol snapshot read, snapshot synchronization/write, subscription,
+  strategy engine, background thread, or RUNNING state/progress;
 - no child strategy execution state is retained in the already-running Python
   worker;
 - context code is FAILED_PRECONDITION and the safe envelope round-trips the
@@ -2181,8 +3009,10 @@ protocol, assert:
 - Preview and Run use identical gate behavior;
 - a declaration-only validation failure remains ordinary validation details.
 
-Also prove the successful Run passes the exact token/digest/interpreter to the
-background constructor and does not read the file a second time.
+Also prove the successful Run prepares and claims the exact token/digest/
+interpreter once, passes the already-created engine/instance to the background
+runner, and neither reads the file nor executes/constructs the strategy a
+second time.
 
 Parameterize DB, file, module, Bare-materialized file, and hot-reload sources
 with every Task 4 dynamic-load bypass (`importlib` alias, `__import__`, exec,
@@ -2215,8 +3045,32 @@ PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
   tests/test_input_universe.py \
   tests/test_notification.py \
   tests/test_periodic_sample_trigger.py \
+  tests/test_session.py \
   tests/test_strategy_phase3_runtime.py -q
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
+~~~
+
+Run the brief-required managed bytecode compilation with all cache output
+redirected outside the repository, and prove cleanup:
+
+~~~bash
+cd strategy-service
+COMPILE_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/hushine-task5-compile.XXXXXX")"
+cleanup_compile_cache() { rm -rf -- "$COMPILE_CACHE"; }
+trap cleanup_compile_cache EXIT HUP INT TERM
+PYTHONPYCACHEPREFIX="$COMPILE_CACHE" PYTHONPATH=.:../strategy-library \
+  uv run --frozen --extra dev python -m compileall -q \
+  strategy_service/strategy_imports.py \
+  strategy_service/debug_strategy_sources.py \
+  strategy_service/session.py \
+  strategy_service/strategy/base.py \
+  strategy_service/service.py \
+  strategy_service/grpc_server.py
+find "$COMPILE_CACHE" -type f -name '*.pyc' -print -quit | grep -q .
+cleanup_compile_cache
+trap - EXIT HUP INT TERM
+test ! -e "$COMPILE_CACHE"
+git diff --check
 ~~~
 
 Repeat the manifest-wide isolated probe with an empty caller PYTHONPATH and
@@ -2234,42 +3088,22 @@ roots remain. Expected: all focused and full tests pass.
 
 ~~~bash
 cd strategy-library
-test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort )" = "$(printf '%s\n' \
-  hushine_runtime_import_probe/__init__.py \
-  hushine_runtime_import_probe/__main__.py \
-  hushine_runtime_import_probe/protocol.py \
-  hushine_runtime_import_probe/transport.py \
-  hushine_strategy/runtime_dependencies.py \
-  pyproject.toml \
-  tests/hushine_strategy/test_import_probe.py \
-  tests/hushine_strategy/test_runtime_dependencies.py \
-  tests/test_runtime_dependency_contract.py | sort)"
+TASK5A_REVIEWED_SHA=953ff880e262cf514f0532e58ab99bf03c50f541
+test "$(git rev-parse HEAD)" = "$TASK5A_REVIEWED_SHA"
+test -z "$(git status --short --untracked-files=all)"
 git diff --cached --quiet
-git add pyproject.toml hushine_runtime_import_probe \
-  hushine_strategy/runtime_dependencies.py \
-  tests/hushine_strategy/test_import_probe.py \
-  tests/hushine_strategy/test_runtime_dependencies.py \
-  tests/test_runtime_dependency_contract.py
-test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
-  hushine_runtime_import_probe/__init__.py \
-  hushine_runtime_import_probe/__main__.py \
-  hushine_runtime_import_probe/protocol.py \
-  hushine_runtime_import_probe/transport.py \
-  hushine_strategy/runtime_dependencies.py \
-  pyproject.toml \
-  tests/hushine_strategy/test_import_probe.py \
-  tests/hushine_strategy/test_runtime_dependencies.py \
-  tests/test_runtime_dependency_contract.py | sort)"
 git diff --cached --check
 git diff --quiet
 test -z "$(git ls-files --others --exclude-standard)"
-git commit -m "feat: add isolated strategy import probe"
-test -z "$(git status --short --untracked-files=all)"
-TASK5_STRATEGY_LIBRARY_HEAD=$(git rev-parse HEAD)
+git cat-file -e "$TASK5A_REVIEWED_SHA:hushine_runtime_import_probe/transport.py"
+git cat-file -e "$TASK5A_REVIEWED_SHA:hushine_runtime_import_probe/protocol.py"
+git cat-file -e "$TASK5A_REVIEWED_SHA:hushine_strategy/import_validation.py"
 
 cd strategy-service
 test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort )" = "$(printf '%s\n' \
+  strategy_service/debug_strategy_sources.py \
   strategy_service/grpc_server.py \
+  strategy_service/session.py \
   strategy_service/service.py \
   strategy_service/strategy/base.py \
   strategy_service/strategy_imports.py \
@@ -2279,17 +3113,22 @@ test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | s
   tests/test_strategy_engine.py \
   tests/test_notification.py \
   tests/test_periodic_sample_trigger.py \
+  tests/test_session.py \
   tests/test_strategy_imports.py \
   tests/test_strategy_phase3_runtime.py | sort)"
 git diff --cached --quiet
-git add strategy_service/strategy_imports.py strategy_service/strategy/base.py \
+git add strategy_service/strategy_imports.py strategy_service/debug_strategy_sources.py \
+  strategy_service/session.py strategy_service/strategy/base.py \
   strategy_service/service.py strategy_service/grpc_server.py \
   tests/test_strategy_imports.py tests/test_strategy_engine.py \
   tests/test_debug_strategy_sources.py tests/test_grpc_server.py \
   tests/test_input_universe.py tests/test_notification.py \
-  tests/test_periodic_sample_trigger.py tests/test_strategy_phase3_runtime.py
+  tests/test_periodic_sample_trigger.py tests/test_session.py \
+  tests/test_strategy_phase3_runtime.py
 test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
+  strategy_service/debug_strategy_sources.py \
   strategy_service/grpc_server.py \
+  strategy_service/session.py \
   strategy_service/service.py \
   strategy_service/strategy/base.py \
   strategy_service/strategy_imports.py \
@@ -2299,6 +3138,7 @@ test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
   tests/test_strategy_engine.py \
   tests/test_notification.py \
   tests/test_periodic_sample_trigger.py \
+  tests/test_session.py \
   tests/test_strategy_imports.py \
   tests/test_strategy_phase3_runtime.py | sort)"
 git diff --cached --check
@@ -2306,11 +3146,17 @@ git diff --quiet
 test -z "$(git ls-files --others --exclude-standard)"
 git commit -m "fix: reject unavailable strategy imports before execution"
 test -z "$(git status --short --untracked-files=all)"
-printf '%s\n' "$TASK5_STRATEGY_LIBRARY_HEAD"
+printf '%s\n' "$TASK5A_REVIEWED_SHA"
 ~~~
 
-Record the printed post-Task-5 strategy-library SHA in the task report. Task 6
-must pin exactly that commit before it can consume the shared child.
+Record the printed frozen Task 5A strategy-library SHA in the task report. Task
+6 must pin exactly that commit before it can consume the shared child. Task 5B1
+does not create another strategy-library commit.
+Record the strategy-service commit separately as **Task 5B1 intermediate**.
+Its current durable-running Save order is expected and is not a deviation, but
+it is not Task 5 completion or release evidence. Do not run Task 9, acceptance,
+or handoff against it; proceed through Tasks 6 and 7, then complete the atomic
+Task 5B2/Task 8 lifecycle cutover.
 
 ### Task 6: Make Debugger Bootstrap Lock-Driven and Profile-Aware
 
@@ -2325,6 +3171,7 @@ must pin exactly that commit before it can consume the shared child.
 - Modify: strategy-debugger-cli/src/hushine_debugger/init_workspace.py
 - Modify: strategy-debugger-cli/src/hushine_debugger/replay.py
 - Create: strategy-debugger-cli/tests/test_runtime_profile.py
+- Modify: strategy-debugger-cli/tests/test_dependency_projection.py
 - Modify: strategy-debugger-cli/tests/test_cli.py
 - Modify: strategy-debugger-cli/tests/test_workspace.py
 - Modify: strategy-debugger-cli/tests/test_replay_cli.py
@@ -2339,8 +3186,48 @@ must pin exactly that commit before it can consume the shared child.
   and the same per-source dependency code/module/profile facts as Hosted without
   requiring a sibling repository.
 
-- [ ] **Step 1: Write debugger profile and workspace failure tests**
+- [ ] **Step 1A: Prove the old debugger pin is RED before importing Task 5A-only APIs**
 
+Task 5B1 must already be committed as the non-releasable intermediate. Record
+clean debugger/service/library status, then modify only
+`tests/test_dependency_projection.py` to require the exact reviewed Task 5A
+commit `953ff880e262cf514f0532e58ab99bf03c50f541`, canonical HTTPS URL, and no
+path/mirror leak. This test imports no Task 5A-only Python module.
+
+~~~bash
+cd strategy-debugger-cli
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider \
+  tests/test_dependency_projection.py::test_debugger_pins_the_canonical_library_commit_without_local_leaks -q
+~~~
+
+Expected: one executed assertion failure showing the old `93fbb56...` pin is
+not the reviewed `953ff88...`; collection or missing dependency does not count.
+
+- [ ] **Step 1B: Repin exact reviewed Task 5A and make only projection GREEN**
+
+~~~bash
+cd strategy-debugger-cli
+REVIEWED_TASK5A_SHA=953ff880e262cf514f0532e58ab99bf03c50f541
+test "$(git -C ../strategy-library rev-parse HEAD)" = "$REVIEWED_TASK5A_SHA"
+git -C ../strategy-library cat-file -e "$REVIEWED_TASK5A_SHA:hushine_runtime_import_probe/__init__.py"
+git -C ../strategy-library cat-file -e "$REVIEWED_TASK5A_SHA:hushine_strategy/import_validation.py"
+./scripts/with-local-strategy-library-git.sh ../strategy-library "$REVIEWED_TASK5A_SHA" \
+  uv add --no-sync "hushine-strategy-library @ git+https://github.com/hushine-tech/strategy-library.git@${REVIEWED_TASK5A_SHA}"
+./scripts/with-local-strategy-library-git.sh ../strategy-library "$REVIEWED_TASK5A_SHA" uv lock
+./scripts/with-local-strategy-library-git.sh ../strategy-library "$REVIEWED_TASK5A_SHA" \
+  uv lock --check --project "$(pwd -P)"
+./scripts/with-local-strategy-library-git.sh ../strategy-library "$REVIEWED_TASK5A_SHA" \
+  uv run --frozen --extra test pytest tests/test_dependency_projection.py -q
+~~~
+
+Expected: projection passes and project/lock contain only the canonical URL and
+full reviewed SHA. Do not edit the already-reviewed local-mirror helper.
+
+- [ ] **Step 2A: Write delayed-import debugger profile, bootstrap, workspace, and replay behavior tests**
+
+All imports of the not-yet-created debugger `runtime_profile` module occur
+inside test bodies through `importlib.import_module()` or in a subprocess.
+Task 5A-only imports are now safe because Step 1B repinned the frozen lock.
 Tests must prove:
 
 ~~~python
@@ -2383,17 +3270,20 @@ never installs strategy-library from a local path, never calls pip install
 without --no-deps, never resolves an unlocked package, and leaves an existing
 workspace venv byte-for-byte untouched on export/sync/verification failure.
 
-- [ ] **Step 2: Run debugger tests and verify RED**
+- [ ] **Step 2B: Run delayed behavior tests and verify real RED**
 
 ~~~bash
 cd strategy-debugger-cli
-LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
+LIBRARY_COMMIT=953ff880e262cf514f0532e58ab99bf03c50f541
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
   "$LIBRARY_COMMIT" \
   uv run --frozen --extra test pytest tests/test_runtime_profile.py tests/test_workspace.py tests/test_cli.py tests/test_replay_cli.py -q
 ~~~
 
-Expected: profile command/module is missing and current bootstrap command assertions fail.
+Expected: every file collects; individual tests fail because the profile
+command/module, atomic bootstrap ordering, workspace write gate, and replay
+preflight ordering are absent. A top-level collection error or old-pin missing
+API is not acceptable RED evidence.
 
 - [ ] **Step 3: Implement exact debugger profile checks**
 
@@ -2422,23 +3312,20 @@ workspace invocation path without resolving its final venv symlink.
 Print repair text separately from structured JSON so stable fields do not
 contain local paths.
 
-- [ ] **Step 4: Replace bootstrap resolution with the committed lock**
+- [ ] **Step 4: Implement bootstrap resolution from the already-repinned committed lock**
 
-Task 3's seed lock predates the shared validator and shared exact import probe.
-After Task 5 commits the probe, repin the debugger's immutable Git source to the
-recorded post-Task-5 strategy-library SHA and regenerate the lock:
+Step 1B already replaced Task 3's seed pin. Recheck that exact immutable input;
+do not repin to a moving adjacent HEAD:
 
 ~~~bash
 cd strategy-debugger-cli
-LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
-test "${#LIBRARY_COMMIT}" -eq 40
-./scripts/with-local-strategy-library-git.sh ../strategy-library "$LIBRARY_COMMIT" \
-  uv add --no-sync "hushine-strategy-library @ git+https://github.com/hushine-tech/strategy-library.git@${LIBRARY_COMMIT}"
+LIBRARY_COMMIT=953ff880e262cf514f0532e58ab99bf03c50f541
+test "$(git -C ../strategy-library rev-parse HEAD)" = "$LIBRARY_COMMIT"
 ./scripts/with-local-strategy-library-git.sh ../strategy-library "$LIBRARY_COMMIT" \
   uv lock --check --project "$(pwd -P)"
 ~~~
 
-This newer Task 5 commit is also intentionally unpublished. Assert it equals
+This reviewed Task 5A commit is intentionally unpublished. Assert it equals
 the SHA recorded by Task 5 and that the lock records only the canonical HTTPS
 URL/full commit, never the mirror transport.
 
@@ -2493,6 +3380,20 @@ UV_CACHE_DIR="$TMP/cache-314" HUSHINE_DEBUG_WORKSPACE="$TMP/workspace-314" \
 "$TMP/workspace-314/.venv/bin/python" -m hushine_debugger.cli profile --json
 ~~~
 
+Repeat each populated cache/workspace with exact offline propagation:
+
+~~~bash
+UV_OFFLINE=1 UV_CACHE_DIR="$TMP/cache-312" HUSHINE_DEBUG_WORKSPACE="$TMP/workspace-312" \
+  uv run --no-project --python 3.12 python checkout/strategy-debugger-cli/init.py
+UV_OFFLINE=1 UV_CACHE_DIR="$TMP/cache-313" HUSHINE_DEBUG_WORKSPACE="$TMP/workspace-313" \
+  uv run --no-project --python 3.13 python checkout/strategy-debugger-cli/init.py
+UV_OFFLINE=1 UV_CACHE_DIR="$TMP/cache-314" HUSHINE_DEBUG_WORKSPACE="$TMP/workspace-314" \
+  uv run --no-project --python 3.14 python checkout/strategy-debugger-cli/init.py
+~~~
+
+`init.py` preserves `UV_OFFLINE=1` for every child uv command. Recorder tests
+assert that propagation; all three second runs must pass without network.
+
 On Windows, `scripts/bootstrap-standalone.test.ps1` uses
 `Scripts/python.exe` and performs the real standalone bootstrap, profile check,
 shared import-probe success, missing-module classification, timeout/kill/reap,
@@ -2504,6 +3405,19 @@ network access remains lock-constrained. A second `--offline` run against each
 populated cache must also succeed. A separate `--network` mode refuses all Git
 rewrite/mirror variables and is intentionally deferred until the exact library
 commit has been pushed by the full-system workflow.
+
+Native Windows remains the user's A-deferred final gate, executed on the named
+Windows runner with:
+
+~~~powershell
+pwsh -NoProfile -File scripts/bootstrap-standalone.test.ps1 `
+  -LibraryRepo ..\strategy-library `
+  -ExpectedLibraryCommit 953ff880e262cf514f0532e58ab99bf03c50f541
+~~~
+
+The PowerShell script performs online then `UV_OFFLINE=1` runs for 3.12, 3.13,
+and 3.14 plus real timeout/overflow/kill/reap cleanup. POSIX Step 7 evidence
+cannot claim this native gate.
 
 - [ ] **Step 6: Gate init completion and every replay**
 
@@ -2544,7 +3458,8 @@ scan/Preview continues to permit canonical exact symbols from
 
 ~~~bash
 cd strategy-debugger-cli
-LIBRARY_COMMIT="$(git -C ../strategy-library rev-parse HEAD)"
+LIBRARY_COMMIT=953ff880e262cf514f0532e58ab99bf03c50f541
+test "$(git -C ../strategy-library rev-parse HEAD)" = "$LIBRARY_COMMIT"
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
   "$LIBRARY_COMMIT" \
   uv run --frozen --extra test pytest tests/ -q
@@ -2557,18 +3472,29 @@ uv run --isolated --no-project --with-editable '.[test]' pytest \
   tests/hushine_strategy/test_import_probe.py -q
 ~~~
 
-Expected: all tests pass, including requests accepted and internal tools rejected in strategy source.
+Expected: POSIX and shared suites pass, including requests accepted and
+internal tools rejected. This does not satisfy the separately recorded native
+Windows gate.
 
 - [ ] **Step 8: Commit debugger bootstrap/profile behavior**
 
 ~~~bash
 cd strategy-debugger-cli
-git add pyproject.toml uv.lock init.py scripts/with-local-strategy-library-git.sh \
+git add pyproject.toml uv.lock init.py \
   scripts/bootstrap-standalone.test.sh scripts/bootstrap-standalone.test.ps1 \
   src/hushine_debugger/runtime_profile.py src/hushine_debugger/cli.py \
   src/hushine_debugger/init_workspace.py src/hushine_debugger/replay.py \
-  tests/test_runtime_profile.py tests/test_cli.py tests/test_workspace.py \
+  tests/test_runtime_profile.py tests/test_dependency_projection.py \
+  tests/test_cli.py tests/test_workspace.py \
   tests/test_replay_cli.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
+  init.py pyproject.toml scripts/bootstrap-standalone.test.ps1 \
+  scripts/bootstrap-standalone.test.sh src/hushine_debugger/cli.py \
+  src/hushine_debugger/init_workspace.py src/hushine_debugger/replay.py \
+  src/hushine_debugger/runtime_profile.py tests/test_cli.py \
+  tests/test_dependency_projection.py tests/test_replay_cli.py \
+  tests/test_runtime_profile.py tests/test_workspace.py uv.lock | sort)"
+git diff --cached --check
 git commit -m "feat: verify locked debugger runtime profile"
 ~~~
 
@@ -2891,6 +3817,7 @@ git commit -m "feat: carry runtime dependency admission facts"
 - Modify: strategy-service/tests/test_worker_agent_client.py
 - Modify: strategy-service/tests/test_platform_proxy.py
 - Modify: strategy-service/tests/test_portfolio_client_runtime_binding.py
+- Modify: strategy-service/tests/test_session.py
 - Modify: strategy-service/internal/runtimeagent/agent.go
 - Modify: strategy-service/internal/runtimeagent/agent_test.go
 - Modify: strategy-service/internal/runtimeagent/worker_manager.go
@@ -2912,58 +3839,172 @@ git commit -m "feat: carry runtime dependency admission facts"
 **Interfaces:**
 - Consumes: ValidateStrategySourceRequest, StrategyDependencyError, worker PlatformCall/SessionProgress, and worker generation lifecycle.
 - Produces: ValidateStrategySourceResponse, typed RuntimeDependencyError frames,
-  a bounded construction/persistence/activation barrier, the existing persisted
+  a bounded post-claim worker-readiness/persistence/activation barrier, the existing persisted
   non-active `pending` state, and generation-owned worker/pending/alias cleanup;
   no in-flight startup platform call can commit after cleanup ownership is lost.
 
-- [ ] **Step 1: Write Python Validate and running-order tests**
+This task is also the deferred Task 5B2 production Run cutover. It begins only
+after the Task 5B1 intermediate commit plus Tasks 6 and 7, consumes Task 5B1's
+already-created engine/BaseStrategy path, and atomically replaces its temporary
+durable-running order with the pending barrier. Review and commit the Python,
+portfolio wire/core, and Agent changes as one coordinated unit; no subset is a
+usable or releasable state, and only this task may close Task 5 lifecycle
+acceptance.
 
-Add tests proving Validate uses no portfolio/core calls and creates no Session:
+- [ ] **Step 1: Write all Python registry, readiness, activation, publication, and fatal tests before implementation**
+
+`tests/test_session.py` first extends Task 5B1's exact-state registry tests with
+the pending status and publication-state races. `tests/test_grpc_server.py` and
+`tests/test_session_worker_entry.py` use this complete thread-call helper and a
+`run_harness` fixture whose fields are explicit, so the test contains no
+undefined response/thread/Session/fake objects:
 
 ~~~python
-def test_validate_source_returns_profile_without_session(servicer, context):
-    response = servicer.ValidateStrategySource(
+from dataclasses import dataclass
+from queue import Queue
+from threading import Thread
+
+
+@dataclass(frozen=True)
+class _RunCall:
+    thread: Thread
+    responses: Queue[pb2.RunStrategyResponse]
+    errors: Queue[BaseException]
+
+
+@dataclass(frozen=True)
+class _RunHarness:
+    servicer: StrategyServiceServicer
+    request: pb2.RunStrategyRequest
+    context: FakeServicerContext
+    start_session_id: str
+    runner: RecordingBlockedRunner
+    strategy_engine: RecordingStrategyEngine
+    claimed_strategy: BaseStrategy
+    portfolio_client: RecordingPortfolioClient
+
+
+def _start_run_call(harness: _RunHarness) -> _RunCall:
+    responses: Queue[pb2.RunStrategyResponse] = Queue()
+    errors: Queue[BaseException] = Queue()
+
+    def invoke() -> None:
+        try:
+            responses.put(
+                harness.servicer.RunStrategy(harness.request, harness.context)
+            )
+        except BaseException as error:
+            errors.put(error)
+
+    thread = Thread(target=invoke, name="test-run-strategy", daemon=False)
+    thread.start()
+    return _RunCall(thread=thread, responses=responses, errors=errors)
+
+
+def test_validate_source_returns_profile_without_session(
+    run_harness: _RunHarness,
+):
+    response = run_harness.servicer.ValidateStrategySource(
         pb2.ValidateStrategySourceRequest(
             source=ALL_PUBLIC_SOURCE, user_id=7, runtime_id="rt-1"
         ),
-        context,
+        run_harness.context,
     )
     assert response.ok is True
     assert response.runtime_profile.contract_sha256 == current_runtime_profile().contract_sha256
-    assert servicer._sessions.list_ids() == []
+    assert run_harness.servicer._sessions.list_ids() == ()
 
-def test_run_does_not_return_until_strategy_instance_is_ready(...):
-    engine_block = threading.Event()
-    engine_ready = threading.Event()
-    # Fake create_strategy sets engine_ready, then waits on engine_block.
-    response = call_run_in_thread()
-    assert worker_progresses == []
-    assert portfolio_client.save_session_calls == []
-    assert portfolio_client.list_sessions() == []
-    engine_ready.wait(1)
-    assert response_thread.is_alive()
-    engine_block.set()
-    assert response.session_id
+def test_run_passes_preclaimed_strategy_then_waits_for_worker_ready(
+    run_harness: _RunHarness,
+):
+    call = _start_run_call(run_harness)
+    assert run_harness.runner.entered.wait(1.0)
+    session_id = run_harness.start_session_id
+    state = run_harness.servicer._sessions.get(session_id)
+    assert state is not None
+    assert state.status == "pending"
+    assert run_harness.strategy_engine.create_calls == 1
+    assert run_harness.runner.engine is run_harness.strategy_engine
+    assert run_harness.runner.strategy is run_harness.claimed_strategy
+    assert run_harness.runner.progresses == []
+    assert run_harness.portfolio_client.save_session_calls == []
+    assert call.thread.is_alive()
+    run_harness.runner.allow_worker_ready.set()
+    assert run_harness.runner.allow_completion.wait(1.0)
+    run_harness.runner.complete_remaining_startup()
+    call.thread.join(1.0)
+    assert not call.thread.is_alive()
+    assert call.errors.empty()
+    assert call.responses.get_nowait().session_id == session_id
 ~~~
 
-The second fake must place the readiness signal after strategy construction but
-before the normal market-data loop. Add failure variants for
-StrategyDependencyError and generic constructor failure; both return before
-any running progress. Add snapshot-write and activation-write failures: after
-`SaveSession(initial_status="pending")`, concurrent List/GetSession may observe
-only `pending`, never `running`; failure transitions it to `failed`. Add a
-constructor that releases only after the 30-second readiness timeout and prove
-the RPC sets `abort` before bounded join/cleanup, returns without deadlock, and
-eventually removes thread/subscriptions/aliases. Add a static unsupported-import
-Preview/Run case proving the Task 5 gate attaches RuntimeDependencyError to the
-RPC context rather than returning only the validation message.
+The readiness fake is strictly post-claim: Task 5's synchronous path has already
+called gate, prepare, and `StrategyEngine.create_strategy()` exactly once. Task
+8 tests must fail if `_run_session` calls create/prepare/claim or receives raw
+source, a gated token, or an unclaimed prepared object. The runner installs only
+non-user runtime delivery binding, sets `worker_ready`, and waits for commit;
+it may not initialize the order cursor, arm callbacks, consume a bar, or emit
+running before commit.
 
-Add a deterministic worker test that lets core activation succeed, then kills
-the child before `session_worker_entry` can send external `running` progress.
-The Agent must already know the canonical Session ID from `StartSession`, return
-failure rather than success, mark that exact durable row failed through the
-existing RuntimeChannel platform proxy, and remove the generation. A NotFound
-from that cleanup is allowed only when persistence never happened.
+Add a worker-entry binding failure and readiness-timeout variant; both happen
+after local pending registration but before Save, set `abort`, bounded-join,
+unregister/discard locally, and leave no durable row or running progress. Task
+5 retains the StrategyDependencyError/load/claim failure tests before any
+runner exists. Add snapshot, cursor/callback activation, fatal-latch-during-arm,
+and running-update failures: after successful
+`SaveSession(initial_status="pending")`, concurrent List/GetSession may observe
+only pending, never running, and each of these pre-successful-update failures
+transitions the row exactly once to failed. Use a post-claim worker-entry
+barrier—not a constructor block—to
+hold the readiness timeout, and a separate activation barrier after the
+snapshot to hold `activation_ready`. Add a static unsupported-import Preview/
+Run case proving the Task 5 gate attaches RuntimeDependencyError to the RPC
+context rather than returning only the validation message.
+
+Record the complete success trace and require exactly:
+`gate`, `prepare_strategy`, `claim`, `register_local_pending`,
+`start_blocked_runner`, `worker_ready`, `SaveSession:pending`,
+`strategy_start_snapshot`, `commit`, `order_cursor`, `callback_arm`,
+`dormant_publication`, `activation_ready`, `UpdateSession:running`,
+`SessionState:running`, `publication_ready`, `RunStrategy:return`,
+`publication_claim`, `outbound:running:submit`, `release_gate`,
+`worker_release`, `user_loop:first_bar`, `Agent:accept_running`. The outbound
+submit event means `WorkerAgentClient.send_progress()` successfully committed
+the frame to its existing ordered local outbound/stream path; it is not a new
+Agent acknowledgement. No test fixture may substitute legacy
+`SessionManager.create()` for the new Run path.
+Instrument every activation failure seam and require `activation_ready` to stay
+unset until all of them plus dormant candidate publication finish. After a
+successful running update, make every old activation seam raise if called and
+prove the only post-submit release work is the infallible gate-open/event
+operation; there is no post-running activation, allocation, hook, I/O,
+callback registration, candidate commit, or other fallible step.
+
+Add deterministic publication-race tests with named barriers at (a) immediately
+before `claim_running_publication`, (b) after the CAS claim but before the
+running send, (c) after successful ordered-outbound submission, and (d) after
+submission but before the release gate. Fatal and publication operate under the
+same `SessionState` lock. Fatal-first at (a) produces no running frame and one
+failed terminal. Publication-first at (b) or (c) permits the running frame but
+queues exactly one later failed terminal on the same ordered outbound path and
+never releases user work. A send exception after claim produces failed/abort,
+no running frame, and no release. The no-fatal case alone opens the release
+gate. A fatal after normal release produces exactly the valid order
+running-then-failed; no case emits running after a terminal frame/state.
+
+Add deterministic worker tests proving the Agent generates one canonical exact
+lowercase 32-hex ID before child launch, places that same ID in
+`StartSession.session_id`, and Python uses it for registry, Save, response,
+progress, final status, and cleanup. Python may not generate or return a second
+ID, and neither WorkerStarter nor WorkerSender receives an alias call. Let core
+activation succeed, then kill the child before its running frame reaches the
+Agent: the outbound caller sees Run failure, cleanup queries and marks that
+exact durable row failed through the existing RuntimeChannel platform proxy,
+and removes the generation only after reconciliation. Repeat immediately after
+the Agent accepts running but before any `FinalStatus`: the original Run may
+already have returned success, but cleanup must still transition the owned
+running row exactly once to failed. A NotFound is final only when drained
+admission plus authenticated `GetSession` proves Save never committed.
 
 Add the adversarial in-flight ordering test at the real Agent/IPC boundary:
 block the generation's `SaveSession` platform dispatch after admission, kill the
@@ -2972,8 +4013,11 @@ Run response while that admitted call remains in flight. Release Save so it
 commits `pending`; require `SaveSession:end` to precede
 `UpdateSession(failed)`, the final durable row to be failed, and all generation
 state to be removed. Repeat with the `strategy_start` snapshot and activation
-call, stale-generation frames, and a drain timeout that retains cleanup
-ownership.
+call, stale-generation frames, a child/stream close immediately before and
+after Agent acceptance of running, and a drain/Get/Update timeout that retains
+cleanup ownership for retry. Add finished, stopped, already-failed, and
+explicit-stop-acknowledged controls; cleanup must observe and preserve those
+terminal semantics rather than overwrite them.
 
 - [ ] **Step 2: Write worker frame and Go agent failure tests**
 
@@ -3013,23 +4057,87 @@ Add Run variants for failure before startup persistence, failure after canonical
 Session routing registration, child process exit, and timeout. Every variant asserts no
 pendingRun, workerCallReply, session alias, managed process, or running response
 remains. A failure before `SaveSession` leaves no durable row; a failure after
-the pending row exists must leave it `failed`, never `running`. Add a
-concurrent observability test that blocks construction, snapshot, and activation
-in turn, repeatedly calls the product List/GetSession path, and proves it can
-never observe `running` before the complete activation barrier.
+the pending row exists but before the foreground running update must leave it
+failed without ever becoming running. A failure after that update but before
+the Agent sees a running frame may reconcile `running -> failed` without
+external Run success; after Agent acceptance it must preserve the ordered
+running-then-failed history. Add a
+concurrent observability test that blocks post-claim worker entry, snapshot,
+and activation in turn, repeatedly calls the product List/GetSession path, and
+proves it sees no durable row before successful Save and only pending—never
+running—after Save until the foreground running update succeeds and the
+complete activation barrier releases.
 
-- [ ] **Step 3: Run focused tests and verify RED**
+- [ ] **Step 3A: Run the prewritten Python and Agent tests and verify independent REDs**
 
 ~~~bash
 cd strategy-service
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
   tests/test_grpc_server.py tests/test_session_worker_entry.py \
   tests/test_worker_agent_client.py tests/test_platform_proxy.py \
-  tests/test_portfolio_client_runtime_binding.py -q
-go test ./internal/runtimeagent -run 'Validate|Dependency|Started|Cleanup' -count=1 -v
+  tests/test_portfolio_client_runtime_binding.py tests/test_session.py -q
+go test ./internal/runtimeagent -run 'Validate|Dependency|Started|Ready|Activation|Pending|Cleanup' -count=1 -v
 ~~~
 
-Expected: Validate is unimplemented, dependency fields are not populated, and existing Run can publish running before background strategy construction completes.
+Expected: Validate is unimplemented, dependency fields are not populated, and
+existing Run lacks the post-claim worker-ready/persistence/activation ordering
+and can expose running before the complete barrier.
+
+- [ ] **Step 3B: Establish the portfolio descriptor, then prove core behavior RED before editing core behavior**
+
+First add descriptor-only tests using reflection, not a generated field access,
+to `tests/test_portfolio_client_runtime_binding.py` and
+`core-service/internal/service/grpc_strategy_test.go`. Run them against the old
+descriptor:
+
+~~~bash
+cd strategy-service
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_portfolio_client_runtime_binding.py::test_save_session_initial_status_descriptor_is_field_15 -q
+cd ../core-service
+go test ./internal/service -run PortfolioProtoInitialStatusDescriptor -count=1 -v
+~~~
+
+Expected: both tests execute and fail because `SaveSessionRequest` has no
+`initial_status` field; neither is a compile/collection failure.
+
+Now edit only `core-service/proto/portfolio_service.proto` to add
+`string initial_status = 15`, then regenerate the core and consumer copies
+without editing core service/repository behavior:
+
+~~~bash
+cd core-service
+make proto-portfolio
+cd ../strategy-service
+PYTHON=.venv/bin/python ./generate_proto.sh
+~~~
+
+Rerun the two descriptor tests; expected: both pass and field 15 coexists with
+all prior fields. Then, still before editing `core-service/internal/service` or
+`internal/repository`, write the complete pending behavior tests:
+
+- `TestSaveSessionPendingPersistsNonActivePending`;
+- `TestPendingStrategyStartSnapshotIsTheOnlyAllowedPendingSnapshot`;
+- `TestPendingSessionRejectsOrderAndWalletMutation`;
+- `TestPendingTransitionsOnlyToRunningOrFailed`;
+- `TestPendingTransitionCompletionTimestamps`.
+
+Run exact core RED batches:
+
+~~~bash
+cd core-service
+go test ./internal/service \
+  -run 'SaveSessionPending|PendingStrategyStartSnapshot|PendingSessionRejects' \
+  -count=1 -v
+go test ./internal/repository \
+  -run 'PendingTransitionsOnly|PendingTransitionCompletion' \
+  -count=1 -v
+~~~
+
+Expected: service tests fail because Save hard-codes running and the pending
+snapshot exception is absent; repository tests fail because
+`pending -> running|failed` is not accepted. These are the required core REDs;
+no core implementation edit may precede them.
 
 - [ ] **Step 4: Implement ValidateStrategySource in the Python servicer**
 
@@ -3051,41 +4159,76 @@ def _runtime_dependency_error_proto(error: StrategyDependencyError):
 
 Preview and Run consume the same `StrategySourceGateResult`: when `ok=false` and `dependency_error` is present, call `set_context_dependency_error` before returning failure; when only ordinary syntax/declaration issues exist, retain the existing validation response. Tests cover UNSUPPORTED_STRATEGY_DEPENDENCY from static validation as well as child-probe failures, so no path can flatten a known dependency code to `issues[0].message`.
 
-- [ ] **Step 5: Add a bounded strategy-ready barrier to Run**
+- [ ] **Step 5: Add a bounded post-claim worker-ready barrier to Run**
 
 Make `StartSession.session_id` the canonical ID all the way through the local
-worker context and `SessionManager.create`; Python must not generate a second
-random real ID. Every SaveSession, progress, final status, alias/generation
-record, and response uses this same value. Reject an empty, malformed, or
-already-live canonical ID without replacing an existing Session; tests cover
-duplicate/collision and cleanup followed by safe reuse.
+worker context and `SessionManager.prepare(session_id=...,
+initial_status="pending")` plus `register`; Python must not generate a second
+random real ID. New Run must never call legacy `SessionManager.create()`, whose
+compatibility behavior remains `prepare(initial_status="running")` plus
+`register()`. Every SaveSession, progress, final status, alias/generation
+record, and response uses the canonical ID. Reject an empty, malformed, or
+already-live ID without replacing an existing Session; tests cover duplicate/
+collision, local pending observability, and cleanup followed by safe reuse.
+The only additive Task 8 registry signature is the keyword-only
+`initial_status: Literal["pending", "running"] = "running"` on Task 5B1's
+`prepare()`; `register()` is unchanged.
 
-Introduce an internal `_SessionStartupResult` carrying `constructed`, `commit`,
-`activation_ready`, `activated`, and `abort` Events plus error. The foreground
-may register the Agent-provided canonical in-memory session ID and Demo delivery subscriptions,
-but it must not call `SaveSession`, write the `strategy_start` snapshot, publish
-running progress, or allow the market-data loop to consume a bar yet. Pass the
-result into `_run_session`. `_run_session` sets `constructed` only after
-`StrategyEngine.create_strategy` returns and every order/indicator/notification/
-sink callback required before the first bar is installed; it then waits for
-`commit` or `abort`. After commit it sets `activation_ready` and still waits for
-`activated` or `abort` before consuming the first bar. On construction exception
-it records the typed or safe generic error before setting `constructed`.
+Before local registration, the foreground synchronously performs the Task 5
+gate, one `prepare_strategy()`, and the single irreversible
+`StrategyEngine.create_strategy(prepared)` claim/bind. It then registers that
+exact SessionState as pending/non-active and starts `_run_session` with the
+already-created engine and BaseStrategy. Task 8 is forbidden from calling or
+wrapping resolve, gate, prepare, claim, `create_strategy`, or any constructor
+again. No raw path/code, gated token, or prepared capability crosses into the
+runner.
+
+Introduce an internal `_SessionStartupResult` carrying `worker_ready`, `commit`,
+`activation_ready`, `release`, and `abort` Events plus a safe error slot. The
+fatal latch and running-publication state live on the exact registered
+`SessionState` under its existing lock; they are not a second independently
+locked copy in the startup result. On entry `_run_session` installs only
+non-user runtime delivery
+binding around the supplied engine/strategy, records any safe binding error,
+sets `worker_ready`, and waits for `commit` or `abort`. Before commit it creates
+no subscription, initializes no order cursor, arms no user/notifier/indicator/
+order callback, consumes no bar, and emits no running progress. After commit,
+the runner performs the idempotent order-cursor initialization, delivery
+subscription, and callback/fatal-latch arm as one local activation candidate.
+It fully validates and atomically publishes that candidate in a dormant state
+whose delivery/callback gate remains closed. Only when every possibly failing
+activation allocation, hook, I/O, lock acquisition, and publish has succeeded
+and no fatal is latched does it set `activation_ready`; it then waits for
+`release` or `abort` before consuming the first bar. A
+binding/activation failure stores the safe error, cleans local candidates, sets
+the applicable ready event so foreground cannot deadlock, and waits for abort;
+it never reloads or reclaims the user strategy.
 
 RunStrategy waits at most 30 seconds after starting the thread:
 
 ~~~python
-if not startup.constructed.wait(timeout=self._session_start_timeout_seconds):
+if not startup.worker_ready.wait(timeout=self._session_start_timeout_seconds):
     startup.abort.set()
-    self._fail_and_discard_startup(session_id, "strategy worker readiness timed out")
+    self._fail_and_discard_startup(
+        session_id, state, "strategy worker readiness timed out"
+    )
     context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
     return pb2.RunStrategyResponse()
 if startup.error is not None:
     startup.abort.set()
-    self._fail_and_discard_startup(session_id, startup.error.message)
-    set_context_dependency_error(context, startup.error)
+    self._fail_and_discard_startup(
+        session_id, state, "strategy worker startup failed"
+    )
+    context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+    context.set_details("strategy worker startup failed")
     return pb2.RunStrategyResponse()
 ~~~
+
+This pre-Save failure helper bounded-joins the blocked runner and calls
+`SessionManager.discard(session_id, state)`; a stale cleanup returning `False`
+cannot touch a replacement. It performs no durable failed update because there
+is no successfully saved row. Task 5's synchronous gate/load/claim error
+mapping runs before local registration and therefore needs no startup helper.
 
 Add `initial_status = 15` to `SaveSessionRequest`. Empty preserves legacy
 `running`; Runtime worker startup sends the only other accepted value,
@@ -3097,49 +4240,118 @@ Only `UpdatePortfolioSnapshot(snapshot_reason=strategy_start)` may accept a pend
 session after the existing user/Portfolio/Strategy checks; all other snapshot/
 order mutation paths remain fail-closed.
 
-After successful construction, the foreground calls
+`SaveSessionRequest` is already packed whole into `google.protobuf.Any` by the
+Python worker client and forwarded opaque by the Agent's existing
+`InvokePlatformAny` path. Therefore this nested `initial_status` addition
+requires regenerated portfolio message code in the Python producer and core
+receiver, but no `runtime_worker.proto` field and no Agent unpack/repack logic.
+Agent files change here only for canonical identity and generation cleanup;
+tests fail any needless field-specific Agent transformation.
+
+After `worker_ready` succeeds, the foreground calls
 `SaveSession(initial_status="pending")` exactly once and writes the
-`strategy_start` snapshot while the worker remains blocked. If Save fails, set
-abort before bounded join/cleanup and leave no row. If snapshot fails, set abort
-first, transition the existing pending row to failed with a safe category,
-then bounded-join/clean the generation; it can never leave a running row. After
-both writes are durable, set `commit`, wait for the internal
-`activation_ready`, call `UpdateSession(status="running")`, then immediately set
-`activated` and return `session_id`. If activation fails, set abort and
-transition pending to failed. The worker consumes no bar until `activated`.
+`strategy_start` snapshot while the runner remains blocked. A failure before a
+successful Save sets abort, bounded-joins, unregisters/discards locally, and
+leaves no row. A failure after successful Save but before the foreground
+running update—including snapshot, activation, or a fatal latched during arm—
+sets abort first and transitions the existing pending row exactly once to
+failed with a safe category. It never exposes running. A failure after the
+durable/local running update may instead produce the real ordered transition
+`running -> failed`; whether an external running frame exists is decided only
+by the publication CAS below.
 
-Do **not** wait here for Agent `SessionProgress(status="running")`:
-`session_worker_entry.py` sends that progress only after `RunStrategy` returns.
-The Go Agent continues treating that later progress as its sole external Run
-success signal. Add a deterministic no-deadlock test for this exact ordering.
-Every validation/import/construction failure creates no Session; every failure
-after persistence is non-running and leaves no bars/orders/indicators.
+After both persistence writes are durable, foreground sets `commit`; the
+runner calls Task 5B1's exact `activate_order_event_cursor()`, creates and
+publishes the subscription/callback candidate dormant, and sets
+`activation_ready`. Foreground waits with the same bounded deadline and checks
+both `startup.error` and the Session fatal latch. It then calls
+`UpdateSession(status="running")`; after that succeeds it atomically records
+local status running plus publication state `READY` under the Session lock,
+binds that exact `(session_id, state identity)` into the local `_WorkerContext`,
+and returns the canonical ID. The runner still waits on `release`.
 
-Because activation precedes the entry's external running send, add one Agent
-failure rule: until this generation's canonical Session ID has produced the
-accepted running progress, child exit, stream close, timeout, or send failure
-first closes that generation's startup-platform-call admission. After HELLO,
+Task 8 adds the private Session publication states `BLOCKED`, `READY`,
+`PUBLISHING`, `RELEASED`, and `TERMINAL`, all guarded by the same lock as the
+first-fatal latch and local status. `session_worker_entry.py`, after
+`RunStrategy` returns, retrieves the exact state identity from `_WorkerContext`
+and calls `claim_running_publication(expected_state)`. The CAS succeeds only
+from `READY` with no fatal/terminal owner and changes it to `PUBLISHING`.
+Fatal-first changes `BLOCKED|READY -> TERMINAL`, so the entry sends no running
+frame and drives exactly-once failed finalization. Fatal during `PUBLISHING`
+sets one `fatal_pending` bit but does not overtake the claimed running frame.
+
+After a successful claim, entry calls the existing
+`WorkerAgentClient.send_progress(status="running")`. Task 8 makes that method's
+local submission atomic under the outbound/close lock: success means the frame
+has been placed once on the existing ordered outbound queue; a synchronously
+known failed/closing stream raises before enqueue. This is not delivery or an
+Agent acknowledgement. On submission failure, entry atomically changes
+`PUBLISHING -> TERMINAL`, sets abort, persists the owned running row failed, and
+never sets release. On submission success, entry reacquires the Session lock.
+If `fatal_pending` is set, it changes to `TERMINAL`, leaves release closed, and
+the same ordered outbound path places the one failed terminal after running.
+Otherwise it changes to `RELEASED` and performs only `release.set()` while
+holding ownership; that infallible gate-open lets the runner enter the user
+loop. A fatal after `RELEASED` is the ordinary ordered runtime transition
+`running -> failed`.
+
+This is the only new-Run sequence:
+gate/prepare/claim -> register local pending -> start blocked runner ->
+worker_ready -> Save pending -> strategy_start snapshot -> commit -> fallible
+cursor/subscription/callback/dormant publication -> activation_ready ->
+Update durable running -> local running/publication READY -> RunStrategy return
+while runner blocked -> publication CAS claim -> submit running frame to local
+ordered outbound -> infallible release -> user callbacks/bars. The Agent still
+treats receipt/acceptance of that running frame as the sole external Run
+success signal; no new acknowledgement protocol exists. Add the deterministic
+no-deadlock and four publication-race tests from Step 1. Every pre-registration
+failure creates no Session, every pre-Save post-claim failure is CAS-discarded
+with no row, every failure before the durable running update stays non-running,
+and every later failure obeys running-before-failed ordering with no user work
+after terminal ownership.
+
+The Agent generates the canonical exact lowercase 32-hex Session ID before
+launch, stores it in the generation record, and sends it as
+`StartSession.session_id`. Python must persist and return that same ID. Remove
+the provisional `pending-*`/real-ID alias path; changing only the temporary
+ID's shape while Python still generates another ID is forbidden. After HELLO,
 `WorkerIPCServer.Connect` obtains an immutable authenticated `WorkerIdentity`
 (canonical Session ID, PID, opaque token, generation) and passes it to every
-frame and disconnect callback; the token is never logged or persisted. Agent
-owns a mutex/condition generation gate: admission atomically rejects a
-closing/stale generation and increments `inFlight` before dispatching
-`SaveSession`, the `strategy_start` snapshot, or activation `UpdateSession`;
-completion records its outcome, decrements the count, and signals waiters. Do
-not implement this as an unguarded `WaitGroup.Add` racing `Wait`.
+frame and disconnect callback; the token is never logged or persisted.
 
-Already-admitted startup calls use an Agent-owned bounded lifecycle context, not
-the worker stream/EOF context, so disconnect cannot make their completion
-invisible. Exit cleanup closes the gate first, drains every already-admitted
-startup call, then issues idempotent `UpdateSession(failed)` through the existing
-RuntimeChannel platform proxy before releasing the Run failure. The Agent
-receives no core address. `NotFound` is accepted only after the gate drained and
-an authenticated `GetSession` through the same proxy confirms absence. An
-ambiguous/timeout result retains a minimal generation cleanup record, blocks
-canonical-ID reuse, and is retried by the Agent-owned cleanup loop rather than
-orphaning a possibly late row. Thus an in-flight Save cannot commit `pending`
-after the failed update and leave a durable nonterminal row; the gate blocks
-only that generation, never RuntimeChannel heartbeat or another Session.
+Agent owns a mutex/condition generation gate. Admission atomically rejects a
+closing/stale generation and increments `inFlight` before dispatching
+`SaveSession`, the `strategy_start` snapshot, or activation
+`UpdateSession`; completion records its outcome, decrements the count, and
+signals waiters. Do not implement this as an unguarded `WaitGroup.Add` racing
+`Wait`. Already-admitted calls use an Agent-owned bounded lifecycle context,
+not the worker stream/EOF context, so disconnect cannot hide their completion.
+
+Generation cleanup ownership does not end when the Agent accepts running or
+returns external Run success. It remains until an acknowledged `FinalStatus` or
+an acknowledged explicit stop. On child exit, process death, normal EOF,
+stream error, timeout, or failed progress before or after accepted running,
+cleanup first marks the generation closing, rejects new admissions, and drains
+every admitted call. It then invokes authenticated `portfolio.GetSession`
+through the existing RuntimeChannel platform proxy for the canonical ID; the
+Agent receives no core address. If the owned row is nonterminal `pending` or
+`running`, cleanup issues one idempotent `UpdateSession(failed)` and confirms
+the terminal result before removing worker/pending/request/routing state. If
+the row is already `finished`, `stopped`, `failed`, `stop_failed`, or
+`recoverable`, or the explicit-stop acknowledgement belongs to this
+generation, cleanup preserves that semantic and does not overwrite it.
+`NotFound` is final only after the admission drain proves no Save can still
+commit.
+
+Any Get/Update timeout, transport error, admission-drain timeout, uncertain
+response, or late-call ambiguity retains a minimal cleanup tombstone containing
+only canonical ID/generation/safe phase, blocks ID reuse, and retries on the
+Agent-owned cleanup loop. It never drops ownership or guesses success. Thus an
+in-flight Save cannot commit pending after a failed update, accepted running
+cannot leave a durable running orphan when no `FinalStatus` arrives, and a
+running frame already accepted by the Agent remains ordered before the later
+failed terminal frame. The gate is generation-local and never blocks
+RuntimeChannel heartbeat or another Session.
 
 Regenerate, never hand-edit, both ownership domains: run
 `make -C core-service proto-portfolio` for core `gen/portfoliov1`, and run
@@ -3149,9 +4361,24 @@ coexistence test and require no second-generation diff.
 
 - [ ] **Step 6: Carry typed details through worker helpers**
 
-Extend _WorkerContext with runtime_dependency_error and set_runtime_dependency_error(). Add dependency_error parameters to WorkerAgentClient.send_progress(), send_final_status(), send_platform_call_result(), and send_worker_error(). _invoke_servicer_platform_call recognizes ValidateStrategySource and raises an internal typed WorkerPlatformCallError rather than RuntimeError when context has dependency detail. Keep the one `running` progress send in `session_worker_entry.py` strictly after the successful RunStrategy response; do not duplicate or move it into a path that can fire before core activation.
+Extend `_WorkerContext` with `runtime_dependency_error`,
+`set_runtime_dependency_error()`, and a process-local exact
+`bind_running_publication(session_id, state)`/`take_running_publication()` pair
+that never serializes the Python object. Add dependency-error parameters to
+`WorkerAgentClient.send_progress()`, `send_final_status()`,
+`send_platform_call_result()`, and `send_worker_error()`.
+`_invoke_servicer_platform_call` recognizes ValidateStrategySource and raises
+an internal typed WorkerPlatformCallError rather than RuntimeError when context
+has dependency detail. Keep the one running progress submission in
+`session_worker_entry.py` strictly after successful RunStrategy response and
+the publication CAS. Guard outbound-close/error check plus queue insertion with
+one lock so success means one ordered local enqueue and synchronous failure
+means no enqueue; do not wait for or invent an Agent acknowledgement.
 
-The outer exception handler returns a safe message plus typed detail and logs the traceback separately. It never serializes str(exc) when exc could contain a local path.
+The outer exception handler returns only the safe message plus typed detail and
+logs a fixed event code with numeric/session identifiers. It never serializes
+`str(exc)`, logs a user traceback, or uses `exc_info`; the Task 5 fatal/session
+terminal boundary remains the sole exactly-once owner for user-code failures.
 
 - [ ] **Step 7: Dispatch Validate in Go and preserve details**
 
@@ -3165,20 +4392,87 @@ type RuntimeRequestError struct {
 }
 ~~~
 
-invokeWorkerUnary returns *RuntimeRequestError when PlatformCallResult.ok is false. runtimeErrorFrame accepts this typed value and fills StreamError.dependency_error. For Run, SessionProgress.status=running is the only success signal; a progress/final/worker error carrying dependency detail wins over generic process-exit text.
+invokeWorkerUnary returns *RuntimeRequestError when PlatformCallResult.ok is
+false. runtimeErrorFrame accepts this typed value and fills
+StreamError.dependency_error. For Run, a `SessionProgress(status="running")`
+whose exact 32-hex ID equals the generation's preassigned canonical ID is the
+only external success signal; mismatched IDs fail closed and no alias is
+created. A progress/final/worker error carrying dependency detail wins over
+generic process-exit text. If accepted running races process exit, the caller
+may receive success, but generation cleanup ownership remains and the durable
+row is then reconciled failed unless a legitimate terminal/stop acknowledgement
+wins.
 
 - [ ] **Step 8: Centralize one-shot and failed-generation cleanup**
 
 Use one cleanup method that first closes and drains startup platform-call
-admission, then performs the pre-running durable failure rule when applicable,
-then stops/waits the process, unregisters worker connections,
-removes workerCallReply channels, pendingRun state, any legacy alias, indicator
-state, and session routing entries for that generation. New Run has no
-provisional-to-real alias because the StartSession ID is canonical. Validate
-and Preview call cleanup on success as well as failure. Keep runtime-agent and
-RuntimeChannel alive.
+admission, then performs the canonical `GetSession` plus pending/running-to-
+failed reconciliation whenever the generation lacks acknowledged FinalStatus
+or explicit stop, before it stops/waits the process and unregisters worker
+connections. Only after confirmed absence/terminal state does it remove
+workerCallReply channels, pendingRun/start-wait state, remembered Run request,
+indicator state, and Session routing for that generation. New Run has no
+provisional-to-real alias because StartSession ID is canonical. Ambiguous
+cleanup retains its tombstone and routing ownership for retry rather than
+removing state. Validate and Preview still call one-shot cleanup on success as
+well as failure. Keep runtime-agent and RuntimeChannel alive.
 
 - [ ] **Step 9: Run focused lifecycle suites**
+
+Regenerate each portfolio ownership domain twice and compare exact owned
+checksums; the first run establishes the generated bytes for this change and
+the second must be identical:
+
+~~~bash
+cd core-service
+make proto-portfolio
+find gen/portfoliov1 -type f -name '*.go' -print | LC_ALL=C sort \
+  | while IFS= read -r file; do shasum -a 256 "$file"; done \
+  > /tmp/task8-core-portfolio-first.sha256
+make proto-portfolio
+find gen/portfoliov1 -type f -name '*.go' -print | LC_ALL=C sort \
+  | while IFS= read -r file; do shasum -a 256 "$file"; done \
+  > /tmp/task8-core-portfolio-second.sha256
+diff -u /tmp/task8-core-portfolio-first.sha256 \
+  /tmp/task8-core-portfolio-second.sha256
+
+cd ../strategy-service
+PYTHON=.venv/bin/python ./generate_proto.sh
+shasum -a 256 \
+  strategy_service/gen/portfolio_service_pb2.py \
+  strategy_service/gen/portfolio_service_pb2_grpc.py \
+  gen/portfoliov1/portfolio_service.pb.go \
+  gen/portfoliov1/portfolio_service_grpc.pb.go \
+  > /tmp/task8-strategy-portfolio-first.sha256
+PYTHON=.venv/bin/python ./generate_proto.sh
+shasum -a 256 \
+  strategy_service/gen/portfolio_service_pb2.py \
+  strategy_service/gen/portfolio_service_pb2_grpc.py \
+  gen/portfoliov1/portfolio_service.pb.go \
+  gen/portfoliov1/portfolio_service_grpc.pb.go \
+  > /tmp/task8-strategy-portfolio-second.sha256
+diff -u /tmp/task8-strategy-portfolio-first.sha256 \
+  /tmp/task8-strategy-portfolio-second.sha256
+test "$(git diff --name-only -- strategy_service/gen gen | LC_ALL=C sort)" = "$(printf '%s\n' \
+  gen/portfoliov1/portfolio_service.pb.go \
+  gen/portfoliov1/portfolio_service_grpc.pb.go \
+  strategy_service/gen/portfolio_service_pb2.py \
+  strategy_service/gen/portfolio_service_pb2_grpc.py | sort)"
+~~~
+
+Then rerun exact descriptor coexistence checks:
+
+~~~bash
+cd strategy-service
+PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+  tests/test_portfolio_client_runtime_binding.py::test_save_session_initial_status_descriptor_is_field_15 -q
+cd ../core-service
+go test ./internal/service -run PortfolioProtoInitialStatusDescriptor -count=1 -v
+~~~
+
+Expected: both checksum diffs are empty, only the four strategy-service
+portfolio copies changed under its generated directories, and both descriptors
+report `initial_status=15` without altering existing fields.
 
 ~~~bash
 cd strategy-service
@@ -3188,25 +4482,132 @@ PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
   tests/test_session_worker_entry.py \
   tests/test_worker_agent_client.py \
   tests/test_platform_proxy.py \
-  tests/test_portfolio_client_runtime_binding.py -q
-go test ./internal/runtimeagent -run 'Validate|Dependency|Started|Cleanup|Worker|PlatformCall|Admission|Drain' -count=1
+  tests/test_portfolio_client_runtime_binding.py \
+  tests/test_session.py -q
+go test ./internal/runtimeagent -run 'Validate|Dependency|Started|Ready|Activation|Pending|Cleanup|Worker|PlatformCall|Admission|Drain' -count=1
 cd ../core-service
-go test ./internal/service ./internal/repository -run 'Session.*Pending|Pending.*Session|StrategyStart' -count=1
+set -euo pipefail
+SERVICE_LOG="$(mktemp "${TMPDIR:-/tmp}/hushine-task8-service.XXXXXX")"
+REPOSITORY_LOG="$(mktemp "${TMPDIR:-/tmp}/hushine-task8-repository.XXXXXX")"
+cleanup_task8_core_logs() { rm -f -- "$SERVICE_LOG" "$REPOSITORY_LOG"; }
+trap cleanup_task8_core_logs EXIT HUP INT TERM
+go test ./internal/service \
+  -run 'SaveSessionPending|PendingStrategyStartSnapshot|PendingSessionRejects' \
+  -count=1 -v 2>&1 | tee "$SERVICE_LOG"
+go test ./internal/repository \
+  -run 'PendingTransitionsOnly|PendingTransitionCompletion' \
+  -count=1 -v 2>&1 | tee "$REPOSITORY_LOG"
+for test_name in \
+  TestSaveSessionPendingPersistsNonActivePending \
+  TestPendingStrategyStartSnapshotIsTheOnlyAllowedPendingSnapshot \
+  TestPendingSessionRejectsOrderAndWalletMutation; do
+  test "$(grep -Fxc "=== RUN   $test_name" "$SERVICE_LOG")" -eq 1
+done
+for test_name in \
+  TestPendingTransitionsOnlyToRunningOrFailed \
+  TestPendingTransitionCompletionTimestamps; do
+  test "$(grep -Fxc "=== RUN   $test_name" "$REPOSITORY_LOG")" -eq 1
+done
+cleanup_task8_core_logs
+trap - EXIT HUP INT TERM
 ~~~
 
-Expected: all tests pass; race-enabled runs are repeated once with go test -race for internal/runtimeagent.
+Expected: all tests pass. The final core GREEN reruns the exact Step 3B service
+and repository selectors, and each of the five named top-level tests appears
+exactly once; a zero-selection or partial-selection Go run fails the shell
+assertions. Race-enabled runs are repeated once with go test -race for
+internal/runtimeagent.
+
+~~~bash
+cd strategy-service
+go test -race ./internal/runtimeagent \
+  -run 'Publication|Cleanup|Admission|Drain|ChildExit|StreamClose' -count=1
+~~~
 
 - [ ] **Step 10: Commit core startup-state and worker behavior in owning repositories**
 
 ~~~bash
 cd core-service
+test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort )" = "$(printf '%s\n' \
+  gen/portfoliov1/portfolio_service.pb.go \
+  gen/portfoliov1/portfolio_service_grpc.pb.go \
+  internal/repository/session_test.go \
+  internal/repository/timescale.go \
+  internal/service/grpc.go \
+  internal/service/grpc_strategy_test.go \
+  proto/portfolio_service.proto | sort)"
+git diff --cached --quiet
 git add proto/portfolio_service.proto gen/portfoliov1/portfolio_service.pb.go gen/portfoliov1/portfolio_service_grpc.pb.go internal/service/grpc.go internal/service/grpc_strategy_test.go internal/repository/timescale.go internal/repository/session_test.go
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
+  gen/portfoliov1/portfolio_service.pb.go \
+  gen/portfoliov1/portfolio_service_grpc.pb.go \
+  internal/repository/session_test.go \
+  internal/repository/timescale.go \
+  internal/service/grpc.go \
+  internal/service/grpc_strategy_test.go \
+  proto/portfolio_service.proto | sort)"
+git diff --cached --check
+git diff --quiet
+test -z "$(git ls-files --others --exclude-standard)"
 git commit -m "feat: persist session startup before activation"
+test -z "$(git status --short --untracked-files=all)"
 
 cd ../strategy-service
+test "$( { git diff --name-only; git ls-files --others --exclude-standard; } | sort )" = "$(printf '%s\n' \
+  gen/portfoliov1/portfolio_service.pb.go \
+  gen/portfoliov1/portfolio_service_grpc.pb.go \
+  internal/runtimeagent/agent.go \
+  internal/runtimeagent/agent_test.go \
+  internal/runtimeagent/worker_ipc_server.go \
+  internal/runtimeagent/worker_ipc_server_test.go \
+  internal/runtimeagent/worker_manager.go \
+  internal/runtimeagent/worker_manager_test.go \
+  strategy_service/gen/portfolio_service_pb2.py \
+  strategy_service/gen/portfolio_service_pb2_grpc.py \
+  strategy_service/grpc_server.py \
+  strategy_service/platform_proxy.py \
+  strategy_service/portfolio_client.py \
+  strategy_service/session.py \
+  strategy_service/session_worker_entry.py \
+  strategy_service/worker_agent_client.py \
+  tests/test_grpc_server.py \
+  tests/test_platform_proxy.py \
+  tests/test_portfolio_client_runtime_binding.py \
+  tests/test_session.py \
+  tests/test_session_worker_entry.py \
+  tests/test_worker_agent_client.py | sort)"
+git diff --cached --quiet
 git add strategy_service/gen/portfolio_service_pb2.py strategy_service/gen/portfolio_service_pb2_grpc.py gen/portfoliov1/portfolio_service.pb.go gen/portfoliov1/portfolio_service_grpc.pb.go
 git add strategy_service/grpc_server.py strategy_service/session_worker_entry.py strategy_service/session.py strategy_service/worker_agent_client.py strategy_service/platform_proxy.py strategy_service/portfolio_client.py tests/test_grpc_server.py tests/test_session_worker_entry.py tests/test_worker_agent_client.py tests/test_platform_proxy.py tests/test_portfolio_client_runtime_binding.py internal/runtimeagent/agent.go internal/runtimeagent/agent_test.go internal/runtimeagent/worker_manager.go internal/runtimeagent/worker_manager_test.go internal/runtimeagent/worker_ipc_server.go internal/runtimeagent/worker_ipc_server_test.go
+git add tests/test_session.py
+test "$(git diff --cached --name-only)" = "$(printf '%s\n' \
+  gen/portfoliov1/portfolio_service.pb.go \
+  gen/portfoliov1/portfolio_service_grpc.pb.go \
+  internal/runtimeagent/agent.go \
+  internal/runtimeagent/agent_test.go \
+  internal/runtimeagent/worker_ipc_server.go \
+  internal/runtimeagent/worker_ipc_server_test.go \
+  internal/runtimeagent/worker_manager.go \
+  internal/runtimeagent/worker_manager_test.go \
+  strategy_service/gen/portfolio_service_pb2.py \
+  strategy_service/gen/portfolio_service_pb2_grpc.py \
+  strategy_service/grpc_server.py \
+  strategy_service/platform_proxy.py \
+  strategy_service/portfolio_client.py \
+  strategy_service/session.py \
+  strategy_service/session_worker_entry.py \
+  strategy_service/worker_agent_client.py \
+  tests/test_grpc_server.py \
+  tests/test_platform_proxy.py \
+  tests/test_portfolio_client_runtime_binding.py \
+  tests/test_session.py \
+  tests/test_session_worker_entry.py \
+  tests/test_worker_agent_client.py | sort)"
+git diff --cached --check
+git diff --quiet
+test -z "$(git ls-files --others --exclude-standard)"
 git commit -m "feat: gate strategy readiness on durable activation"
+test -z "$(git status --short --untracked-files=all)"
 ~~~
 
 ### Task 9: Close Normal and Coverage Final Images Over the Same Locked Profile
