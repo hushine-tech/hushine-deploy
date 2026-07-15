@@ -30,6 +30,22 @@ The user selected a clean V2 cutover.
 This is a test-stage coordinated deployment. No mixed V1/V2 runtime operation
 is supported.
 
+Implementation is staged without making the cutover rolling-compatible. V1
+source/wire/API surfaces remain deprecated but executable against an untouched
+V1 database while additive V2 is built and proven on isolated V2 acceptance
+databases. A real worker→Agent→control-panel→core→handler→page gate must pass
+with V1 still present. Only then may one coordinated, non-push/non-deploy batch
+reserve the worker V1 tag and remove every V1 executable surface; the identical
+database/service-chain/page gate and no-V1 scan run again afterward. The
+destructive migration is never applied to a shared/long-lived environment
+before the pre-cutover evidence is sealed for the exact source SHAs. The
+mandatory migration runner itself inspects legacy `values_json` state and
+refuses destructive replacement unless an isolated acceptance owner token or
+the exact SHA-bound pre-cutover cutover seal authorizes it; ordinary
+`make ensure-dbs` cannot bypass that decision. After V1 removal, every tracked
+artifact is committed before the post-cutover run; the final code seal names
+that complete clean SHA map, and no tracked commit is permitted afterward.
+
 ## Root Cause Being Removed
 
 The current Python in-process buffer advances every declared indicator once
@@ -78,7 +94,7 @@ user_id
 strategy_id
 stream_key
 stream_sequence       uint64, zero-based and contiguous per stream
-market_time_ms        actual market-bar time
+market_time_ms        candle open time used as chart/bar identity
 interval_ms
 definitions[]         first frame only; immutable within the session
 samples[]             only values or markers produced on this bar
@@ -96,6 +112,13 @@ indicator key, type, pane, or configuration requires a session restart. Bare
 hot reload may change strategy code in place only while its indicator
 declaration remains identical.
 
+Production market-data normalization preserves both bar clocks. The adapted
+`MarketData.timestamp` remains the existing close timestamp used by strategy/
+order semantics; `open_time` and `close_time` are retained separately, and V2
+`market_time_ms` is selected from `open_time`. A production-shaped bar with
+`open_time=60_000`, `close_time=119_999`, and `timestamp=119_999` therefore
+stores/renders the indicator at `60_000` without rewriting the order-time fact.
+
 ## Bar Sequence Contract
 
 The Python worker owns sequence assignment but not chunking.
@@ -107,14 +130,18 @@ The Python worker owns sequence assignment but not chunking.
   frame for that sequence before applying the environment's existing guarded
   or fatal error behavior. Partially written values from the failed callback
   are discarded.
-- A duplicate `(session_id, stream_key, stream_sequence)` with identical time
-  is idempotently ignored.
-- A duplicate sequence with a different time, a lower sequence, or a gap is a
-  protocol error. The Agent stops that worker generation, stops accepting its
+- The Agent retains one bounded SHA-256 hash of the immediately previous
+  accepted frame's deterministic payload (`interval_ms`, ordered definitions,
+  and ordered samples). An immediate duplicate is idempotently ignored only
+  when sequence, time, and that canonical payload are all identical.
+- Same sequence/time with different scalar/marker/definition payload, a
+  duplicate sequence with a different time/interval, a lower sequence, or a
+  gap is a protocol error. The Agent stops that worker generation, stops accepting its
   frames, finalizes the last contiguous state, and marks the session
   `recoverable`. A worker with a corrupt audit stream may not continue placing
   orders in the background.
-- Time gaps are valid when the sequence is contiguous. Actual `market_time_ms`
+- Time gaps are valid when the sequence is contiguous. Actual candle
+  `open_time` in `market_time_ms`
   is stored, so maintenance gaps and missing exchange candles are never
   reconstructed from `interval_ms`.
 
@@ -220,6 +247,14 @@ migration and requires equality.
 Generated deployment SQL is regenerated from the authoritative service
 migrations; it is not edited as an independent schema source.
 
+Fresh V2 bootstrap is non-destructive and needs no cutover authorization. If
+the runner sees the legacy `values_json` schema before applying the destructive
+migration, it fails closed unless either the target database's live ownership
+comment matches a mode-0600 acceptance token file or explicit cutover mode
+validates the pre-cutover evidence seal against the complete current committed
+SHA map. A database-name prefix, default shared target, stale seal, or force
+boolean is never sufficient.
+
 ## Frontend Rendering
 
 The frontend consumes actual times from each V2 chunk.
@@ -258,8 +293,12 @@ Every terminal path uses the same Agent finalization coordinator:
 6. acknowledge the worker final frame;
 7. forget in-memory state only after the worker generation is reaped.
 
-This applies to `finished`, `failed`, `stopped`, `stop_failed`, max-loss stop,
-Bare restart, and unexpected process exit. If persistence cannot be confirmed,
+This applies to authenticated worker-final `finished`, legacy `completed`
+(normalized to `finished`), `failed`, `stopped`, `stop_failed`, and
+`recoverable`, plus max-loss stop, Bare restart, and unexpected process exit.
+`preflight_failed` remains outside indicator finalization because dependency/
+import preflight occurs before user-bar admission. If persistence cannot be
+confirmed,
 the Agent publishes `recoverable`, preserves the original terminal reason in
 the error chain, does not send a success acknowledgement, and retains the
 buffer for retry. No terminal status may silently discard a tail.
@@ -322,10 +361,16 @@ All implementation work follows red-green-refactor TDD.
 - markers only on bars 4 and 9;
 - marker on the last bar and multiple markers on one bar;
 - duplicate, conflicting duplicate, out-of-order, sequence gap, and time gap;
+- production-shaped open-time/close-time normalization and a failing gRPC
+  indicator sink that cannot be swallowed or followed by another order;
 - three concurrent stream keys with independent chunk indexes;
 - repeated open flush, immutable final chunk, and stale revision rejection;
 - every terminal state, persistence failure, Bare restart, and unexpected exit;
 - blocked worker while Agent and runtime heartbeats continue.
+- a deterministic acceptance barrier pauses the same real Session after exactly
+  1023, 1025, and 2049 completed frames; page/DB/API assertions run at each
+  barrier, and ownership-validated `stop` records cleanup. Sleeps are not state
+  evidence.
 
 ### Core, gateway, and frontend
 
@@ -341,6 +386,8 @@ All implementation work follows red-green-refactor TDD.
 ## Acceptance Criteria
 
 - A sparse marker on bar 1438 renders at bar 1438.
+- A production-shaped K-line renders its marker at candle `open_time` while
+  preserving its close-time strategy/order fact.
 - 1023 plus two bars produces one immutable 1024-bar chunk and one one-bar
   open chunk.
 - A 2049-bar run finalizes chunks of 1024, 1024, and 1 bars.
@@ -353,3 +400,13 @@ All implementation work follows red-green-refactor TDD.
   the supported Windows Bare test path.
 - Fresh and upgraded databases both start the complete service stack.
 - Only historical custom-indicator data is removed by migration.
+- V1 is not removed until the additive real-chain/page gate passes; the same
+  gate passes again after the atomic removal candidate. This design's focused
+  completion is not release acceptance: the full-system
+  `browser-running-indicator`, `indicator-1023-plus-2`,
+  `indicator-repeat-idempotency`, `indicator-sparse-marker-time`,
+  `indicator-terminal-tail`, `durable-reconciliation`, and
+  `coverage-finalization` scenarios remain mandatory before coordinated push.
+- The post-cutover code seal is created only after every tracked commit and all
+  database/focused/real-chain/browser/no-V1/descriptor checks. A later tracked
+  change invalidates it and requires fresh evidence from the new clean SHA map.

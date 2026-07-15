@@ -19,15 +19,16 @@
   `IndicatorFrameIdentity`, `WorkerConnection`, pending/real Session alias, or
   field-by-field identity reconstruction is allowed. The token is opaque and
   is never logged or persisted.
-- V1 custom-indicator protobuf fields, RPC names, domain types, repository paths, JSON envelopes, and frontend reconstruction code are removed at cutover; removed protobuf field number `15` is reserved and never reused.
+- V1 custom-indicator protobuf fields, RPC names, domain types, repository paths, JSON envelopes, and frontend reconstruction code remain deprecated but executable through Tasks 1–10 and the complete Task 11 pre-cutover gate. They are removed only in Task 11's post-seal coordinated candidate batch, which remains non-deployable/non-push until Task 12 reruns every gate; field number `15` is reserved in that batch and never reused. Before that batch, an untouched V1 database plus the pre-cutover source remains a valid rollback surface; the isolated V2 acceptance stack explicitly selects protocol 2 and never mixes V1/V2 persistence in one database.
 - Existing custom-indicator definitions and chunks are deleted; sessions, portfolios, venues, strategies, orders, fills, wallet snapshots, notifications, and reconciliation records retain every pre-existing field value and row. The sole additive Session field is `indicator_finalization_pending`, backfilled/defaulted false and changed only by the lifecycle coordinator.
 - `chunk_size` is exactly `1024`; `chunk_index = stream_sequence / 1024`, `offset = stream_sequence % 1024`, and a full chunk becomes immutable immediately.
 - Open chunks flush every `2s`; full chunks flush immediately; all network I/O occurs outside indicator-buffer locks; one session flush owner serializes periodic, boundary, terminal, and restart persistence.
 - Every accepted bar emits one frame even with no scalar and no marker; a failed user callback discards partial indicator writes and emits one empty frame for that bar before existing guarded/fatal handling.
-- Sequence is independent per exact `stream_key`; actual `market_time_ms` is durable truth, and time gaps are valid when sequence remains contiguous.
-- An immediate duplicate of the last accepted `(session_id, stream_key, stream_sequence)` with the same `market_time_ms` is idempotently ignored, exactly as approved; its samples are never applied a second time. A duplicate with a different time, any sequence older than the immediately previous sequence, or a gap stops that generation and makes the session recoverable. Persistence-level retries still require byte-equivalent same-revision chunks before core treats them as idempotent.
+- Sequence is independent per exact `stream_key`; V2 `market_time_ms` is exactly the candle `open_time` used as chart/bar identity. The adapted `MarketData.timestamp` remains the production close timestamp for existing strategy/order semantics, and `close_time` is retained separately instead of overwriting open time. Time gaps are valid when sequence remains contiguous.
+- The Agent retains one bounded canonical payload hash for the immediately previous accepted frame of each stream. An immediate duplicate of `(session_id, stream_key, stream_sequence, market_time_ms)` is idempotently ignored only when `interval_ms`, ordered definitions, and ordered samples are byte-equivalent under deterministic protobuf encoding. Same sequence/time with a different payload, same sequence with a different time/interval, any older sequence, or a gap raises `RUNTIME_INDICATOR_PROTOCOL_ERROR`, closes that generation's frame/order admission, finalizes the last contiguous state, and makes the Session recoverable. Persistence-level exact same-revision chunk retries remain a separate idempotency contract and must not change row count, revision, or `updated_at`.
 - Indicator definitions are immutable within a session; changing any key/type/pane/configuration requires a new session, including Bare hot reload.
-- Every `finished`, `failed`, `stopped`, `stop_failed`, max-loss, Bare restart,
+- Every authenticated worker-final `finished`, legacy `completed` (normalized to
+  `finished`), `failed`, `stopped`, `stop_failed`, and `recoverable`, plus max-loss, Bare restart,
   protocol failure, unexpected-exit, and Agent shutdown path finalizes before its
   desired terminal state. A frame-drain or persistence failure instead publishes
   `recoverable`, retains buffers for retry, never finalizes while an admitted
@@ -51,6 +52,7 @@
   checkpointing fail, `Agent.Shutdown` must not cancel RuntimeChannel or permit
   process exit; an in-memory-only record never satisfies shutdown.
 - Route platform calls only through authenticated RuntimeChannel methods; a session is still routed only by `runtime_id`, and no internal database/Kafka/order address is exposed to self-hosted or Bare workers.
+- The destructive `0002_runtime_indicator_v2.sql` artifact may be generated and exercised before cutover only on an ownership-verified isolated acceptance database. The mandatory production migration runner inspects the target schema before executing `0002`: fresh V2 bootstrap is non-destructive and needs no cutover seal; a legacy `values_json` schema fails closed unless the database has the exact acceptance ownership token/comment or explicit cutover mode supplies a valid SHA-bound pre-cutover seal. The default/shared `portfolio` target with legacy V1 data always refuses without that explicit authorization, so `make ensure-dbs` cannot bypass this guard.
 - Generated SQL is regenerated from service-owned migrations; generated protobuf files are regenerated from their authoritative `.proto` files and never hand-edited.
 - Preserve dirty work and commit only owned files inside each independent repository. Every `git add` block below is an owned-file inventory, not permission to stage a pre-existing dirty path wholesale: capture `git status --short` before each task, use `git add -p` for any already-dirty path, stage generated artifacts by exact filename, and inspect `git diff --cached --check` plus `git diff --cached` before every commit.
 
@@ -64,11 +66,22 @@ this plan's physically ordered Tasks 1–12, rerun the dependency plan's focused
 gate on the combined descriptors/runtime tree, and only then begin the Binance
 Spot plan. Do not run this plan standalone against a pre-dependency tree.
 
+The dependency plan owns the first protocol regeneration in its Task 7 and the
+atomic pending/readiness/cleanup cutover in its Task 8. Indicator Task 3 starts
+only after both dependency tasks are committed and verified; it regenerates
+from that combined authoritative proto, preserves every dependency-owned nested
+field/tag, and never restores an earlier generated file. Indicator Task 11,
+after its SHA-bound pre-cutover seal, is the only task that reserves WorkerFrame
+field 15. After Task 12's post-cutover
+rerun, rerun the dependency descriptor/value/checksum gate against the combined
+tree before any completion claim.
+
 Within this plan execute Tasks 1–12 strictly: core contract/schema,
 authenticated control proxy, worker protocol generation/gate, Python emission,
 Go chunking/persistence, gateway, lifecycle coordination, blocked-worker/
-Windows safety, strategy-template regression, frontend rendering, V1 removal,
-and deployment/integration verification. Do not start a task before its stated
+Windows safety, strategy-template regression, frontend rendering, additive V2
+pre-cutover database/service-chain/real-page proof, coordinated V1 removal, and
+the identical post-cutover proof. Do not start a task before its stated
 dependencies pass and are committed in their independent repositories.
 
 ## File Map
@@ -91,7 +104,7 @@ dependencies pass and are committed in their independent repositories.
 - `internal/storage/migrations/migration_contract_test.go` — V2 schema contract assertions.
 - `internal/storage/migrations/indicator_v2_migration_test.go` — populated-upgrade row-retention test.
 - `internal/storage/migrations/indicator_v2_bootstrap_test.go`, `internal/storage/migrations/testdata/indicator_v1_fixture.sql` — isolated fresh bootstrap and reproducible populated-V1 fixture.
-- `cmd/ensure-portfolio-db/main.go`, `cmd/ensure-portfolio-db/main_test.go` — migration body and ledger entry committed in one database transaction.
+- `cmd/ensure-portfolio-db/main.go`, `cmd/ensure-portfolio-db/cutover_guard.go`, `cmd/ensure-portfolio-db/main_test.go`, `cmd/ensure-portfolio-db/cutover_guard_test.go` — migration body and ledger entry committed in one database transaction plus the mandatory destructive-V1 authorization guard.
 - `tests/repository_test.go`, `internal/service/grpc_portfolio_meta_test.go` — repository test doubles updated for the V2 interface.
 
 ### `control-panel-service`
@@ -106,12 +119,13 @@ dependencies pass and are committed in their independent repositories.
 - `strategy_service/gen/runtime_worker_pb2.py`, `strategy_service/gen/runtime_worker_pb2_grpc.py` — generated Python worker IPC types.
 - `gen/portfoliov1/portfolio_service.pb.go`, `gen/portfoliov1/portfolio_service_grpc.pb.go`, `strategy_service/gen/portfolio_service_pb2.py`, `strategy_service/gen/portfolio_service_pb2_grpc.py` — generated local V2 portfolio proxy types.
 - `generate_proto.sh` — authoritative regeneration command; only portability fixes necessary to generate the exact sources are allowed.
-- `strategy_service/strategy/base.py` — per-stream sequence assignment, empty failed-bar emission, partial-write discard, callback error propagation, and hot-reload definition immutability.
+- `strategy_service/strategy/base.py` — per-stream sequence assignment, open-time bar identity, empty failed-bar emission, partial-write discard, callback error propagation, and hot-reload definition immutability.
+- `strategy_service/marketdata_adapter.py` — retain production `open_time` and `close_time` separately while preserving the close-time `MarketData.timestamp` contract.
 - `strategy_service/grpc_server.py` — first-frame definitions and V2 sink signature.
 - `strategy_service/worker_agent_client.py` — protocol-2 hello and typed V2 frame encoding.
 - `strategy_service/session_worker_entry.py` — final acknowledgement/error propagation remains worker exit gate.
 - `strategy_service/indicators.py` — typed marker fields and removal of the obsolete Python chunker after hosted V2 cutover.
-- `tests/test_runtime_worker_proto.py`, `tests/test_worker_agent_client.py`, `tests/test_strategy_indicators.py`, `tests/test_grpc_server.py`, `tests/test_session_worker_entry.py` — Python protocol/sequencing/error tests.
+- `tests/test_runtime_worker_proto.py`, `tests/test_worker_agent_client.py`, `tests/test_strategy_indicators.py`, `tests/test_marketdata_adapter.py`, `tests/test_grpc_server.py`, `tests/test_session_worker_entry.py` — Python protocol/sequencing/open-time/transport-error tests.
 - `internal/runtimeagent/indicator_buffer.go` — deterministic sequence-based series chunks with actual times and revisions.
 - `internal/runtimeagent/indicator_buffer_test.go` — boundary, sparse-marker, multi-marker, and time-gap tests.
 - `internal/runtimeagent/indicator_sync.go` — per-stream clocks, immutable definitions, V2 save/finalize requests, retry, and single flush ownership.
@@ -153,7 +167,7 @@ dependencies pass and are committed in their independent repositories.
 - `db/generated/portfolio.sql`, `db/generated/README.md` — regenerated V2 migration bundle and source inventory.
 - `db/README.md` — destructive indicator-only upgrade/fresh bootstrap procedure.
 - `scripts/runtime-indicator-v2-db-smoke.sh` — acceptance-owned fresh/bootstrap and populated-V1 upgrade smoke on `.10`.
-- `scripts/runtime-indicator-v2-smoke.sh`, `Makefile` — exact focused 1023+2, blocked-worker, Windows, gateway, and frontend acceptance entry point.
+- `scripts/runtime-indicator-v2-smoke.sh`, `scripts/runtime-indicator-v2-service-chain.sh`, `scripts/runtime-indicator-v2-cutover-evidence.test.sh`, `Makefile` — exact focused 1023+2, blocked-worker, Windows, gateway/frontend, deterministic real-chain `start/await/advance/stop`, SHA-bound Browser evidence, and pre/post-cutover acceptance entry points.
 
 ---
 
@@ -182,6 +196,8 @@ dependencies pass and are committed in their independent repositories.
 - Create: `core-service/internal/storage/migrations/testdata/indicator_v1_fixture.sql`
 - Modify: `core-service/cmd/ensure-portfolio-db/main.go`
 - Create: `core-service/cmd/ensure-portfolio-db/main_test.go`
+- Create: `core-service/cmd/ensure-portfolio-db/cutover_guard.go`
+- Create: `core-service/cmd/ensure-portfolio-db/cutover_guard_test.go`
 - Modify compile doubles: `core-service/tests/repository_test.go`
 - Modify compile doubles: `core-service/internal/service/grpc_portfolio_meta_test.go`
 
@@ -450,6 +466,15 @@ Expected: FAIL because `0002_runtime_indicator_v2.sql` and V2 baseline columns/c
 
 `0002_runtime_indicator_v2.sql` must add the non-destructive Session fact, then conditionally drop the indicator tables only when the old `values_json` column exists (so a fresh database that already created V2 in `0001` is not rebuilt), then create the V2 definitions first and chunks second. The core schema must contain this shape:
 
+Treat `0002` as a cutover artifact, not an additive shared-environment rollout.
+Until Task 11's pre-cutover seal exists, run it only in the unique
+`hushine_indicator_*` databases created and ownership-checked by this plan's
+integration/smoke helpers. The checked-in file and generated bundle may exist,
+but operator documentation and scripts must refuse a shared/long-lived target
+unless the exact pre-cutover evidence record for the current repository SHAs is
+provided. No ordinary development command may opportunistically migrate the
+shared `.10` `portfolio` database.
+
 ```sql
 ALTER TABLE strategy_sessions
   ADD COLUMN IF NOT EXISTS indicator_finalization_pending boolean NOT NULL DEFAULT false;
@@ -523,9 +548,61 @@ Add an immutable `strategy_indicator_markers_v2_valid(markers_json,start_sequenc
 
 Copy the final object definition, constraints, functions, trigger, foreign keys, and indexes into `0001_current_schema_baseline.sql`; put `indicator_finalization_pending boolean DEFAULT false NOT NULL` directly in the baseline `strategy_sessions` table and do not copy the conditional `ALTER`/drop blocks into the baseline. For fresh bootstrap ordering, create `strategy_sessions` and its primary key before adding the indicator foreign keys: put the V2 indicator table blocks after the session-key constraint or add their foreign keys later in the baseline's `ALTER TABLE` section. The baseline must never reference a table/key that has not been created yet.
 
-- [ ] **Step 8: Make portfolio migration application atomic and acceptance-database aware**
+- [ ] **Step 8: Make the production migration runner fail closed before destructive V1 replacement**
 
-Change the runner so SQL execution and ledger insertion share one transaction:
+Write `cutover_guard_test.go` before changing the runner. Its table uses a fake
+database inspector and exact migration filename `0002_runtime_indicator_v2.sql`:
+
+```go
+tests := []struct {
+    name, database, mode string
+    legacyValuesJSON, freshV2, ownerMatch, sealMatches bool
+    wantCode string
+}{
+    {"default shared legacy refuses", "portfolio", "", true, false, false, false, "INDICATOR_V2_CUTOVER_AUTH_REQUIRED"},
+    {"unsafe prefixed target refuses", "hushine_indicator_acceptance_forged", "acceptance", true, false, false, false, "INDICATOR_V2_ACCEPTANCE_OWNERSHIP_INVALID"},
+    {"owned acceptance legacy succeeds", "hushine_indicator_acceptance_run_upgrade", "acceptance", true, false, true, false, ""},
+    {"fresh v2 bootstrap succeeds without seal", "portfolio", "", false, true, false, false, ""},
+    {"stale cutover seal refuses", "portfolio", "cutover", true, false, false, false, "INDICATOR_V2_CUTOVER_SEAL_MISMATCH"},
+    {"matching explicit cutover succeeds", "portfolio", "cutover", true, false, false, true, ""},
+}
+```
+
+Also assert every migration other than `0002` is unaffected. Run the RED:
+
+```bash
+cd core-service
+go test ./cmd/ensure-portfolio-db -run 'IndicatorV2CutoverGuard|MigrationTransaction' -count=1 -v
+```
+
+Expected: FAIL because the current ordinary runner applies every migration to
+the default `portfolio` target without schema inspection or authorization.
+
+Create `cutover_guard.go` and call it from the one mandatory migration loop
+immediately before executing `0002`. It first queries whether
+`strategy_indicator_chunks.values_json` exists. If it does not exist, require
+the V2 baseline shape and proceed as a non-destructive fresh/idempotent path. If
+it exists, authorize exactly one of:
+
+1. `HUSHINE_INDICATOR_V2_DESTRUCTIVE_MODE=acceptance`: database name matches
+   `^hushine_indicator_(acceptance|chain)_[a-z0-9_]+$`; a mode-0600 JSON file at
+   `HUSHINE_INDICATOR_V2_ACCEPTANCE_OWNER_FILE` names that exact database and a
+   64-hex owner token; and the live database comment is exactly
+   `hushine-indicator-acceptance:<token>`. Prefix alone never authorizes.
+2. `HUSHINE_INDICATOR_V2_DESTRUCTIVE_MODE=cutover`: the mode-0600 file at
+   `HUSHINE_INDICATOR_V2_PRECUTOVER_SEAL` has schema/phase `1/pre`, passes the
+   same SHA-256 canonical-envelope validation as
+   `runtime-indicator-v2-cutover-evidence.test.sh`, and its complete
+   `source_shas` map equals the mode-0600 current committed SHA map at
+   `HUSHINE_INDICATOR_V2_CURRENT_SHAS`. Missing repos, dirty markers, stale SHA,
+   unknown fields/version, symlink/special file, or hash mismatch refuses.
+
+Empty/unknown mode and every mismatch return a typed error with the stable code
+from the RED before beginning a transaction. The runner must not offer a
+`--force`, truthy boolean, database-prefix-only, or skip-guard escape hatch.
+`make ensure-dbs` invokes this same runner and therefore cannot bypass it.
+
+After authorization, SQL execution and ledger insertion share one transaction:
 
 ```go
 tx, err := acc.BeginTx(ctx, nil)
@@ -546,6 +623,12 @@ if err := tx.Commit(); err != nil { return fmt.Errorf("commit migration %s: %w",
 The unit test uses a fake SQL driver to make the ledger insert fail and asserts `Rollback` occurs and `Commit` does not.
 
 Read the target name from `PGDATABASE_PORTFOLIO` with default `portfolio`, validate it as a non-empty PostgreSQL identifier, create it with `pq.QuoteIdentifier`, use it in the target DSN, and print that exact name. This is not a routing change for normal deployments; it allows acceptance to create and destroy only its own isolated database. Add unit tests for the default, an isolated name, and rejection of an empty/unsafe name.
+
+The acceptance smoke creates the database, writes its random 64-hex token into
+the database comment and owner file, then invokes the runner in `acceptance`
+mode. The explicit shared cutover command is the only caller of `cutover` mode
+and consumes Task 11's sealed pre-cutover SHA map. Re-run the focused tests and
+require all six guard rows plus transaction rollback GREEN.
 
 - [ ] **Step 9: Write real-repository V2 monotonic/finalization tests before repository code**
 
@@ -665,7 +748,7 @@ Expected: all commands PASS. The integration helper creates a uniquely named `hu
 
 ```bash
 cd core-service
-git add proto/portfolio_service.proto gen/portfoliov1/portfolio_service.pb.go gen/portfoliov1/portfolio_service_grpc.pb.go internal/domain/strategy_indicator.go internal/domain/model.go internal/repository/repository.go internal/repository/timescale.go internal/repository/strategy_indicator_test.go internal/repository/session_test.go internal/service/grpc.go internal/service/grpc_strategy_indicator_test.go internal/service/grpc_strategy_indicator_proto_test.go internal/service/grpc_strategy_test.go internal/storage/migrations/0001_current_schema_baseline.sql internal/storage/migrations/0002_runtime_indicator_v2.sql internal/storage/migrations/baseline_contract_test.go internal/storage/migrations/migration_contract_test.go internal/storage/migrations/indicator_v2_migration_test.go internal/storage/migrations/indicator_v2_bootstrap_test.go internal/storage/migrations/testdata/indicator_v1_fixture.sql cmd/ensure-portfolio-db/main.go cmd/ensure-portfolio-db/main_test.go tests/repository_test.go internal/service/grpc_portfolio_meta_test.go
+git add proto/portfolio_service.proto gen/portfoliov1/portfolio_service.pb.go gen/portfoliov1/portfolio_service_grpc.pb.go internal/domain/strategy_indicator.go internal/domain/model.go internal/repository/repository.go internal/repository/timescale.go internal/repository/strategy_indicator_test.go internal/repository/session_test.go internal/service/grpc.go internal/service/grpc_strategy_indicator_test.go internal/service/grpc_strategy_indicator_proto_test.go internal/service/grpc_strategy_test.go internal/storage/migrations/0001_current_schema_baseline.sql internal/storage/migrations/0002_runtime_indicator_v2.sql internal/storage/migrations/baseline_contract_test.go internal/storage/migrations/migration_contract_test.go internal/storage/migrations/indicator_v2_migration_test.go internal/storage/migrations/indicator_v2_bootstrap_test.go internal/storage/migrations/testdata/indicator_v1_fixture.sql cmd/ensure-portfolio-db/main.go cmd/ensure-portfolio-db/main_test.go cmd/ensure-portfolio-db/cutover_guard.go cmd/ensure-portfolio-db/cutover_guard_test.go tests/repository_test.go internal/service/grpc_portfolio_meta_test.go
 git commit -m "feat: add runtime indicator v2 persistence"
 ```
 
@@ -830,7 +913,7 @@ Expected: Python and Go tests fail because the V2 fields/types and gate do not e
 
 - [ ] **Step 3: Add V2 messages without reusing V1 tags**
 
-During this task, keep the V1 `indicator_frame=15` field only long enough for the current Go sync code to compile; mark it deprecated. Task 5 removes it and adds `reserved 15` in the same strategy-service repository before final verification.
+During this task, keep the V1 `indicator_frame=15` field executable and mark it deprecated. Tasks 3–10 and Task 11's pre-cutover phase must continue to compile the V1 field so the source remains a rollback surface. Task 11's post-seal candidate phase removes it and adds `reserved 15`; Task 12 then reruns the identical database, real service-chain, and real-page gates before that candidate can advance.
 
 ```protobuf
 message WorkerHello {
@@ -947,17 +1030,19 @@ git commit -m "feat: define runtime worker indicator v2 protocol"
 ### Task 4: Python Per-Bar Sequencing, Empty Failed Frames, and Immutable Definitions
 
 **Files:**
+- Modify: `strategy-service/strategy_service/marketdata_adapter.py`
 - Modify: `strategy-service/strategy_service/strategy/base.py`
 - Modify: `strategy-service/strategy_service/grpc_server.py`
 - Modify: `strategy-service/strategy_service/worker_agent_client.py`
 - Modify: `strategy-service/strategy_service/indicators.py`
 - Modify: `strategy-service/tests/test_strategy_indicators.py`
+- Modify: `strategy-service/tests/test_marketdata_adapter.py`
 - Modify: `strategy-service/tests/test_grpc_server.py`
 - Modify: `strategy-service/tests/test_worker_agent_client.py`
 
 **Interfaces:**
 - Consumes: `IndicatorFrameV2`/`IndicatorSampleV2` from Task 3 and the existing `IndicatorDefinition`/`IndicatorWriter` user API.
-- Produces: `BaseStrategy.on_indicator_frame(stream_key: str, stream_sequence: int, market_time_ms: int, interval_ms: int, frame: IndicatorFrame)`, exactly one callback per accepted indicator-bearing stream/bar, with first-frame-only definitions at the gRPC sink.
+- Produces: `BaseStrategy.on_indicator_frame(stream_key: str, stream_sequence: int, market_time_ms: int, interval_ms: int, frame: IndicatorFrame)`, exactly one callback per accepted indicator-bearing stream/bar, with first-frame-only definitions at the gRPC sink. `market_time_ms` is the adapted K-line's `open_time`; `MarketData.timestamp` remains its close timestamp and `klines["close_time"]` preserves that fact for callback/order behavior.
 
 - [ ] **Step 1: Write sequencing and sparse-frame tests first**
 
@@ -977,6 +1062,39 @@ Add a user callback that calls `indicators.set("alpha", 99)` and then raises. As
 
 Add a reload test that changes only function body and keeps `INDICATORS` byte-equivalent (reload accepted), then changes `INDICATORS["alpha"]["pane"]` (reload rejected, original instance/definitions retained, warning says restart required).
 
+Add the production-shaped time RED in `test_marketdata_adapter.py` and carry it
+through the strategy frame test:
+
+```python
+kline = MarketKline(
+    symbol="BTCUSDT", interval="1m",
+    open_time=60_000, close_time=119_999, timestamp=119_999,
+    open=100.0, high=102.0, low=99.0, close=101.0, volume=3.0,
+)
+market_data = _adapt_kline(kline, "spot")
+assert market_data.timestamp == 119_999       # existing close-time strategy contract
+assert market_data.klines["open_time"] == 60_000
+assert market_data.klines["close_time"] == 119_999
+engine.running_strategy(market_data)
+assert seen[-1].market_time_ms == 60_000       # V2 chart/bar identity
+```
+
+The strategy emits a BUY marker and an order decision on that bar. Assert the
+V2 frame uses `60_000`, while the existing order/callback-visible timestamp
+remains `119_999`; no test fixture may set `timestamp=open_time` to make this
+pass.
+
+Add a real gRPC collection-boundary RED. Install an Agent sink that succeeds at
+sequence 0 and raises `OSError("transport closed")` at sequence 1. Drive the
+real `_install_indicator_collection.on_frame` through `BaseStrategy`, not a
+standalone fake callback. Assert the inner sink exception escapes the callback,
+`BaseStrategy` raises exactly
+`RuntimeError("indicator V2 transport failed: transport closed")`, the order
+decision produced on sequence 1 is never sent, the session runner stops before
+bar 2, and the agent-managed final status is `failed`. Task 7 repeats this at
+the real Agent lifecycle boundary and proves a finalization failure yields
+`recoverable` instead.
+
 - [ ] **Step 2: Run focused Python tests and verify RED**
 
 Run:
@@ -984,12 +1102,38 @@ Run:
 ```bash
 cd strategy-service
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
-  tests/test_strategy_indicators.py tests/test_grpc_server.py tests/test_worker_agent_client.py -q
+  tests/test_marketdata_adapter.py tests/test_strategy_indicators.py \
+  tests/test_grpc_server.py tests/test_worker_agent_client.py -q
 ```
 
-Expected: FAIL because the callback has no sequence, failed callbacks emit no frame, and hot reload accepts changed indicators.
+Expected: FAIL because the adapter drops both bar times, the callback has no
+sequence, failed callbacks emit no frame, hot reload accepts changed indicators,
+and `grpc_server.py` swallows the failing Agent sink.
 
-- [ ] **Step 3: Assign sequence in `BaseStrategy`, not in the Agent or chunker**
+- [ ] **Step 3: Preserve production open and close times without changing order semantics**
+
+Keep the public `MarketData.timestamp=kline.timestamp` assignment unchanged and
+extend only the adapted K-line map:
+
+```python
+klines={
+    "open_time": kline.open_time,
+    "close_time": kline.close_time,
+    "timestamp": kline.timestamp,
+    "open": kline.open,
+    "high": kline.high,
+    "low": kline.low,
+    "close": kline.close,
+    "volume": kline.volume,
+}
+```
+
+`_market_time_ms` already checks `klines["open_time"]` before any timestamp;
+retain that precedence and add an explicit assertion rather than adding another
+public time field. This separates chart identity from the close-time callback/
+order fact without changing user strategy behavior.
+
+- [ ] **Step 4: Assign sequence in `BaseStrategy`, not in the Agent or chunker**
 
 Add:
 
@@ -1010,12 +1154,17 @@ def _drain_indicator_frame(self, stream_key: str, market_time_ms: int, interval_
     sequence = self._next_indicator_sequence.get(stream_key, 0)
     self._next_indicator_sequence[stream_key] = sequence + 1
     if self.on_indicator_frame is not None:
-        self.on_indicator_frame(stream_key, sequence, market_time_ms, interval_ms, frame)
+        try:
+            self.on_indicator_frame(stream_key, sequence, market_time_ms, interval_ms, frame)
+        except Exception as exc:
+            raise RuntimeError(f"indicator V2 transport failed: {exc}") from exc
 ```
 
-Do not swallow a sink exception: wrap it as `RuntimeError("indicator V2 transport failed: ...")` so the session fails instead of silently creating a sequence hole.
+Do not swallow the sink exception.
+The drain happens before signal normalization/order execution, so this failure
+must terminate the session path before an order for that bar can be admitted.
 
-- [ ] **Step 4: Emit an empty bar frame after discarding partial failed output**
+- [ ] **Step 5: Emit an empty bar frame after discarding partial failed output**
 
 In `running_strategy`, compute `stream_key`, `market_time_ms`, and `interval_ms` before user code. On user exception:
 
@@ -1026,7 +1175,7 @@ self._drain_indicator_frame(stream_key, market_time_ms, interval_ms)  # emits em
 
 Then apply the existing hot-reload guarded return or fatal `StrategyUserCodeError`. On success call `_drain_indicator_frame` exactly once. There must be no `finally` that can emit a second frame.
 
-- [ ] **Step 5: Make indicator declarations part of the hot-reload identity**
+- [ ] **Step 6: Make indicator declarations part of the hot-reload identity**
 
 Extend the declaration comparison:
 
@@ -1043,7 +1192,7 @@ if candidate_indicator_definitions != self._indicator_definitions:
 
 Keep the original strategy instance and writer. A source-code-only change with identical definitions still reloads.
 
-- [ ] **Step 6: Encode typed sparse V2 samples**
+- [ ] **Step 7: Encode typed sparse V2 samples**
 
 Change `send_indicator_frame` to accept the sequence and construct only samples actually produced on that bar:
 
@@ -1077,29 +1226,33 @@ Extend `IndicatorWriter.mark` with optional keyword-only `position` and `shape`,
 def mark(self, key: str, text: str = "", price: float | None = None, color: str = "", *, position: str = "", shape: str = "") -> None:
 ```
 
-- [ ] **Step 7: Send definitions on sequence zero only**
+- [ ] **Step 8: Send definitions on sequence zero only and propagate the Agent sink failure**
 
-Update `_install_indicator_collection.on_frame` signature. For every stream, require `stream_sequence==0` on its first callback and attach definitions then; later callbacks attach `[]`. If the first callback for a stream is nonzero, raise `RuntimeError` instead of marking it sent.
+Update `_install_indicator_collection.on_frame` signature. For every stream, require `stream_sequence==0` on its first callback and attach definitions then; later callbacks attach `[]`. If the first callback for a stream is nonzero, raise `RuntimeError` instead of marking it sent. Call the Agent sink directly; delete the inner `try/except Exception` and its warning so the error reaches `_drain_indicator_frame`. Add `definition_streams_sent` only after a successful sequence-zero sink submission, so a failed first frame cannot falsely suppress definitions on a retry.
 
 Remove the agent-managed path's unused `portfolio_client` acquisition: when `_indicator_frame_sink` is callable, it must not instantiate the direct portfolio client. Retain the non-agent direct path until Task 11 removes the obsolete Python chunk writer.
 
-- [ ] **Step 8: Run Python focused and full verification**
+- [ ] **Step 9: Run Python focused and full verification**
 
 Run:
 
 ```bash
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
-  tests/test_strategy_indicators.py tests/test_grpc_server.py tests/test_worker_agent_client.py \
+  tests/test_marketdata_adapter.py tests/test_strategy_indicators.py \
+  tests/test_grpc_server.py tests/test_worker_agent_client.py \
   tests/test_session_worker_entry.py -q
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
 ```
 
-Expected: PASS; the sparse-frame test observes a V2 frame for every accepted bar and only sequence-zero frames contain definitions.
+Expected: PASS; the sparse-frame test observes a V2 frame for every accepted
+bar, only sequence-zero frames contain definitions, the production-shaped
+frame uses candle open time, and the failing sink terminates before any later
+order/frame.
 
-- [ ] **Step 9: Commit Python V2 sequencing**
+- [ ] **Step 10: Commit Python V2 sequencing**
 
 ```bash
-git add strategy_service/strategy/base.py strategy_service/grpc_server.py strategy_service/worker_agent_client.py strategy_service/indicators.py tests/test_strategy_indicators.py tests/test_grpc_server.py tests/test_worker_agent_client.py tests/test_session_worker_entry.py
+git add strategy_service/marketdata_adapter.py strategy_service/strategy/base.py strategy_service/grpc_server.py strategy_service/worker_agent_client.py strategy_service/indicators.py tests/test_marketdata_adapter.py tests/test_strategy_indicators.py tests/test_grpc_server.py tests/test_worker_agent_client.py tests/test_session_worker_entry.py
 git commit -m "feat: sequence every runtime indicator bar"
 ```
 
@@ -1114,12 +1267,6 @@ git commit -m "feat: sequence every runtime indicator bar"
 - Modify: `strategy-service/internal/runtimeagent/indicator_sync_test.go`
 - Modify: `strategy-service/internal/runtimeagent/agent.go`
 - Modify: `strategy-service/internal/runtimeagent/agent_test.go`
-- Modify: `strategy-service/proto/runtime_worker.proto`
-- Regenerate: `strategy-service/gen/runtimeworkerv1/runtime_worker.pb.go`
-- Regenerate: `strategy-service/gen/runtimeworkerv1/runtime_worker_grpc.pb.go`
-- Regenerate: `strategy-service/strategy_service/gen/runtime_worker_pb2.py`
-- Regenerate: `strategy-service/strategy_service/gen/runtime_worker_pb2_grpc.py`
-- Modify: `strategy-service/tests/test_runtime_worker_proto.py`
 
 **Interfaces:**
 - Consumes: `runtimeworkerv1.IndicatorFrameV2`; core V2 save/finalize protobufs; platform methods from Task 2.
@@ -1159,7 +1306,9 @@ Test all cases with exact expected disposition:
 
 ```go
 accept seq=0,time=1000,scalar=1,definitions=A
-ignore immediate duplicate seq=0,time=1000 even if its repeated payload differs; do not apply it
+ignore immediate duplicate seq=0,time=1000 only when interval/definitions/samples are byte-equivalent; do not apply it
+reject immediate duplicate seq=0,time=1000,scalar=2
+reject immediate duplicate seq=0,time=1000 with a marker added/removed
 reject immediate duplicate seq=0,time=1001
 reject gap seq=2,time=3000
 accept seq=1,time=9000 // time gap is valid
@@ -1217,15 +1366,28 @@ type indicatorStreamClock struct {
     LastTimeMS   int64
     IntervalMS   int64
     HasLast      bool
+    LastPayloadHash [32]byte
 }
 ```
 
-`indicatorStreamClock.Classify(sequence,time)` is bounded regardless of Session length and does not mutate state. `Commit(sequence,time)` advances only after a new expected frame's definitions/samples have validated:
+Before classification, build a deterministic payload containing exactly
+`interval_ms`, ordered definitions, and ordered samples (including optional
+field presence and marker order), marshal it with
+`proto.MarshalOptions{Deterministic:true}`, and take SHA-256. Do not include
+session/user/strategy routing IDs, sequence, or market time in this payload;
+those are authenticated/compared independently. Keep only the last accepted
+32-byte hash per stream, so memory remains bounded regardless of Session length.
+
+`indicatorStreamClock.Classify(sequence,time,payloadHash)` is bounded and does
+not mutate state. `Commit(sequence,time,payloadHash)` advances only after a new
+expected frame's definitions/samples have validated:
 
 ```go
 switch {
-case c.HasLast && c.NextSequence > 0 && sequence == c.NextSequence-1 && time == c.LastTimeMS:
+case c.HasLast && c.NextSequence > 0 && sequence == c.NextSequence-1 && time == c.LastTimeMS && payloadHash == c.LastPayloadHash:
     return IndicatorFrameDuplicate, nil
+case c.HasLast && c.NextSequence > 0 && sequence == c.NextSequence-1 && time == c.LastTimeMS:
+    return IndicatorFrameRejected, protocolError("conflicting duplicate payload", sequence)
 case sequence < c.NextSequence:
     return IndicatorFrameRejected, protocolError("duplicate time mismatch or lower sequence", sequence)
 case sequence > c.NextSequence:
@@ -1238,7 +1400,7 @@ default:
 `Classify` also requires positive time/interval, one immutable interval per
 stream, and `time > LastTimeMS` for every new expected sequence; time gaps remain
 valid. `Commit` requires `sequence==NextSequence`, then increments
-`NextSequence` and stores `LastTimeMS`/the first interval. Calling it for a
+`NextSequence` and stores `LastTimeMS`/the first interval/last payload hash. Calling it for a
 duplicate or rejected frame is a test failure.
 
 For every accepted frame, append its time to every definition's chunk. Append a cloned scalar pointer or nil for line/histogram; marker series keep an empty scalar slice and append only typed markers. Set `Revision=uint64(len(TimesMS))`, `StartSequence=uint64(chunkIndex)*1024`, and derive marker offset from sequence. Do not derive time or offset from how many samples arrived.
@@ -1255,15 +1417,23 @@ wallet/final frame is rejected before admission and cannot create a buffer.
 Task 7 passes the same `WorkerIdentity` through the real Agent handlers and
 repeats these cases without reconstructing it or introducing an alias.
 
-Classify sequence/time first: an approved immediate same-time duplicate returns
-without reading/applying definitions or samples; a lower/gap/different-time
-duplicate fails. For an expected new frame, sequence zero requires a non-empty
+After trusted identity validation, compute the canonical payload hash before
+classification. An immediate same-sequence/time/hash retry returns without
+applying definitions or samples; an immediate same-sequence/time frame with a
+different hash, a lower/gap/different-time duplicate, or an interval mismatch
+fails closed. For an expected new frame, sequence zero requires a non-empty
 definition list. Later omitted definitions reuse the first list; later present
 definitions must satisfy `proto.Equal` element-for-element. Reject duplicate
 definition keys and duplicate sample keys; one marker sample may still contain
 multiple markers. Samples are indexed once and validated against registered
 keys/types, then the clock commits and buffers advance atomically, so a rejected
 frame has no partial effect.
+
+The conflicting-duplicate tests must assert no clock/buffer mutation, immediate
+closure of that generation's frame and order admission, exactly one
+`RUNTIME_INDICATOR_PROTOCOL_ERROR`, last-contiguous-tail finalization, and a
+recoverable Session. They are distinct from an exact Agent-to-core open-chunk
+retry, which remains idempotent without changing revision or `updated_at`.
 
 Return:
 
@@ -1322,34 +1492,7 @@ it. Tests prohibit defer double-release and prove the real Agent handler cannot
 wait on itself. Stop accepting indicator/platform/order frames from that
 generation. Task 7 supplies the coordinator implementation.
 
-- [ ] **Step 8: Remove the V1 worker field and reserve its number**
-
-Now that all Go/Python code uses V2, change the worker oneof to:
-
-```protobuf
-message WorkerFrame {
-  string frame_id = 1;
-  reserved 15;
-  reserved "indicator_frame";
-  oneof payload {
-    WorkerHello hello = 10;
-    WorkerHeartbeat heartbeat = 11;
-    SessionProgress progress = 12;
-    PlatformCall platform_call = 13;
-    PlatformCallResult platform_call_result = 14;
-    NotificationEvent notification = 16;
-    WalletSnapshot wallet_snapshot = 17;
-    FinalStatus final_status = 18;
-    WorkerError worker_error = 19;
-    LogEvent log_event = 20;
-    IndicatorFrameV2 indicator_frame_v2 = 21;
-  }
-}
-```
-
-Delete `IndicatorValue` and `IndicatorFrame`; regenerate with `./generate_proto.sh`. Add descriptor tests asserting field 15 is absent, field 21 is `indicator_frame_v2`, and no generated V1 class exists.
-
-- [ ] **Step 9: Run focused V2 matrix and race-oriented serialization tests**
+- [ ] **Step 8: Run focused V2 matrix and race-oriented serialization tests**
 
 Run:
 
@@ -1359,12 +1502,15 @@ go test -race ./internal/runtimeagent -run 'IndicatorSyncV2.*Concurrent|Indicato
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/test_runtime_worker_proto.py -q
 ```
 
-Expected: PASS. The race test records maximum concurrent platform writes per session as exactly 1.
+Expected: PASS. The race test records maximum concurrent platform writes per
+session as exactly 1. The descriptor test still observes deprecated executable
+V1 field 15 alongside V2 field 21; reservation/removal is intentionally deferred
+to Task 11's sealed cutover phase.
 
-- [ ] **Step 10: Commit Go V2 chunking and final worker proto cutover**
+- [ ] **Step 9: Commit additive Go V2 chunking without removing V1**
 
 ```bash
-git add internal/runtimeagent/indicator_buffer.go internal/runtimeagent/indicator_buffer_test.go internal/runtimeagent/indicator_sync.go internal/runtimeagent/indicator_sync_test.go internal/runtimeagent/agent.go internal/runtimeagent/agent_test.go proto/runtime_worker.proto gen/runtimeworkerv1/runtime_worker.pb.go gen/runtimeworkerv1/runtime_worker_grpc.pb.go strategy_service/gen/runtime_worker_pb2.py strategy_service/gen/runtime_worker_pb2_grpc.py tests/test_runtime_worker_proto.py
+git add internal/runtimeagent/indicator_buffer.go internal/runtimeagent/indicator_buffer_test.go internal/runtimeagent/indicator_sync.go internal/runtimeagent/indicator_sync_test.go internal/runtimeagent/agent.go internal/runtimeagent/agent_test.go
 git commit -m "feat: persist sequence-aligned indicator chunks"
 ```
 
@@ -1602,15 +1748,26 @@ In `session_lifecycle_test.go`, table-test these sources and desired terminal st
 | Source | Worker status/input | Durable state after successful indicator finalization |
 |---|---|---|
 | natural completion | `finished` | `finished` |
+| legacy natural completion | `completed` | `finished` (normalize before lifecycle claim) |
 | user-code error | `failed` | `failed` |
+| indicator transport/enqueue failure | `failed`, reason begins `indicator V2 transport failed:` | `failed` |
 | user stop | `stopped` | `stopped` |
 | stop failure | `stop_failed` | `stop_failed` |
+| worker explicitly requests recovery | `recoverable` | `recoverable` |
 | max-loss close succeeds | `stopped`, reason contains `max_loss_close_triggered` | `stopped` |
 | max-loss close fails | `stop_failed`, reason contains `max_loss_close_triggered` | `stop_failed` |
 | worker protocol violation | protocol error | `recoverable` |
 | running worker exits without final status | process + stream close | `recoverable` |
 | Bare local restart | restart request | old session `recoverable` |
 | Agent SIGTERM/shutdown | Agent shutdown request | active session `recoverable` after tail finalization |
+
+The authenticated worker-final accepted set is exactly
+`finished|completed|failed|stopped|stop_failed|recoverable`; normalize
+`completed -> finished` before constructing `TerminalRequest` and preserve the
+original worker fact in diagnostics. `preflight_failed` is deliberately outside
+this matrix: dependency/import preflight completes before user-bar admission,
+so there is no indicator tail to finalize and the dependency plan owns its
+pending-to-failed cleanup.
 
 For every non-worker-final row assert the call order begins
 `close-admission, finalize, update-session`; an authenticated worker-final path is exactly
@@ -1631,6 +1788,22 @@ both arrive before the restart goroutine resumes: they must attach reap facts to
 the already claimed Bare-restart record and never create unexpected-exit.
 
 Repeat every row with indicator finalization failure. Assert one `UpdateSession(recoverable, indicator_finalization_pending=true)` attempt with the original status/reason embedded in the error, an `AgentError{Code:"INDICATOR_FINALIZATION_FAILED"}` instead of an empty success acknowledgement when a worker is waiting, and no buffer forget. Repeat a normal row with `UpdateSession` failure and assert `SESSION_TERMINAL_PERSIST_FAILED`, no success acknowledgement, and a durably journaled record plus live cache.
+
+For the explicit worker-final `recoverable` row, run both finalization-success
+and finalization-failure/retry cases. Success persists
+`recoverable,pending=false` before acknowledgement. Failure persists
+`recoverable,pending=true`, sends the stable failure rather than success, and a
+later retry finalizes the exact retained tail then performs only the metadata
+clear to `recoverable,pending=false`; it never promotes to another status. For
+legacy `completed`, both the successful path and every retry persist only
+`finished`, never the legacy spelling.
+
+Drive the Task 4 failing gRPC sink through the real worker-final path. Once the
+sequence-N enqueue throws, assert no sequence `N+1` frame or order platform
+call is admitted. With successful tail finalization the row becomes `failed`;
+with an injected finalization failure it becomes
+`recoverable,indicator_finalization_pending=true` and follows the same retained
+retry contract.
 
 For each retained-failure case, make the next persistence attempt succeed and drive one retry-loop tick. When finalization originally failed, assert the retry seals the exact retained revision, keeps the already-published Session status `recoverable`, durably clears `indicator_finalization_pending`, and forgets memory only after process/stream reap and the clear is acknowledged. When terminal-status persistence originally failed, assert the retry performs only the still-pending operation(s), publishes the correct desired status/pending fact when no prior status was durable, and then cleans up. Repeated retry ticks after success must make zero platform calls.
 
@@ -1724,7 +1897,7 @@ recreate it with the same `StateRoot`, authenticate RuntimeChannel, and replay
 the byte-identical revision/hash without duplicate application. Add corrupt and
 truncated-journal tests that fail closed.
 
-Agent owns all terminal updates. Preserve the existing Python guard that skips `_persist_session_status` for agent-managed terminal sessions; add tests for all five terminal strings so Python cannot race the Agent's update.
+Agent owns all terminal updates. Preserve the existing Python guard that skips `_persist_session_status` for agent-managed terminal sessions; add tests for the exact six worker spellings `finished`, `completed`, `failed`, `stopped`, `stop_failed`, and `recoverable`, including the `completed -> finished` normalization, so Python cannot race the Agent's update.
 
 - [ ] **Step 8: Coordinate unexpected exit without dropping already received frames**
 
@@ -2266,9 +2439,17 @@ git commit -m "feat: render runtime indicators by actual time"
 
 ---
 
-### Task 11: Remove the Coordinated V1 Indicator Surface and Obsolete Direct Python Persistence
+### Task 11: Seal Additive V2 on the Real Chain, Then Build One Coordinated V1-Removal Candidate
 
 **Files:**
+- Create: `strategy-service/internal/runtimeagent/indicator_v2_integration_test.go`
+- Create: `strategy-service/tests/strategies/indicator_v2_open_time_cutover.py`
+- Modify: `strategy-service/proto/runtime_worker.proto`
+- Regenerate: `strategy-service/gen/runtimeworkerv1/runtime_worker.pb.go`
+- Regenerate: `strategy-service/gen/runtimeworkerv1/runtime_worker_grpc.pb.go`
+- Regenerate: `strategy-service/strategy_service/gen/runtime_worker_pb2.py`
+- Regenerate: `strategy-service/strategy_service/gen/runtime_worker_pb2_grpc.py`
+- Modify: `strategy-service/tests/test_runtime_worker_proto.py`
 - Modify: `core-service/proto/portfolio_service.proto`
 - Regenerate: `core-service/gen/portfoliov1/portfolio_service.pb.go`
 - Regenerate: `core-service/gen/portfoliov1/portfolio_service_grpc.pb.go`
@@ -2296,13 +2477,249 @@ git commit -m "feat: render runtime indicators by actual time"
 - Modify: `gateway/quant-handler/internal/app/session_indicators.go`
 - Modify: `gateway/quant-handler/internal/app/session_indicators_test.go`
 - Modify: `gateway/quant-handler/internal/app/session_history_test.go`
+- Create: `hushine-deploy/scripts/runtime-indicator-v2-db-smoke.sh`
+- Create: `hushine-deploy/scripts/runtime-indicator-v2-smoke.sh`
+- Create: `hushine-deploy/scripts/runtime-indicator-v2-service-chain.sh`
+- Create: `hushine-deploy/scripts/runtime-indicator-v2-cutover-evidence.test.sh`
+- Modify: `hushine-deploy/Makefile`
 
 **Interfaces:**
+- Before any deletion, V2 passes the exact 1023+2/2049/database/service-chain/page assertions below while every V1 source/wire surface still exists. The pre-cutover evidence seal is bound to all repository SHAs and to acceptance-owned database/runtime/session/browser identities.
 - The only portfolio indicator RPCs after this task are `SaveStrategyIndicatorsV2`, `FinalizeStrategyIndicatorChunksV2`, `ListStrategyIndicatorsV2`, and `ListStrategyIndicatorChunksV2`.
 - The only worker wire payload is `indicator_frame_v2=21`; field 15 and name `indicator_frame` remain reserved.
 - Python retains the user-facing in-memory `IndicatorFrame`/`IndicatorWriter` API, but removes `IndicatorChunkBuffer` and the direct `portfolio.SaveStrategyIndicators` branch; all runtime persistence goes through the Go Agent.
+- Every V1-removal commit produced below is one coordinated candidate. Individual repository commits are intentionally non-releasable, non-deployable, and non-push until Task 12 reruns the identical gates and no-V1 scan. A failure resets the candidate to the pre-cutover SHAs; it never authorizes a partial rollout.
 
-- [ ] **Step 1: Add descriptor and source-contract tests that reject V1**
+- [ ] **Step 1: Write the additive V2 integration, database, service-chain, and evidence gates before deleting V1**
+
+Keep the existing V1 descriptor/API/direct-writer tests GREEN while adding the
+V2 tests. `indicator_v2_integration_test.go` drives 1023 frames through the real
+Agent handler, lets the normal two-second flush become in flight, then sends
+sequences 1023 and 1024. It asserts the durable 1024-finalized plus one-open
+result, and adds 2049, exact repeated-1023, conflicting duplicate, sparse and
+multiple markers, three independent stream keys, every terminal row, and
+retry cases. The conflicting duplicate is same sequence/time with a changed
+scalar/marker payload and must close order/frame admission.
+
+`indicator_v2_open_time_cutover.py` declares one scalar and one marker and uses
+production-shaped bars where
+`open_time=n*60_000`, `close_time=open_time+59_999`, and
+`timestamp=close_time`. It emits markers on sequences 4, 9, and 1438 and an
+order decision on the same bars, receives at least 2050 source bars, and never
+reads a test-only `timestamp=open_time` shortcut. Before processing the next
+bar after exactly 1023, 1025, or 2049 completed callbacks, it reads the private
+mode-0600 control JSON named by `HUSHINE_INDICATOR_V2_BARRIER_FILE`. It writes an
+atomic acknowledgement containing owner token, completed count, and last
+open-time, then blocks before any writes/orders for the next bar until the
+owner- and generation-matching target advances. Thus the preceding callback
+has already returned and its frame has drained before each barrier; the blocked
+next callback contributes no partial frame.
+
+Create `runtime-indicator-v2-db-smoke.sh` with unique names
+`hushine_indicator_acceptance_<run>_{fresh,upgrade,order_guard}`. It refuses
+pre-existing targets; applies fresh bootstrap twice; loads a populated V1
+fixture; requires identical hashes for every retained non-indicator table;
+requires zero legacy indicator rows and exact V2 constraints afterward; proves
+the separate order/fill database hash is unchanged; grep-fails on `SKIP`; and a
+name/ownership-token-checked trap terminates connections and drops only those
+three databases. Before invoking the production runner on a legacy fixture, it
+sets the exact random token in the database comment and a mode-0600 owner JSON,
+then exports `HUSHINE_INDICATOR_V2_DESTRUCTIVE_MODE=acceptance` and
+`HUSHINE_INDICATOR_V2_ACCEPTANCE_OWNER_FILE=<that file>`; add a shell RED proving
+prefix-only and mismatched-token attempts fail before the V1 row count changes.
+Create
+`runtime-indicator-v2-smoke.sh` to run the focused repository/blocked-worker/
+Windows/gateway/frontend matrix. At this stage both scripts must also assert
+the deprecated V1 descriptors and source surfaces still exist; they select V2
+only for the acceptance processes.
+
+Add executable coexistence tests before the cutover: control-panel
+`TestIndicatorProtoV1CoexistsWithV2` dispatches one authenticated V1 save and
+the V2 save/finalize pair through their distinct canonical methods; quant-handler
+`TestStrategyIndicatorV1CoexistsWithV2` exercises the deprecated V1 mapper and
+the V2 mapper against their generated clients without aliasing either response.
+Both tests assert the expected V1 and V2 descriptor method names. Keep them
+GREEN in the pre-cutover commit; Task 11's removal RED later flips these exact
+contracts to absence.
+
+`runtime-indicator-v2-service-chain.sh` exposes exact subcommands
+`start|await|advance|stop`. `start --phase pre --state-dir <absolute-dir>` must
+use acceptance-owned `.10` databases whose names begin
+`hushine_indicator_chain_`, ephemeral loopback ports, and mode-0600 state. It
+starts the real core-service, control-panel-service, quant-handler,
+quant-frontend, hosted runtime-agent, and actual Python session worker; a fake
+Agent platform or direct database writer is forbidden. It authenticates the
+RuntimeChannel, loads the fixture through the supported strategy path, starts a
+Backtest session through quant-handler, launches a long-lived ownership-token-
+pinned supervisor, and returns only after the Session reaches the deterministic
+`open-1023` barrier. The supervisor—not the short `start` caller—owns cleanup;
+an explicit `stop` command or supervisor signal runs the same cleanup path. It
+records PIDs plus process start identities and exact source SHAs before startup,
+fails on any skipped process/readiness check, and stops only matching PIDs and
+drops only ownership-token-matching databases. The destructive migration is applied only
+to those owned databases through the same runner acceptance guard; the shared/
+long-lived portfolio database remains untouched. After the pre-cutover seal,
+the explicit shared cutover entry point uses mode `cutover`, the sealed pre-tree
+record, and the exact current committed SHA map. No direct `psql 0002` or
+unguarded runner invocation is an allowed deployment path.
+
+The service-chain script writes `<state-dir>/chain.json` with schema 1, phase,
+repository SHAs, database names/ownership token, runtime/session/strategy IDs,
+and redacted URLs. `await <state>` validates the fixture acknowledgement and
+then queries the real core database plus authenticated handler until the exact
+state is observed or a bounded deadline fails. `advance <count>` atomically
+writes a strictly increasing target with the same owner/runtime/session/
+generation token; only `1025` after `1023`, and `2049` after `1025`, are valid.
+Wall-clock sleeps are never state evidence. The exact assertions are:
+
+```json
+{
+  "chunk_1023": {"count": 1023, "finalized": false},
+  "chunk_1025": [{"count": 1024, "finalized": true}, {"count": 1, "finalized": false}],
+  "chunk_2049": [1024, 1024, 1],
+  "repeat_1023": {"row_delta": 0, "revision_delta": 0, "updated_at_changed": false},
+  "marker_1438": {"sequence": 1438, "time_ms_equals_open_time": true},
+  "close_time_preserved_for_order": true,
+  "protocol_version": 2
+}
+```
+
+Do not start removal-contract REDs in the same edit batch; first make every
+additive V2 test and script GREEN with V1 still present.
+
+Commit the additive test fixture/integration test in strategy-service and the
+four acceptance scripts/Make target in hushine-deploy as ordinary pre-cutover
+commits, then rerun their focused tests. Do not push. The Browser seal in Step 2
+must name these committed SHAs, not a dirty-worktree approximation:
+
+```bash
+cd strategy-service
+git add internal/runtimeagent/indicator_v2_integration_test.go tests/strategies/indicator_v2_open_time_cutover.py
+git diff --cached --check
+git commit -m "test: cover additive indicator v2 real-chain cases"
+cd ../hushine-deploy
+git add Makefile scripts/runtime-indicator-v2-db-smoke.sh scripts/runtime-indicator-v2-smoke.sh scripts/runtime-indicator-v2-service-chain.sh scripts/runtime-indicator-v2-cutover-evidence.test.sh
+git diff --cached --check
+git commit -m "test: add indicator v2 pre-cutover gate"
+```
+
+- [ ] **Step 2: Run the real page against the additive V2 stack and seal pre-cutover evidence**
+
+Run the database/focused gate, then start the supervisor-owned service-chain
+stack and prove its first deterministic barrier:
+
+```bash
+cd hushine-deploy
+make test-runtime-indicator-v2
+state_dir="$(pwd)/.superpowers/sdd/indicator-v2-precutover"
+bash scripts/runtime-indicator-v2-service-chain.sh start --phase pre --state-dir "$state_dir"
+bash scripts/runtime-indicator-v2-service-chain.sh await open-1023 --state-dir "$state_dir"
+```
+
+Use the installed `browser:control-in-app-browser` skill on the exact frontend
+URL and Session ID from `chain.json`. This is a real-page gate, not a pure
+frontend test or HTTP-only substitute. With fresh page snapshots before every
+action:
+
+1. while `await open-1023` is pinned, open the Session chart and verify exactly
+   one open chunk with count 1023 after its normal flush; capture DB/API/page
+   values before advancing;
+2. verify BUY/SELL marker sequence/time matches the candle `open_time`, while
+   the order record retains the intended close-time fact;
+3. run `advance 1025`, then `await finalized-1024-plus-tail`; verify the same
+   Session now shows chunk 0 count 1024/finalized and chunk 1 count 1/open;
+4. run `advance 2049`, then `await two-full-plus-tail`; verify two immutable
+   1024 chunks plus one one-bar tail, refresh twice, and prove finalized points
+   do not move;
+5. inspect the page's API/network result and require V2 fields
+   `times_ms`, `revision`, `finalized`, and `protocol_version=2` with no
+   `values_json` use; fail on console errors or unexpected same-origin 4xx/5xx.
+
+Use these exact transitions from a second terminal while the Browser remains on
+the same Session:
+
+```bash
+bash scripts/runtime-indicator-v2-service-chain.sh advance 1025 --state-dir "$state_dir"
+bash scripts/runtime-indicator-v2-service-chain.sh await finalized-1024-plus-tail --state-dir "$state_dir"
+bash scripts/runtime-indicator-v2-service-chain.sh advance 2049 --state-dir "$state_dir"
+bash scripts/runtime-indicator-v2-service-chain.sh await two-full-plus-tail --state-dir "$state_dir"
+```
+
+Write `<state-dir>/browser.json` with schema 1, source SHA map, browser/tab
+identity, runtime/session IDs, timestamped actions, the 1023+2/2049/open-time
+assertions, redacted network/console summaries, and hashes of approved
+non-sensitive screenshots. The model/operator must not type secrets during
+this gate.
+
+Always finish with the ownership-validated stop, even after a failed Browser
+assertion; `stop` records cleanup proof in `chain.json` before the evidence seal:
+
+```bash
+bash scripts/runtime-indicator-v2-service-chain.sh stop --state-dir "$state_dir"
+```
+
+At this point `chain.json` and `browser.json` are complete, but do **not** write
+the pre-cutover seal yet. Step 3 must first capture and bind all four executable
+coexistence results. Preserve these files as local ignored artifacts; do not
+commit screenshots or runtime IDs.
+
+- [ ] **Step 3: Prove the pre-cutover rollback surface and hard-stop without a current seal**
+
+Before the first deletion edit, use the evidence script's fixed
+`capture-coexistence` subcommand. It runs the exact four descriptor/source tests
+that require V1 field 15, the three core V1 methods, control-panel V1 dispatch,
+Python direct writer, handler V1 types, and V2 field 21 to coexist:
+
+```bash
+cd hushine-deploy
+state_dir="$(pwd)/.superpowers/sdd/indicator-v2-precutover"
+bash scripts/runtime-indicator-v2-cutover-evidence.test.sh \
+  capture-coexistence --state-dir "$state_dir" \
+  --chain "$state_dir/chain.json" \
+  --out "$state_dir/coexistence.json"
+```
+
+The subcommand owns this immutable table; callers cannot replace argv, cwd, or
+test ID:
+
+| ID | Repository | Exact command |
+|---|---|---|
+| `strategy-service-worker-v1-v2` | `strategy-service` | `PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/test_runtime_worker_proto.py tests/test_grpc_server.py -q` |
+| `core-indicator-v1-v2` | `core-service` | `go test ./internal/service -run IndicatorProtoV1CoexistsWithV2 -count=1 -v` |
+| `control-indicator-v1-v2` | `control-panel-service` | `go test ./internal/runtimechannel -run IndicatorProtoV1CoexistsWithV2 -count=1 -v` |
+| `handler-indicator-v1-v2` | `gateway/quant-handler` | `go test ./internal/app -run StrategyIndicatorV1CoexistsWithV2 -count=1 -v` |
+
+For each command, create a mode-0600 non-symlink regular log beneath
+`<state-dir>/coexistence/`, capture the real exit status plus redacted combined
+stdout/stderr, require exit 0 and non-empty output, and compute SHA-256 after
+redaction. Atomically write mode-0600 `coexistence.json` with schema/phase
+`1/pre`, the exact four IDs, repository name and 40-hex SHA copied from
+`chain.json.source_shas`, fixed argv/cwd and allowlisted environment overrides
+(`PYTHONPATH` only for strategy-service), exit code, start/finish timestamps,
+relative log path, and log SHA-256. Before execution, current `HEAD` must equal
+that repository SHA and the owned paths must be clean. Missing/extra/duplicate IDs, changed argv/environment,
+repo-SHA mismatch, unsafe path/mode/type, empty log, nonzero exit, or hash drift
+fails without a manifest.
+
+Now write the first pre-cutover seal with all three inputs:
+
+```bash
+bash scripts/runtime-indicator-v2-cutover-evidence.test.sh --phase pre \
+  --chain "$state_dir/chain.json" \
+  --browser "$state_dir/browser.json" \
+  --coexistence "$state_dir/coexistence.json" \
+  --seal "$state_dir/seal.json" --check-current-shas
+```
+
+The validator reopens and rehashes every coexistence log, validates the exact
+manifest table and repo SHAs, and includes
+`coexistence_manifest_sha256` plus the four `{id,repository_sha,log_sha256}`
+records inside the canonical seal payload before hashing/writing `seal.json`.
+Seal revalidation repeats those checks; it never trusts hashes copied only from
+the seal. The expected result is all GREEN and a current three-input seal. No shared migration,
+removal edit, removal commit, push, or deploy is permitted before this point.
+
+- [ ] **Step 4: Add descriptor and source-contract tests that reject V1**
 
 Update the core descriptor test to assert that these methods/messages are absent:
 
@@ -2320,9 +2737,13 @@ for _, name := range []protoreflect.Name{
 }
 ```
 
-Python/Go worker descriptor tests from Task 5 continue to assert tag 15 is reserved and V1 wire classes/accessors are absent. Add a Python test that constructing a runtime servicer with no Agent indicator sink cannot instantiate or call a portfolio indicator writer.
+Move the worker removal contract here: Python/Go descriptor tests first require
+tag 15 to be reserved, field 21 to remain `indicator_frame_v2`, and generated V1
+wire classes/accessors to be absent. Add a Python test that constructing a
+runtime servicer with no Agent indicator sink cannot instantiate or call a
+portfolio indicator writer.
 
-- [ ] **Step 2: Run the removal contracts and verify RED**
+- [ ] **Step 5: Run the removal contracts and verify RED**
 
 ```bash
 cd core-service
@@ -2332,9 +2753,10 @@ PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
   tests/test_runtime_worker_proto.py tests/test_grpc_server.py tests/test_platform_proxy.py -q
 ```
 
-Expected: FAIL because the additive migration phase still contains V1 core RPC/messages and the direct Python chunk writer.
+Expected: FAIL because the sealed additive phase still contains WorkerFrame V1,
+V1 core RPC/messages, control dispatch, and the direct Python chunk writer.
 
-- [ ] **Step 3: Remove V1 from core-service and regenerate from source**
+- [ ] **Step 6: Remove V1 from core-service and regenerate from source**
 
 Delete only the three V1 RPC declarations and their V1 definition/chunk/request/response messages from `proto/portfolio_service.proto`. Keep all four V2 RPCs and types. Remove the V1 domain structs, repository methods/filter, SQL code, service handlers/converters, and test-double methods; retain the V2 implementations and the `0002` migration's `values_json` detection because it is required to recognize populated V1 databases.
 
@@ -2351,7 +2773,7 @@ git add proto/portfolio_service.proto gen/portfoliov1/portfolio_service.pb.go ge
 git commit -m "refactor: remove indicator v1 portfolio api"
 ```
 
-- [ ] **Step 4: Remove the V1 control-panel dispatch and commit independently**
+- [ ] **Step 7: Remove the V1 control-panel dispatch and create its coordinated candidate commit**
 
 Delete `PortfolioPlatformClient.SaveStrategyIndicators`, its dispatch case, canonical method alias, unavailable-client method, and V1-only test. Keep authenticated V2 save/finalize cases unchanged.
 
@@ -2365,9 +2787,18 @@ git add internal/runtimechannel/platform_proxy.go internal/runtimechannel/platfo
 git commit -m "refactor: remove indicator v1 runtime proxy"
 ```
 
-- [ ] **Step 5: Regenerate strategy-service portfolio stubs and remove direct persistence**
+- [ ] **Step 8: Reserve worker field 15, regenerate all strategy-service stubs, and remove direct persistence**
 
-Run `./generate_proto.sh` against the now-V2-only core proto. In `grpc_server._install_indicator_collection`, remove the `IndicatorChunkBuffer`/direct portfolio-client branch. An agent-managed worker must have the sink installed before session execution; missing sink fails start with `RUNTIME_INDICATOR_SINK_REQUIRED` rather than silently dropping indicators. Strategies with no `INDICATORS` remain unaffected.
+Change `WorkerFrame` only now: remove `indicator_frame=15`, add
+`reserved 15; reserved "indicator_frame";`, keep
+`indicator_frame_v2=21`, and preserve every dependency Task 7/8 nested field.
+Delete worker `IndicatorValue`/`IndicatorFrame`, then run
+`./generate_proto.sh` against both authoritative V2-only protos. In
+`grpc_server._install_indicator_collection`, remove the
+`IndicatorChunkBuffer`/direct portfolio-client branch. An agent-managed worker
+must have the sink installed before session execution; missing sink fails start
+with `RUNTIME_INDICATOR_SINK_REQUIRED` rather than silently dropping indicators.
+Strategies with no `INDICATORS` remain unaffected.
 
 Delete `IndicatorChunkBuffer` and its persisted-chunk DTO from `indicators.py`; keep `IndicatorDefinition`, the user-facing sparse `IndicatorFrame`, and `IndicatorWriter`. Delete `PORTFOLIO_SAVE_STRATEGY_INDICATORS` and `PlatformProxy.save_strategy_indicators` from `platform_proxy.py`; keep unrelated order, wallet, market-data, notification, and session operations.
 
@@ -2389,11 +2820,11 @@ go test ./... -count=1
 go vet ./...
 ./scripts/runtime-agent-platform.test.sh
 git diff --check
-git add gen/portfoliov1/portfolio_service.pb.go gen/portfoliov1/portfolio_service_grpc.pb.go strategy_service/gen/portfolio_service_pb2.py strategy_service/gen/portfolio_service_pb2_grpc.py strategy_service/grpc_server.py strategy_service/indicators.py strategy_service/platform_proxy.py tests/test_strategy_indicators.py tests/test_grpc_server.py tests/test_platform_proxy.py
+git add proto/runtime_worker.proto gen/runtimeworkerv1/runtime_worker.pb.go gen/runtimeworkerv1/runtime_worker_grpc.pb.go strategy_service/gen/runtime_worker_pb2.py strategy_service/gen/runtime_worker_pb2_grpc.py gen/portfoliov1/portfolio_service.pb.go gen/portfoliov1/portfolio_service_grpc.pb.go strategy_service/gen/portfolio_service_pb2.py strategy_service/gen/portfolio_service_pb2_grpc.py strategy_service/grpc_server.py strategy_service/indicators.py strategy_service/platform_proxy.py tests/test_runtime_worker_proto.py tests/test_strategy_indicators.py tests/test_grpc_server.py tests/test_platform_proxy.py
 git commit -m "refactor: remove direct indicator v1 persistence"
 ```
 
-- [ ] **Step 6: Confirm quant-handler has no V1 client surface and commit only if cleanup changes remain**
+- [ ] **Step 9: Confirm quant-handler has no V1 client surface and create a candidate commit only if needed**
 
 Task 6 should already have moved all handlers/test doubles to V2. Delete any residual V1 client fields/methods or `values_json` assertions, run:
 
@@ -2412,7 +2843,7 @@ git add internal/app/session_indicators.go internal/app/session_indicators_test.
 git commit -m "refactor: remove indicator v1 gateway types"
 ```
 
-- [ ] **Step 7: Run a precise cross-repository no-V1 scan**
+- [ ] **Step 10: Run a precise no-V1 scan and freeze the non-push candidate**
 
 From the workspace root:
 
@@ -2430,14 +2861,24 @@ fi
 
 Expected: no output and exit 0. Historical dated Superpowers documents are intentionally excluded; the upgrade migration is the single allowed executable `values_json` occurrence because it detects and destroys old indicator-only storage.
 
+Record every pre-cutover and candidate SHA plus the seal hash. Mark all removal
+commits `candidate_only=true`; do not push, deploy, apply `0002` to a shared
+database, or describe any individual repository SHA as runnable/releasable.
+Proceed directly to Task 12. If Task 12 fails, return every repository to its
+recorded pre-cutover branch tip without broad/destructive worktree commands,
+preserving unrelated dirty work.
+
 ---
 
-### Task 12: Regenerate Deployment SQL and Run Isolated Database, 1023+2, Lifecycle, and Cross-Repository Acceptance
+### Task 12: Rerun the Identical Database, Real Service-Chain, and Real-Page Gates After Atomic V1 Removal
 
 **Files:**
-- Create: `strategy-service/internal/runtimeagent/indicator_v2_integration_test.go`
-- Create: `hushine-deploy/scripts/runtime-indicator-v2-db-smoke.sh`
-- Create: `hushine-deploy/scripts/runtime-indicator-v2-smoke.sh`
+- Verify: `strategy-service/internal/runtimeagent/indicator_v2_integration_test.go`
+- Verify: `strategy-service/tests/strategies/indicator_v2_open_time_cutover.py`
+- Modify/verify: `hushine-deploy/scripts/runtime-indicator-v2-db-smoke.sh`
+- Modify/verify: `hushine-deploy/scripts/runtime-indicator-v2-smoke.sh`
+- Modify/verify: `hushine-deploy/scripts/runtime-indicator-v2-service-chain.sh`
+- Modify/verify: `hushine-deploy/scripts/runtime-indicator-v2-cutover-evidence.test.sh`
 - Modify: `hushine-deploy/scripts/db/render-schema-bundle.sh`
 - Modify generated: `hushine-deploy/db/generated/portfolio.sql`
 - Modify generated: `hushine-deploy/db/generated/README.md`
@@ -2450,8 +2891,10 @@ Expected: no output and exit 0. Historical dated Superpowers documents are inten
 - 1023+2 Agent integration: `strategy-service/internal/runtimeagent/indicator_v2_integration_test.go::TestIndicatorV2Integration1023ThenTwoFrames`.
 - Blocked worker: `strategy-service/scripts/runtime-agent-blocked-worker.test.sh` and `strategy-service/internal/runtimeagent/blocked_worker_integration_test.go::TestBlockedWorkerKeepsRuntimeHeartbeatAndCanBeReplaced`.
 - Complete focused acceptance: `hushine-deploy/scripts/runtime-indicator-v2-smoke.sh` or `make test-runtime-indicator-v2`.
+- Real chain/page: `runtime-indicator-v2-service-chain.sh start --phase post`, deterministic `await/advance/stop` subcommands, a fresh Browser-skill run, and `runtime-indicator-v2-cutover-evidence.test.sh --phase post`.
+- This task uses new acceptance-owned databases, runtime, Session, browser evidence, and timestamps. Reusing or relabeling Task 11's pre-cutover evidence is a hard failure.
 
-- [ ] **Step 1: Finish isolated fresh and populated-upgrade database tests before changing deployment output**
+- [ ] **Step 1: Re-run isolated fresh and populated-upgrade database tests on the V1-free candidate**
 
 `indicator_v2_bootstrap_test.go` and `indicator_v2_migration_test.go` use `HUSHINE_TEST_PG_ADMIN_DSN`, create unique databases prefixed `hushine_indicator_acceptance_`, and register cleanup immediately after creation. When `HUSHINE_TEST_DATABASE_NAME` is set, each test validates and owns that exact acceptance-prefixed name; this lets the smoke script run the fresh and upgrade cases separately. They may skip only when the admin DSN is absent during ordinary unit runs; `runtime-indicator-v2-db-smoke.sh` always supplies it, grep-fails on `SKIP`, and treats any connection/extension/migration failure as fatal.
 
@@ -2459,7 +2902,7 @@ The checked-in `testdata/indicator_v1_fixture.sql` does exactly this on a curren
 
 After the migration, require identical counts/hashes for all retained tables (`users`, `portfolios`, `venues`, `venue_wallet_states`, `venue_events`, `strategies`, `portfolio_strategies`, `strategy_sessions`, `session_venues`, `portfolio_snapshots`, `notification_settings`, `notification_channels`, `notification_plans`, and `reconciliation_runs`), zero old indicator rows, V2 columns/constraints/triggers/foreign keys, and exactly one `0002` ledger row. The `strategy_sessions` comparison hashes the explicit legacy-column projection on both sides and separately requires the new `indicator_finalization_pending` column/default plus false on all upgraded rows. A forced error after the migration body but before ledger insert must leave both schema and ledger at the pre-transaction state.
 
-- [ ] **Step 2: Write the 1023+2 Agent integration test before the final smoke runner**
+- [ ] **Step 2: Re-run the complete Agent integration matrix from the committed pre-cutover test**
 
 Feed 1023 complete V2 frames through `Agent.HandleWorkerFrame`, wait for the two-second open flush, then feed sequences 1023 and 1024 without an intervening manual flush. The fake authenticated platform applies the same monotonic-save and guarded-finalize rules as core and records durable rows. Assert before terminal status:
 
@@ -2473,9 +2916,9 @@ require.False(t, chunk1.Finalized)
 require.Equal(t, uint64(1024), chunk1.StartSequence)
 ```
 
-It is valid for save/finalize to use one or two platform requests; the test checks durable state and ordering, not request count. Send `finished`, assert chunk 1 finalizes at revision 1 before `UpdateSession(finished)` and worker acknowledgement. Add subtests for two interleaved symbols, same symbol/different intervals, concurrent Binance spot/futures stream keys, sparse/multiple markers, actual-time gaps, immediate same-sequence/time duplicate ignored without reapplying payload, older lower sequence rejected, and finalization retry.
+It is valid for save/finalize to use one or two platform requests; the test checks durable state and ordering, not request count. Send `finished`, assert chunk 1 finalizes at revision 1 before `UpdateSession(finished)` and worker acknowledgement. Re-run subtests for two interleaved symbols, same symbol/different intervals, concurrent Binance spot/futures stream keys, sparse/multiple markers, actual-time gaps, an exact immediate same-sequence/time/payload retry ignored without reapplying, same sequence/time with changed scalar or marker failed closed, older lower sequence rejected, all authenticated worker-final spellings including `recoverable` and `completed -> finished`, gRPC sink failure, and finalization retry.
 
-- [ ] **Step 3: Run the new integration tests and verify RED where deployment artifacts are stale**
+- [ ] **Step 3: Run the integration tests and require GREEN before touching generated deployment output**
 
 ```bash
 cd core-service
@@ -2485,7 +2928,9 @@ cd ../strategy-service
 go test ./internal/runtimeagent -run TestIndicatorV2Integration1023ThenTwoFrames -count=1 -v
 ```
 
-Expected at the initial RED checkpoint: the tests fail because the fresh/upgrade helpers, V2 schema, and complete V2 sync/lifecycle path are not present. No command targets the shared `portfolio` database.
+Expected: PASS with no skip. No command targets the shared `portfolio` database,
+and the same production-shaped K-line uses open time for V2 while preserving
+close time for existing strategy/order semantics.
 
 - [ ] **Step 4: Regenerate the tracked fresh bundle and document the destructive indicator-only upgrade**
 
@@ -2497,7 +2942,7 @@ Run `make db-schema-bundle`; do not edit generated SQL manually. `db/generated/p
 - coordinated protocol-2 deployment order;
 - rollback rule: restore service binaries/schema backup together, never run a mixed V1/V2 worker.
 
-- [ ] **Step 5: Implement the ownership-safe database smoke script**
+- [ ] **Step 5: Audit and run the ownership-safe database smoke script**
 
 `runtime-indicator-v2-db-smoke.sh` defaults to `PGHOST=192.168.88.10`, `PGPORT=5432`, `PGUSER=hushine-tech`, and `PGDATABASE_ADMIN=postgres`; authentication comes from the operator's existing `PGPASSWORD`/`.pgpass`. It generates a safe run ID from PID plus 16 random hex characters and creates only:
 
@@ -2544,7 +2989,7 @@ The script:
 
 No branch treats unreachable `.10`, missing TimescaleDB, a skipped test, or a failed cleanup as success.
 
-- [ ] **Step 6: Implement the complete focused smoke and Make target**
+- [ ] **Step 6: Run the complete focused smoke and Make target**
 
 `runtime-indicator-v2-smoke.sh` runs, in this exact order:
 
@@ -2567,7 +3012,42 @@ test-runtime-indicator-v2:
 	@bash scripts/runtime-indicator-v2-smoke.sh
 ```
 
-- [ ] **Step 7: Run every repository's normal gate plus focused acceptance**
+- [ ] **Step 7: Finish every tracked artifact and commit the final candidate before any post-cutover gate**
+
+Regenerate/review the deployment bundle and commit every remaining tracked
+acceptance/generated/documentation change now, before starting the post-cutover
+stack:
+
+```bash
+cd hushine-deploy
+git diff --check
+make db-schema-bundle
+before_bundle="$(shasum -a 256 db/generated/portfolio.sql db/generated/README.md)"
+make db-schema-bundle
+after_bundle="$(shasum -a 256 db/generated/portfolio.sql db/generated/README.md)"
+test "$before_bundle" = "$after_bundle"
+git add Makefile scripts/runtime-indicator-v2-db-smoke.sh scripts/runtime-indicator-v2-smoke.sh scripts/runtime-indicator-v2-service-chain.sh scripts/runtime-indicator-v2-cutover-evidence.test.sh scripts/db/render-schema-bundle.sh db/generated/portfolio.sql db/generated/README.md db/README.md docs/superpowers/plans/2026-07-14-runtime-indicator-v2-lifecycle.md docs/superpowers/specs/2026-07-14-runtime-indicator-v2-lifecycle-design.md
+git diff --cached --check
+git commit -m "test: verify runtime indicator v2 deployment"
+```
+
+Require every affected repository clean, then atomically write the complete
+committed SHA map to the ignored post-cutover state directory. Any staged,
+unstaged, or untracked non-ignored file fails; the strategy integration fixture
+must be an ancestor of the recorded strategy-service SHA:
+
+```bash
+state_dir="$(pwd)/.superpowers/sdd/indicator-v2-postcutover"
+mkdir -p "$state_dir" && chmod 700 "$state_dir"
+for repo in core-service control-panel-service strategy-library strategy-service strategy-debugger-cli gateway/quant-handler gateway/quant-frontend hushine-deploy; do
+  test -z "$(git -C "../$repo" status --porcelain --untracked-files=normal)" || exit 1
+done
+bash scripts/runtime-indicator-v2-cutover-evidence.test.sh \
+  --write-current-shas "$state_dir/final-shas.json" --require-clean
+```
+
+Only after that final commit and SHA freeze, run every repository's normal gate
+plus focused acceptance.
 
 From the workspace root, with `.10` credentials available through libpq:
 
@@ -2590,36 +3070,128 @@ test "$openspec_status" -eq 0
 
 Expected: all PASS, no skips in the focused smoke, and a second `make db-schema-bundle` produces no diff.
 
-- [ ] **Step 8: Commit the strategy-service integration test before the deploy acceptance commit**
+- [ ] **Step 8: Repeat the real service-chain and real-page proof with fresh post-cutover identities**
 
-The runtime integration test is a strategy-service-owned artifact and must be
-committed before the deploy runner that names it:
-
-```bash
-cd strategy-service
-git add internal/runtimeagent/indicator_v2_integration_test.go
-git diff --cached --check
-git diff --cached -- internal/runtimeagent/indicator_v2_integration_test.go
-git commit -m "test: cover indicator v2 lifecycle integration"
-```
-
-- [ ] **Step 9: Self-review generated/source consistency and commit only deploy-owned files**
+Start a new supervisor-owned stack and Session from the clean SHA map; do not
+copy Task 11 evidence:
 
 ```bash
 cd hushine-deploy
-git diff --check
-before_bundle="$(shasum -a 256 db/generated/portfolio.sql db/generated/README.md)"
-make db-schema-bundle
-after_bundle="$(shasum -a 256 db/generated/portfolio.sql db/generated/README.md)"
-test "$before_bundle" = "$after_bundle"
-git add Makefile scripts/runtime-indicator-v2-db-smoke.sh scripts/runtime-indicator-v2-smoke.sh scripts/db/render-schema-bundle.sh db/generated/portfolio.sql db/generated/README.md db/README.md docs/superpowers/plans/2026-07-14-runtime-indicator-v2-lifecycle.md
-git diff --cached --check
-git diff --cached -- Makefile scripts/runtime-indicator-v2-db-smoke.sh scripts/runtime-indicator-v2-smoke.sh scripts/db/render-schema-bundle.sh db/generated/portfolio.sql db/generated/README.md db/README.md docs/superpowers/plans/2026-07-14-runtime-indicator-v2-lifecycle.md
-git commit -m "test: verify runtime indicator v2 deployment"
+state_dir="$(pwd)/.superpowers/sdd/indicator-v2-postcutover"
+bash scripts/runtime-indicator-v2-service-chain.sh start --phase post \
+  --state-dir "$state_dir" --expected-shas "$state_dir/final-shas.json"
+bash scripts/runtime-indicator-v2-service-chain.sh await open-1023 --state-dir "$state_dir"
 ```
+
+Using `browser:control-in-app-browser`, repeat every Task 11 page action against
+the new URL/Session. At the pinned `open-1023` barrier, assert exact DB/API/page
+count 1023 and open tail. Then run the same deterministic transitions used
+pre-cutover:
+
+```bash
+bash scripts/runtime-indicator-v2-service-chain.sh advance 1025 --state-dir "$state_dir"
+bash scripts/runtime-indicator-v2-service-chain.sh await finalized-1024-plus-tail --state-dir "$state_dir"
+bash scripts/runtime-indicator-v2-service-chain.sh advance 2049 --state-dir "$state_dir"
+bash scripts/runtime-indicator-v2-service-chain.sh await two-full-plus-tail --state-dir "$state_dir"
+```
+
+Verify BUY/SELL marker at candle open time with the close-time order fact
+preserved, exact 1024-finalized plus one-open at 1025, two immutable full chunks
+plus a one-point tail at 2049, two refreshes with no finalized movement, V2
+network fields, and zero unexpected console/network errors. Write a fresh
+`<state-dir>/browser.json`. Run the no-V1 scan and Runtime dependency combined
+descriptor/value/checksum gate now, append their SHA-bound logs, then stop the
+owned supervisor and require cleanup proof in `chain.json`:
+
+```bash
+bash scripts/runtime-indicator-v2-service-chain.sh stop --state-dir "$state_dir"
+```
+
+Only after all post-cutover database/focused/service-chain/browser/no-V1/
+dependency checks and cleanup are complete, write the final code seal:
+
+```bash
+bash scripts/runtime-indicator-v2-cutover-evidence.test.sh \
+  --phase post \
+  --expected-shas "$state_dir/final-shas.json" \
+  --chain "$state_dir/chain.json" \
+  --browser "$state_dir/browser.json" \
+  --seal "$state_dir/seal.json" \
+  --check-current-shas
+```
+
+Compare pre/post assertion sets (not volatile IDs/timestamps) and require them
+to be identical. Final descriptors must retain all dependency fields, expose V2
+field 21, and reserve 15. Any failure leaves the
+coordinated candidate non-push/non-deploy and requires a fix plus fresh pre and
+post evidence from the new tree.
+
+- [ ] **Step 9: Prove the final seal still names the complete clean committed tree**
+
+Immediately after sealing, recompute every SHA and compare it to
+`final-shas.json`; require every affected repository clean and the integration
+fixture an ancestor of the sealed strategy-service commit:
+
+```bash
+cd hushine-deploy
+bash scripts/runtime-indicator-v2-cutover-evidence.test.sh \
+  --phase post --seal .superpowers/sdd/indicator-v2-postcutover/seal.json \
+  --expected-shas .superpowers/sdd/indicator-v2-postcutover/final-shas.json \
+  --check-current-shas --require-clean
+cd ../strategy-service
+git log -1 --format=%H -- internal/runtimeagent/indicator_v2_integration_test.go tests/strategies/indicator_v2_open_time_cutover.py
+git diff --check -- internal/runtimeagent/indicator_v2_integration_test.go tests/strategies/indicator_v2_open_time_cutover.py
+test -z "$(git status --short -- internal/runtimeagent/indicator_v2_integration_test.go tests/strategies/indicator_v2_open_time_cutover.py)"
+```
+
+- [ ] **Step 10: Permit no tracked commit or product change after the final code seal**
+
+There is no commit step after Step 8. Any tracked product, generated,
+acceptance, test, plan, or documentation change—or any repository SHA change—
+invalidates the post-cutover chain/browser/current-tree assertions and final
+seal. Commit the necessary fix, rerun Step 7's clean SHA freeze and post-commit
+gates (without creating an empty commit), regenerate `final-shas.json`, and
+rerun Steps 8–9 from the new clean tree. The historical pre-cutover seal remains bound to
+its V1-coexistence tree and is never relabelled; the final code seal always
+names the exact post-cutover commits presented to the later full-system gate.
 
 ---
 
-## Final Acceptance Record
+## Indicator Focused Cutover Checkpoints (Non-Release)
 
-Record the commit SHA from each independent repository, the three acceptance-owned database names, their successful cleanup, the 1023+2 durable chunk summary, the full 600-second blocked-worker heartbeat count/max-gap/replacement generation, Windows cross-build artifacts, the successful native Windows workflow URL/artifact for the exact strategy-service SHA, both tracked strategy-service shell-test results, the strict non-empty OpenSpec validation result, and the frontend executable-test result. Do not claim completion from unit tests or cross-build output alone; all Task 12 commands and the native Windows gate must have fresh output from the final tree.
+Record separate pre-cutover and post-cutover seal hashes, every independent
+repository SHA, acceptance-owned database names and cleanup proof, distinct
+runtime/Session/browser identities, the 1023+2 and 2049 durable summaries, the
+open-time marker/close-time order comparison, conflicting-duplicate failure,
+explicit `recoverable` and `completed -> finished` terminal results, the full
+600-second blocked-worker heartbeat count/max-gap/replacement generation,
+Windows cross-build artifacts, the successful native Windows workflow URL/
+artifact for the exact strategy-service SHA, both tracked strategy-service
+shell-test results, the strict non-empty OpenSpec validation result, and the
+frontend executable result. Unit tests, a fake Agent platform, cross-build
+output, or only one side of the cutover never seals this checkpoint.
+
+Completing this implementation plan means only that the V1-free candidate may
+enter the later full-system acceptance plan. It is **not** release acceptance
+and does not authorize push/deploy by itself. Before any release/push claim,
+`docs/superpowers/plans/2026-07-14-full-system-real-page-acceptance.md` must
+produce fresh post-cutover evidence for these exact mandatory scenario IDs:
+
+```text
+browser-running-indicator
+indicator-1023-plus-2
+indicator-repeat-idempotency
+indicator-sparse-marker-time
+indicator-terminal-tail
+durable-reconciliation
+coverage-finalization
+```
+
+`browser-running-indicator` must include the real 2049-bar two-full-plus-tail
+page result; `indicator-repeat-idempotency` must replay the complete 1023-frame
+state (not only the last frame); `durable-reconciliation` must compare accepted
+bars, candle open times, close-time order/fill facts, marker sequence/time, DB,
+handler JSON, and chart output. All Task 12 commands, both cutover seals, and
+the native Windows gate require fresh output from the final tree. Only the
+full-system plan's later coordinated delivery gate may authorize remote push or
+deployment.
