@@ -15,7 +15,7 @@ DEV_NO_PROXY_HOSTS ?= 127.0.0.1,localhost,::1,192.168.88.10,host.docker.internal
 DEV_NO_PROXY := NO_PROXY=$(DEV_NO_PROXY_HOSTS),$${NO_PROXY} no_proxy=$(DEV_NO_PROXY_HOSTS),$${no_proxy}
 LOCAL_NO_PROXY := $(DEV_NO_PROXY)
 
-.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted
+.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted runtime-dependency-envs runtime-dependency-contract runtime-images-verify runtime-dependency-acceptance
 
 help:
 	@echo "Targets:"
@@ -34,6 +34,8 @@ help:
 	@echo "  local-start        — run services against local Docker infra in background"
 	@echo "  local-stop         — stop background services"
 	@echo "  runtime-image      — build hushine/strategy-runtime image (IMAGE_TAG=dev)"
+	@echo "  runtime-dependency-contract   — verify manifest projections against immutable RUNTIME_DEPENDENCY_BASE_SHA"
+	@echo "  runtime-dependency-acceptance — rebuild and verify the paired normal/coverage runtime images"
 	@echo "  smoke-hosted-runtime      — EnsureHostedRuntime smoke (requires USER_ID)"
 	@echo "  smoke-self-hosted-runtime — self-hosted RuntimeChannel smoke (requires CREDENTIAL_FILE)"
 
@@ -142,6 +144,52 @@ local-stop:
 
 runtime-image:
 	@bash strategy-service/scripts/build_strategy_runtime.sh "$${IMAGE_TAG:-dev}"
+
+runtime-dependency-envs:
+	test "$${#RUNTIME_DEPENDENCY_BASE_SHA}" -eq 40
+	git -C strategy-library cat-file -e "$${RUNTIME_DEPENDENCY_BASE_SHA}^{commit}"
+	test ! -e strategy-library/uv.lock
+	cd strategy-library && uv run --isolated --no-project --with-editable '.[test]' \
+		python -c 'import hushine_strategy, pytest'
+	test ! -e strategy-library/uv.lock
+	uv sync --project strategy-service --python 3.13 --frozen --extra dev
+	cd strategy-debugger-cli && LIBRARY_COMMIT="$$(git -C ../strategy-library rev-parse HEAD)" && \
+		./scripts/with-local-strategy-library-git.sh \
+		../strategy-library "$$LIBRARY_COMMIT" uv sync --frozen --extra test
+
+runtime-dependency-contract: runtime-dependency-envs
+	cd strategy-library && uv run --isolated --no-project --with-editable '.[test]' \
+		python scripts/check_runtime_dependency_contract.py \
+		--service-project ../strategy-service/pyproject.toml \
+		--service-lock ../strategy-service/uv.lock \
+		--debugger-project ../strategy-debugger-cli/pyproject.toml \
+		--debugger-lock ../strategy-debugger-cli/uv.lock \
+		--installed-python strategy-service=../strategy-service/.venv/bin/python \
+		--installed-python-version strategy-service=3.13 \
+		--installed-python debugger=../strategy-debugger-cli/.venv/bin/python \
+		--installed-python-version debugger='>=3.12' \
+		--baseline-ref "$(RUNTIME_DEPENDENCY_BASE_SHA)" \
+		--json
+
+runtime-images-verify:
+	$(MAKE) -C strategy-service runtime-images-verify
+
+runtime-dependency-acceptance: runtime-dependency-contract runtime-images-verify
+	@RUNTIME_DEPENDENCY_CHECKER_JSON="$$(cd strategy-library && \
+		uv run --isolated --no-project --with-editable '.[test]' \
+		python scripts/check_runtime_dependency_contract.py \
+		--service-project ../strategy-service/pyproject.toml \
+		--service-lock ../strategy-service/uv.lock \
+		--debugger-project ../strategy-debugger-cli/pyproject.toml \
+		--debugger-lock ../strategy-debugger-cli/uv.lock \
+		--installed-python strategy-service=../strategy-service/.venv/bin/python \
+		--installed-python-version strategy-service=3.13 \
+		--installed-python debugger=../strategy-debugger-cli/.venv/bin/python \
+		--installed-python-version debugger='>=3.12' \
+		--baseline-ref "$(RUNTIME_DEPENDENCY_BASE_SHA)" \
+		--json)" \
+	RUNTIME_DEPENDENCY_BASE_SHA="$(RUNTIME_DEPENDENCY_BASE_SHA)" \
+		bash hushine-deploy/scripts/runtime-dependency-contract.test.sh
 
 smoke-hosted-runtime runtime-smoke-hosted:
 	@test -n "$${USER_ID:-}" || (echo "required: USER_ID=<account.users.id>"; exit 2)
