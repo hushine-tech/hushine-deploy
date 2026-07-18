@@ -37,9 +37,13 @@ git clone git@github.com:hushine-tech/golang-lib.git golang-lib
 如果使用本机隔离环境：
 
 ```bash
+IMAGE_TAG=dev make runtime-image
 make local-bootstrap
 make local-start
 ```
+
+`local-bootstrap` 会生成并覆盖 git-ignored 的本地服务配置；本地 hosted runtime
+默认使用 coverage 镜像，采样文件写入工作区 `.coverage/runtime-agent`。
 
 ## 3. 配置检查
 

@@ -13,10 +13,22 @@
 ## 启动
 
 ```bash
+IMAGE_TAG=dev make runtime-image
 make local-start
 ```
 
-`local-start` 会先执行 `local-bootstrap`：启动 Docker 基础设施、等待 TimescaleDB、创建数据库并应用 migrations。
+`runtime-image` 同时构建普通与 coverage runtime。`local-start` 会先执行
+`local-bootstrap`：从各服务的受跟踪配置确定性生成权限为 `0600` 的
+`config.local.yaml`，启动 Docker 基础设施、等待 TimescaleDB、创建数据库并应用
+migrations。生成器会把 DB/Kafka/Jaeger 切到本机，并关闭本地 RuntimeChannel TLS；
+不会向 runtime 注入 DB、Kafka、core-service 或 order.v1 地址。
+
+本地 control-panel 默认开启 hosted runtime 覆盖率收集：
+
+- 镜像：`hushine/strategy-runtime:executor-coverage-dev`
+- 输出目录：工作区 `.coverage/runtime-agent`
+- 可通过 `LOCAL_RUNTIME_COVERAGE_IMAGE` 与
+  `LOCAL_RUNTIME_COVERAGE_DIR` 覆盖
 
 前台调试：
 
@@ -78,7 +90,10 @@ make local-bootstrap
 cd core-service
 make dev CONFIG=./config.local.yaml
 
-cd ../strategy-service
+cd ../control-panel-service
+RUNTIME_COVERAGE_ENABLED=true \
+RUNTIME_COVERAGE_OUTPUT_DIR=/absolute/path/to/.coverage/runtime-agent \
+RUNTIME_COVERAGE_IMAGE=hushine/strategy-runtime:executor-coverage-dev \
 make dev CONFIG=./config.local.yaml
 
 cd ../gateway/quant-handler
@@ -90,7 +105,9 @@ make dev CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json
 
 ## 注意
 
-- 不要直接改默认 `config.yaml`，默认配置仍保留远端开发机。
+- 不要直接改默认 `config.yaml`。`make local-configs`/`local-bootstrap` 会覆盖生成的
+  `config.local.yaml` 与 `scraper/log-config.local.json`；需要个人定制时使用另一条
+  配置路径或环境变量。
 - `source scripts/local-env.sh` 适合跑 `make ensure-dbs` 等命令；业务服务建议使用 `CONFIG=./config.local.yaml`，因为日志 Kafka 和 tracing endpoint 在配置文件里。
 - 如果本机设置了 `http_proxy` / `https_proxy`，本地启动目标会自动设置 `NO_PROXY=127.0.0.1,localhost,::1`，避免 gRPC / OTLP / HTTP 调用本机服务时被代理劫持。
 - 当前 scraper 本地配置保留 control-plane 模式，静态 forward collector 仍关闭，避免本机 Kafka/DB 被无需求流量打满。

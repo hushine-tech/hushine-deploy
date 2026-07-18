@@ -80,11 +80,17 @@ make dev
 For an isolated local-only stack:
 
 ```bash
+IMAGE_TAG=dev make runtime-image  # normal + coverage runtime images
 make local-bootstrap  # infra + databases + migrations
 make local-dev        # foreground services
 make local-start      # background services
 make local-stop
 ```
+
+`local-bootstrap` regenerates the ignored `config.local.yaml` files from the
+tracked service configs, rewrites infrastructure endpoints to localhost, and
+creates the runtime coverage output directory. Hosted runtimes started by the
+local control panel use the coverage image by default.
 
 Details: [docs/local-docker.md](docs/local-docker.md).
 
@@ -113,9 +119,10 @@ make clean
 ## Configuration
 
 - Each service repo owns its `config.yaml`.
-- Local machine overrides should use `config.local.yaml`, `.env.local`, or
-  environment variables; local configs are intentionally git-ignored by service
-  repositories.
+- `make local-configs` deterministically generates git-ignored
+  `config.local.yaml` files. Manual overrides should use a separate config path
+  or environment variables because the generated files are replaced on every
+  local bootstrap.
 - Normal Go services keep log, Kafka, and tracing settings under the `log:`
   section in `config.yaml`. Scraper still uses `config.yaml` plus a separate
   `log-config.json`.

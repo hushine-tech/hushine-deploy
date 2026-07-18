@@ -14,8 +14,11 @@ LOCAL_COMPOSE := docker compose -f deploy/local/docker-compose.yml
 DEV_NO_PROXY_HOSTS ?= 127.0.0.1,localhost,::1,192.168.88.10,host.docker.internal
 DEV_NO_PROXY := NO_PROXY=$(DEV_NO_PROXY_HOSTS),$${NO_PROXY} no_proxy=$(DEV_NO_PROXY_HOSTS),$${no_proxy}
 LOCAL_NO_PROXY := $(DEV_NO_PROXY)
+LOCAL_RUNTIME_COVERAGE_DIR ?= $(abspath .coverage/runtime-agent)
+LOCAL_RUNTIME_COVERAGE_IMAGE ?= hushine/strategy-runtime:executor-coverage-dev
+LOCAL_RUNTIME_COVERAGE_ENV := env RUNTIME_COVERAGE_ENABLED=true RUNTIME_COVERAGE_OUTPUT_DIR="$(LOCAL_RUNTIME_COVERAGE_DIR)" RUNTIME_COVERAGE_IMAGE="$(LOCAL_RUNTIME_COVERAGE_IMAGE)"
 
-.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted runtime-dependency-envs runtime-dependency-contract runtime-images-verify runtime-dependency-acceptance
+.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle local-configs local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted runtime-dependency-envs runtime-dependency-contract runtime-images-verify runtime-dependency-acceptance
 
 help:
 	@echo "Targets:"
@@ -28,6 +31,7 @@ help:
 	@echo "  clean      — remove binaries and PID files"
 	@echo "  test       — run tests in all services"
 	@echo "  local-infra-up     — start local Docker infra (TimescaleDB/Kafka/ELK/Jaeger)"
+	@echo "  local-configs      — generate deterministic ignored localhost service configs"
 	@echo "  local-bootstrap    — start local infra, wait for DB, and apply migrations"
 	@echo "  local-ensure-dbs   — create local databases + migrations"
 	@echo "  local-dev          — run services against local Docker infra in foreground"
@@ -107,7 +111,11 @@ local-infra-reset:
 local-infra-ps:
 	@$(LOCAL_COMPOSE) ps
 
-local-bootstrap: local-infra-up
+local-configs:
+	@python3 scripts/prepare-local-configs.py
+	@mkdir -p "$(LOCAL_RUNTIME_COVERAGE_DIR)"
+
+local-bootstrap: local-configs local-infra-up
 	@bash scripts/local-bootstrap.sh
 
 local-ensure-dbs:
@@ -118,7 +126,7 @@ local-dev: local-bootstrap
 	@trap 'echo "Stopping..."; kill 0 2>/dev/null; exit 0' INT TERM EXIT; \
 	$(LOCAL_NO_PROXY) $(MAKE) -C core-service CONFIG=./config.local.yaml dev & \
 	sleep 2; \
-	$(LOCAL_NO_PROXY) $(MAKE) -C control-panel-service CONFIG=./config.local.yaml dev & \
+	$(LOCAL_NO_PROXY) $(LOCAL_RUNTIME_COVERAGE_ENV) $(MAKE) -C control-panel-service CONFIG=./config.local.yaml dev & \
 	$(LOCAL_NO_PROXY) $(MAKE) -C scraper CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json dev & \
 	sleep 1; \
 	$(LOCAL_NO_PROXY) $(MAKE) -C gateway/quant-handler CONFIG=./config.local.yaml dev & \
@@ -129,7 +137,7 @@ local-dev: local-bootstrap
 local-start: local-bootstrap
 	@$(LOCAL_NO_PROXY) $(MAKE) -C core-service CONFIG=./config.local.yaml start
 	@sleep 2
-	@$(LOCAL_NO_PROXY) $(MAKE) -C control-panel-service CONFIG=./config.local.yaml start
+	@$(LOCAL_NO_PROXY) $(LOCAL_RUNTIME_COVERAGE_ENV) $(MAKE) -C control-panel-service CONFIG=./config.local.yaml start
 	@$(LOCAL_NO_PROXY) $(MAKE) -C scraper CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json start
 	@sleep 1
 	@$(LOCAL_NO_PROXY) $(MAKE) -C gateway/quant-handler CONFIG=./config.local.yaml start
@@ -143,7 +151,7 @@ local-stop:
 	@echo "✓ Local services stopped"
 
 runtime-image:
-	@bash strategy-service/scripts/build_strategy_runtime.sh "$${IMAGE_TAG:-dev}"
+	@bash strategy-service/scripts/build_strategy_runtime.sh --all "$${IMAGE_TAG:-dev}"
 
 runtime-dependency-envs:
 	test "$${#RUNTIME_DEPENDENCY_BASE_SHA}" -eq 40
