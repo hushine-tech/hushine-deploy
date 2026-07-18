@@ -16,6 +16,10 @@ grep -Fq 'RUNTIME_COVERAGE_IMAGE=' "${DEPLOY_ROOT}/Makefile"
 grep -Fq 'build_strategy_runtime.sh --all "$${IMAGE_TAG:-dev}"' \
   "${DEPLOY_ROOT}/Makefile"
 
+make -C "${SOURCE_ROOT}" -f "${DEPLOY_ROOT}/Makefile" local-configs \
+  LOCAL_RUNTIME_COVERAGE_IMAGE=hushine/strategy-runtime:test-coverage \
+  >/dev/null
+
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/hushine-local-configs.XXXXXX")"
 cleanup() {
   rm -rf -- "${fixture}"

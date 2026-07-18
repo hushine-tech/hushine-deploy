@@ -9,12 +9,15 @@
 #   make stop       — stop background services started via 'make start'
 #   make clean      — remove binaries and PID files
 
+DEPLOY_ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+SOURCE_ROOT := $(abspath $(DEPLOY_ROOT)/..)
 SERVICES := core-service control-panel-service strategy-service gateway/quant-handler gateway/quant-frontend scraper
-LOCAL_COMPOSE := docker compose -f deploy/local/docker-compose.yml
+LOCAL_COMPOSE := docker compose -f $(DEPLOY_ROOT)/deploy/local/docker-compose.yml
 DEV_NO_PROXY_HOSTS ?= 127.0.0.1,localhost,::1,192.168.88.10,host.docker.internal
 DEV_NO_PROXY := NO_PROXY=$(DEV_NO_PROXY_HOSTS),$${NO_PROXY} no_proxy=$(DEV_NO_PROXY_HOSTS),$${no_proxy}
-LOCAL_NO_PROXY := $(DEV_NO_PROXY)
-LOCAL_RUNTIME_COVERAGE_DIR ?= $(abspath .coverage/runtime-agent)
+LOCAL_NO_PROXY_HOSTS ?= 127.0.0.1,localhost,::1,host.docker.internal
+LOCAL_NO_PROXY := NO_PROXY=$(LOCAL_NO_PROXY_HOSTS),$${NO_PROXY} no_proxy=$(LOCAL_NO_PROXY_HOSTS),$${no_proxy}
+LOCAL_RUNTIME_COVERAGE_DIR ?= $(SOURCE_ROOT)/.coverage/runtime-agent
 LOCAL_RUNTIME_COVERAGE_IMAGE ?= hushine/strategy-runtime:executor-coverage-dev
 LOCAL_RUNTIME_COVERAGE_ENV := env RUNTIME_COVERAGE_ENABLED=true RUNTIME_COVERAGE_OUTPUT_DIR="$(LOCAL_RUNTIME_COVERAGE_DIR)" RUNTIME_COVERAGE_IMAGE="$(LOCAL_RUNTIME_COVERAGE_IMAGE)"
 
@@ -112,46 +115,46 @@ local-infra-ps:
 	@$(LOCAL_COMPOSE) ps
 
 local-configs:
-	@python3 scripts/prepare-local-configs.py
+	@python3 $(DEPLOY_ROOT)/scripts/prepare-local-configs.py
 	@mkdir -p "$(LOCAL_RUNTIME_COVERAGE_DIR)"
 
 local-bootstrap: local-configs local-infra-up
-	@bash scripts/local-bootstrap.sh
+	@bash $(DEPLOY_ROOT)/scripts/local-bootstrap.sh
 
 local-ensure-dbs:
-	@PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres PGDATABASE_ADMIN=postgres bash scripts/ensure-all-dbs.sh
+	@PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres PGDATABASE_ADMIN=postgres bash $(DEPLOY_ROOT)/scripts/ensure-all-dbs.sh
 
 local-dev: local-bootstrap
 	@echo "Starting all services against local Docker infra (Ctrl+C to stop)..."
 	@trap 'echo "Stopping..."; kill 0 2>/dev/null; exit 0' INT TERM EXIT; \
-	$(LOCAL_NO_PROXY) $(MAKE) -C core-service CONFIG=./config.local.yaml dev & \
+	$(LOCAL_NO_PROXY) $(MAKE) -C "$(SOURCE_ROOT)/core-service" CONFIG=./config.local.yaml dev & \
 	sleep 2; \
-	$(LOCAL_NO_PROXY) $(LOCAL_RUNTIME_COVERAGE_ENV) $(MAKE) -C control-panel-service CONFIG=./config.local.yaml dev & \
-	$(LOCAL_NO_PROXY) $(MAKE) -C scraper CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json dev & \
+	$(LOCAL_NO_PROXY) $(LOCAL_RUNTIME_COVERAGE_ENV) $(MAKE) -C "$(SOURCE_ROOT)/control-panel-service" CONFIG=./config.local.yaml dev & \
+	$(LOCAL_NO_PROXY) $(MAKE) -C "$(SOURCE_ROOT)/scraper" CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json dev & \
 	sleep 1; \
-	$(LOCAL_NO_PROXY) $(MAKE) -C gateway/quant-handler CONFIG=./config.local.yaml dev & \
+	$(LOCAL_NO_PROXY) $(MAKE) -C "$(SOURCE_ROOT)/gateway/quant-handler" CONFIG=./config.local.yaml dev & \
 	sleep 1; \
-	$(LOCAL_NO_PROXY) $(MAKE) -C gateway/quant-frontend dev & \
+	$(LOCAL_NO_PROXY) $(MAKE) -C "$(SOURCE_ROOT)/gateway/quant-frontend" dev & \
 	wait
 
 local-start: local-bootstrap
-	@$(LOCAL_NO_PROXY) $(MAKE) -C core-service CONFIG=./config.local.yaml start
+	@$(LOCAL_NO_PROXY) $(MAKE) -C "$(SOURCE_ROOT)/core-service" CONFIG=./config.local.yaml start
 	@sleep 2
-	@$(LOCAL_NO_PROXY) $(LOCAL_RUNTIME_COVERAGE_ENV) $(MAKE) -C control-panel-service CONFIG=./config.local.yaml start
-	@$(LOCAL_NO_PROXY) $(MAKE) -C scraper CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json start
+	@$(LOCAL_NO_PROXY) $(LOCAL_RUNTIME_COVERAGE_ENV) $(MAKE) -C "$(SOURCE_ROOT)/control-panel-service" CONFIG=./config.local.yaml start
+	@$(LOCAL_NO_PROXY) $(MAKE) -C "$(SOURCE_ROOT)/scraper" CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json start
 	@sleep 1
-	@$(LOCAL_NO_PROXY) $(MAKE) -C gateway/quant-handler CONFIG=./config.local.yaml start
-	@$(LOCAL_NO_PROXY) $(MAKE) -C gateway/quant-frontend start
+	@$(LOCAL_NO_PROXY) $(MAKE) -C "$(SOURCE_ROOT)/gateway/quant-handler" CONFIG=./config.local.yaml start
+	@$(LOCAL_NO_PROXY) $(MAKE) -C "$(SOURCE_ROOT)/gateway/quant-frontend" start
 	@echo "✓ All services started against local Docker infra"
 
 local-stop:
 	@for svc in $(SERVICES); do \
-		$(MAKE) -C $$svc stop 2>/dev/null || true; \
+		$(MAKE) -C "$(SOURCE_ROOT)/$$svc" stop 2>/dev/null || true; \
 	done
 	@echo "✓ Local services stopped"
 
 runtime-image:
-	@bash strategy-service/scripts/build_strategy_runtime.sh --all "$${IMAGE_TAG:-dev}"
+	@bash $(SOURCE_ROOT)/strategy-service/scripts/build_strategy_runtime.sh --all "$${IMAGE_TAG:-dev}"
 
 runtime-dependency-envs:
 	test "$${#RUNTIME_DEPENDENCY_BASE_SHA}" -eq 40
@@ -201,8 +204,8 @@ runtime-dependency-acceptance: runtime-dependency-contract runtime-images-verify
 
 smoke-hosted-runtime runtime-smoke-hosted:
 	@test -n "$${USER_ID:-}" || (echo "required: USER_ID=<account.users.id>"; exit 2)
-	@bash scripts/smoke_d3_hosted_runtime.sh
+	@bash $(DEPLOY_ROOT)/scripts/smoke_d3_hosted_runtime.sh
 
 smoke-self-hosted-runtime runtime-smoke-self-hosted:
 	@test -n "$${CREDENTIAL_FILE:-}" || (echo "required: CREDENTIAL_FILE=/path/to/runtime.cred"; exit 2)
-	@bash scripts/smoke_d3_self_hosted_runtime.sh
+	@bash $(DEPLOY_ROOT)/scripts/smoke_d3_self_hosted_runtime.sh
