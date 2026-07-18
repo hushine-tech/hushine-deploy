@@ -117,7 +117,8 @@ local-infra-ps:
 	@$(LOCAL_COMPOSE) ps
 
 local-configs:
-	@python3 $(DEPLOY_ROOT)/scripts/prepare-local-configs.py
+	@bash $(DEPLOY_ROOT)/scripts/generate_runtime_channel_dev_certs.sh
+	@HUSHINE_LOCAL_CERT_DIR="$(DEPLOY_ROOT)/certs" python3 $(DEPLOY_ROOT)/scripts/prepare-local-configs.py
 	@mkdir -p "$(LOCAL_RUNTIME_COVERAGE_DIR)"
 
 local-bootstrap: local-configs local-infra-up

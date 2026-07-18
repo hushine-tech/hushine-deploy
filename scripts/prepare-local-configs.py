@@ -17,6 +17,9 @@ GENERATED_HEADER = (
     "Do not edit.\n"
 )
 SHARED_HOST = "192.168.88.10"
+LOCAL_CERT_DIR = Path(
+    os.environ.get("HUSHINE_LOCAL_CERT_DIR", str(DEPLOY_ROOT / "certs"))
+).expanduser().resolve()
 
 
 def _localize_yaml(relative_source: str, relative_target: str, *, control=False) -> None:
@@ -29,9 +32,24 @@ def _localize_yaml(relative_source: str, relative_target: str, *, control=False)
             r"(?ms)^(runtime_channel_server:\n.*?^  tls:\n)"
             r"    enabled: (?:true|false)$"
         )
-        text, count = pattern.subn(r"\1    enabled: false", text, count=1)
+        text, count = pattern.subn(r"\1    enabled: true", text, count=1)
         if count != 1:
             raise RuntimeError("control-panel RuntimeChannel TLS block is missing")
+        tls_paths = {
+            "cert_file": LOCAL_CERT_DIR / "runtime-channel-server.pem",
+            "key_file": LOCAL_CERT_DIR / "runtime-channel-server.key",
+            "client_ca_file": LOCAL_CERT_DIR / "runtime-client-ca.pem",
+            "client_ca_key_file": LOCAL_CERT_DIR / "runtime-client-ca.key",
+        }
+        for key, path in tls_paths.items():
+            text, count = re.subn(
+                rf'(?m)^    {key}:.*$',
+                f"    {key}: {json.dumps(str(path))}",
+                text,
+                count=1,
+            )
+            if count != 1:
+                raise RuntimeError(f"control-panel RuntimeChannel TLS {key} is missing")
     _write_private(target, GENERATED_HEADER + text)
 
 

@@ -15,10 +15,33 @@ grep -Fq 'RUNTIME_COVERAGE_OUTPUT_DIR=' "${DEPLOY_ROOT}/Makefile"
 grep -Fq 'RUNTIME_COVERAGE_IMAGE=' "${DEPLOY_ROOT}/Makefile"
 grep -Fq 'build_strategy_runtime.sh --all "$${IMAGE_TAG:-dev}"' \
   "${DEPLOY_ROOT}/Makefile"
+grep -Fq 'generate_runtime_channel_dev_certs.sh' "${DEPLOY_ROOT}/Makefile"
+grep -Fq 'COMPOSE_FILE="${ROOT_DIR}/deploy/local/docker-compose.yml"' \
+  "${DEPLOY_ROOT}/scripts/wait-for-postgres.sh"
+grep -Fq 'docker compose -f "$COMPOSE_FILE" exec -T timescaledb' \
+  "${DEPLOY_ROOT}/scripts/wait-for-postgres.sh"
 
 make -C "${SOURCE_ROOT}" -f "${DEPLOY_ROOT}/Makefile" local-configs \
   LOCAL_RUNTIME_COVERAGE_IMAGE=hushine/strategy-runtime:test-coverage \
   >/dev/null
+
+for cert in \
+  runtime-channel-server.key \
+  runtime-channel-server.pem \
+  runtime-channel-ca.pem \
+  runtime-client-ca.key \
+  runtime-client-ca.pem; do
+  [[ -s "${DEPLOY_ROOT}/certs/${cert}" ]] || {
+    echo "missing generated local RuntimeChannel certificate: ${cert}" >&2
+    exit 1
+  }
+done
+for key in runtime-channel-server.key runtime-client-ca.key; do
+  [[ "$(stat -f '%Lp' "${DEPLOY_ROOT}/certs/${key}")" == "600" ]] || {
+    echo "unsafe permissions on local RuntimeChannel key: ${key}" >&2
+    exit 1
+  }
+done
 
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/hushine-local-configs.XXXXXX")"
 cleanup() {
@@ -36,7 +59,9 @@ for path in \
   cp "${SOURCE_ROOT}/${path}" "${fixture}/${path}"
 done
 
-HUSHINE_SOURCE_ROOT="${fixture}" "${GENERATOR}"
+HUSHINE_SOURCE_ROOT="${fixture}" \
+HUSHINE_LOCAL_CERT_DIR="${fixture}/local-certs" \
+  "${GENERATOR}"
 
 generated=(
   core-service/config.local.yaml
@@ -71,10 +96,21 @@ import sys
 root = Path(sys.argv[1])
 control = (root / "control-panel-service/config.local.yaml").read_text()
 match = re.search(
-    r"(?ms)^runtime_channel_server:\n.*?^  tls:\n    enabled: (true|false)$",
+    r"(?ms)^runtime_channel_server:\n.*?^  tls:\n"
+    r"    enabled: (true|false)\n"
+    r'    cert_file: "([^"]+)"\n'
+    r'    key_file: "([^"]+)"\n'
+    r'    server_name: "runtime-channel\.local"\n'
+    r'    client_ca_file: "([^"]+)"\n'
+    r'    client_ca_key_file: "([^"]+)"$',
     control,
 )
-assert match and match.group(1) == "false"
+assert match and match.group(1) == "true"
+cert_dir = (root / "local-certs").resolve()
+assert match.group(2) == str(cert_dir / "runtime-channel-server.pem")
+assert match.group(3) == str(cert_dir / "runtime-channel-server.key")
+assert match.group(4) == str(cert_dir / "runtime-client-ca.pem")
+assert match.group(5) == str(cert_dir / "runtime-client-ca.key")
 
 log = json.loads((root / "scraper/log-config.local.json").read_text())
 assert log["kafka"] == {
@@ -96,7 +132,9 @@ for path in "${generated[@]}"; do
   mkdir -p "${snapshot}/$(dirname -- "${path}")"
   cp "${fixture}/${path}" "${snapshot}/${path}"
 done
-HUSHINE_SOURCE_ROOT="${fixture}" "${GENERATOR}"
+HUSHINE_SOURCE_ROOT="${fixture}" \
+HUSHINE_LOCAL_CERT_DIR="${fixture}/local-certs" \
+  "${GENERATOR}"
 for path in "${generated[@]}"; do
   cmp "${snapshot}/${path}" "${fixture}/${path}"
 done

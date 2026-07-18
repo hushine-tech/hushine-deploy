@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+COMPOSE_FILE="${ROOT_DIR}/deploy/local/docker-compose.yml"
+
 PGHOST="${PGHOST:-127.0.0.1}"
 PGPORT="${PGPORT:-5432}"
 PGUSER="${PGUSER:-postgres}"
@@ -16,7 +19,7 @@ ready() {
     return $?
   fi
   if command -v docker >/dev/null 2>&1; then
-    docker compose -f deploy/local/docker-compose.yml exec -T timescaledb \
+    docker compose -f "$COMPOSE_FILE" exec -T timescaledb \
       pg_isready -U "$PGUSER" -d "$PGDATABASE_ADMIN" >/dev/null 2>&1
     return $?
   fi

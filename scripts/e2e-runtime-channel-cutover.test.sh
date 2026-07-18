@@ -19,6 +19,12 @@ required_literals=(
   "TIMESCALE_DB_PATTERN='binance_{year}'"
   'tests/strategies/test_multi_stream_full_flow.py'
   'Expected 440 merged bars (200 + 40 + 200)'
+  'TEMP_TOKEN=$(echo "$LOGIN_RESP" | jq -r '\''.token // empty'\'' 2>/dev/null || true)'
+  'LOCAL_NO_PROXY="127.0.0.1,localhost,::1"'
+  'export NO_PROXY="${LOCAL_NO_PROXY}${NO_PROXY:+,${NO_PROXY}}"'
+  'export no_proxy="${LOCAL_NO_PROXY}${no_proxy:+,${no_proxy}}"'
+  '"$ROOT/.e2e-build/core-service" -config /dev/null'
+  '"$ROOT/.e2e-build/quant-handler" -config /dev/null'
 )
 
 for literal in "${required_literals[@]}"; do

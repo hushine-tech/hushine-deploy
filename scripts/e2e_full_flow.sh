@@ -4,6 +4,10 @@
 # 用法: bash scripts/e2e_full_flow.sh
 set -euo pipefail
 
+LOCAL_NO_PROXY="127.0.0.1,localhost,::1"
+export NO_PROXY="${LOCAL_NO_PROXY}${NO_PROXY:+,${NO_PROXY}}"
+export no_proxy="${LOCAL_NO_PROXY}${no_proxy:+,${no_proxy}}"
+
 SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -d "${SCRIPT_ROOT}/strategy-service" ] && [ -d "${SCRIPT_ROOT}/core-service" ]; then
     ROOT="${SCRIPT_ROOT}"
@@ -108,14 +112,15 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -out "${CERT_DIR}/runtime-client-ca.pem" >>/tmp/e2e-runtime-certs.log 2>&1
 chmod 600 "${CERT_DIR}"/*.key
 
-# core-service
+# core-service. Keep tracked deployment logging/notification endpoints out of
+# this isolated harness; an empty YAML retains safe defaults and env overrides.
 cd "$ROOT/core-service"
 TIMESCALEDB_DSN="host=${DB_HOST} port=5432 user=postgres password=postgres dbname=${PORTFOLIO_DB_NAME} sslmode=disable" \
 ORDER_TIMESCALEDB_DSN="host=${DB_HOST} port=5432 user=postgres password=postgres dbname=${ORDER_DB_NAME} sslmode=disable" \
 MOCK_BINANCE=1 \
 HTTP_ADDR=":${CORE_HTTP}" \
 GRPC_ADDR=":${CORE_GRPC}" \
-"$ROOT/.e2e-build/core-service" > /tmp/e2e-core.log 2>&1 &
+"$ROOT/.e2e-build/core-service" -config /dev/null > /tmp/e2e-core.log 2>&1 &
 PIDS+=($!)
 echo "  core-service  PID=$! → HTTP:${CORE_HTTP} gRPC:${CORE_GRPC} (portfolio.v1 + order.v1)"
 
@@ -197,14 +202,14 @@ MARKET_DATA_DB_SSLMODE=disable \
 PIDS+=($!)
 echo "  control-panel    PID=$! → HTTP:${CP_HTTP} gRPC:${CP_GRPC} RuntimeChannel:${CP_RUNTIME_GRPC}"
 
-# quant-handler
+# quant-handler uses the same isolated default-config pattern.
 cd "$ROOT/gateway/quant-handler"
 CORE_SERVICE_GRPC_ADDR="127.0.0.1:${CORE_GRPC}" \
 CONTROL_PANEL_SERVICE_GRPC_ADDR="127.0.0.1:${CP_GRPC}" \
 QUANT_HANDLER_JWT_SECRET="${JWT_SECRET}" \
 HTTP_ADDR=":${HANDLER_HTTP}" \
 HANDLER_CORS_ORIGINS="http://localhost:5173" \
-"$ROOT/.e2e-build/quant-handler" > /tmp/e2e-handler.log 2>&1 &
+"$ROOT/.e2e-build/quant-handler" -config /dev/null > /tmp/e2e-handler.log 2>&1 &
 PIDS+=($!)
 echo "  quant-handler    PID=$! → HTTP:${HANDLER_HTTP}"
 
@@ -234,7 +239,7 @@ for i in $(seq 1 15); do
     LOGIN_RESP=$(curl -s -X POST "${API}/api/auth/login" \
         -H 'Content-Type: application/json' \
         -d "{\"username\":\"${LOGIN_USER}\",\"password\":\"${LOGIN_PASS}\"}")
-    TEMP_TOKEN=$(echo "$LOGIN_RESP" | jq -r '.token // empty')
+    TEMP_TOKEN=$(echo "$LOGIN_RESP" | jq -r '.token // empty' 2>/dev/null || true)
     PROBE=$(curl -s "${API}/api/portfolios" -H "Authorization: Bearer ${TEMP_TOKEN}" 2>/dev/null)
     if echo "$PROBE" | jq -e 'type == "array"' > /dev/null 2>&1; then
         pass "All services ready (gRPC verified)"
