@@ -1708,7 +1708,7 @@ git commit -m "test(spot): assert hosted replay parity"
 
 **Interfaces:**
 - Prerequisite: execute this task after the approved Python dependency-contract plan has added `strategy-debugger-cli/uv.lock`. Task 10 has now created the final Spot-plan strategy-library commit, so this task must repin the debugger's canonical HTTPS Git requirement and lock to that exact full SHA before GREEN. Every pre-push debugger lock/sync/run goes through `scripts/with-local-strategy-library-git.sh`; the transport-only bare mirror never appears in `pyproject.toml`, `uv.lock`, docs, or direct-url expectations. `strategy-library` intentionally has no lock and runs through an isolated `--no-project --with-editable '.[test]'` environment that leaves the repository clean.
-- Quant-handler takes `strategy_id`, `start_time_ms`, and `end_time_ms`; it loads the active strategy declaration server-side and does not trust caller-authored routes. Package v2 contains:
+- Quant-handler takes `strategy_id`, selected `runtime_id`, `start_time_ms`, and `end_time_ms`; it loads the active strategy source server-side, asks that exact Runtime to prepare the authoritative declarations in an isolated one-shot worker, and does not trust caller-authored routes. Package v2 contains:
 
 ```yaml
 schema_version: 2
@@ -1740,8 +1740,12 @@ wallet:
       locked: "0.00000000"
 ```
 
-- A package contains one Parquet file for every declared full stream identity `(stream_id, exchange, market, kind, symbol, interval)`, canonical wallet assets, exact metadata/filter strings for every Spot input/target, SHA-256 integrity entries, and no credential or endpoint. Duplicate stream IDs or duplicate full identities fail export/import; two identities that differ only by stream ID or kind remain distinct files/dispatch routes.
+- A package preserves the full six-field stream identity `(stream_id, exchange, market, kind, symbol, interval)` and contains one Parquet file for every supported declaration, canonical wallet assets, exact metadata/filter strings for every Spot input/target, SHA-256 integrity entries, and no credential or endpoint. Duplicate stream IDs or duplicate full identities fail export/import; identities that differ only by `stream_id` remain distinct files/dispatch routes. The current market-data producer and package-v2 Parquet contract support `kind=kline` only; every other kind fails closed at export and import until a real generic-data producer exists.
 - Import is offline-only: missing stream, metadata, wallet asset, hash, or unsupported schema fails before replay. Existing package v1 Futures imports remain read-compatible; all newly exported packages are v2.
+- Export and import share deterministic limits: at most 128 inputs, 128 order targets, 128 distinct required route-symbols, 2,000,000 aggregate bars, and 128 ASCII bytes per path component. Package v2 accepts only the exact K-line interval set `1s,5s,10s,30s,1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d`; start/end and every row are epoch-aligned, strictly increasing, contiguous, and cover the complete `[start_time_ms,end_time_ms)` range.
+- The importer rejects non-finite/non-positive OHLC, negative/non-finite volume, impossible high/low relationships, duplicate or unordered timestamps, gaps, partial ranges, oversized archive entries, and archives above the bounded total uncompressed size before creating a workspace. Before pandas decoding, it reads only the Parquet footer, requires each v2 file's physical row count to equal that stream's declared range count, requires the exact producer schema (`timestamp_ms:int64` plus five `float64` OHLCV columns), and never loads undeclared columns; v1 remains capped at the absolute aggregate-row limit and also projects only required columns. Manifest, strategy, wallet, Parquet, and total uncompressed byte limits are explicit and checked from ZIP metadata plus bounded reads.
+- The exporter applies the same finalized entry and aggregate byte limits, preserves the active strategy source byte-for-byte, and therefore cannot emit a package that the importer rejects merely because it appended a newline. K-lines are encoded in bounded batches, and stream payloads retain only the reference price plus finalized Parquet bytes rather than every fetched protobuf row.
+- Import validation mirrors producer-only facts: both generation timestamps are positive integers, Spot status is `TRADING`, reference-price source is `core_preflight_snapshot` or `replay_event_close`, symbols are 2-30 upper-case alphanumeric characters after normalization, and exact decimals use unsigned digits with an optional fractional part (no sign or exponent). Workspace Parquet names are derived from a stable index plus the full-identity hash rather than raw `stream_id`; import and replay share that mapping so case-distinct IDs and Windows device names remain semantically distinct and portable.
 - Before exporting any package containing a Spot route, quant-handler obtains core's effective capability snapshot and requires `offline_spot_usdt=true`; an unavailable discovery RPC fails closed. The package embeds the immutable Task 5 filter/reference-price facts and their schema/hash, never a capability override. Once legitimately exported, replay remains fully offline and does not phone home; disabling the flag prevents new exports/downloads while preserving already downloaded artifacts and Futures-v1 import compatibility.
 - Generate the debugger's `tests/fixtures/spot_filter_contract_v1.json` only with the Task 5 core generator. `test_spot_filter_contract.py` checks byte-identical SHA-256 against the core and strategy-library copies, evaluates every vector through the package-v2 replay path, asserts the exact stable code, and patches socket/HTTP constructors to fail on any network attempt.
 
@@ -1772,15 +1776,16 @@ def test_spot_package_v2_replays_with_network_disabled(monkeypatch, tmp_path):
     assert "BTCUSDT" not in result.wallet.assets
 ```
 
-Add default-disabled/offline-enabled/capability-RPC-unavailable export, tampered hash, absent Spot metadata/filter/reference facts, missing interval file, duplicate stream ID, duplicate full route, same route facts with distinct stream IDs, same symbol/interval with distinct kinds, undeclared data file, v1 Futures compatibility, same-symbol mixed-market, multi-symbol/multi-interval, golden filter parity, and package reproducibility cases.
+Add default-disabled/offline-enabled/capability-RPC-unavailable export, tampered hash, absent Spot metadata/filter/reference facts, missing interval file, duplicate stream ID, duplicate full route, same route facts with distinct stream IDs, fail-closed unsupported-kind export/import, undeclared data file, v1 Futures compatibility, same-symbol mixed-market, multi-symbol/multi-interval, golden filter parity, and package reproducibility cases.
 
 Run:
 
 ```bash
 cd /Users/xdy/Workplace/hushine-worktrees/medium-cleanup/gateway/quant-handler
 go test ./internal/app -run 'TestDebugPackageV2|TestDebugPackage.*Spot' -count=1
+cd /Users/xdy/Workplace/hushine-worktrees/medium-cleanup/core-service
+go run ./cmd/generate-spot-filter-vectors -out "/Users/xdy/Workplace/hushine-worktrees/medium-cleanup/strategy-debugger-cli/tests/fixtures/spot_filter_contract_v1.json"
 cd /Users/xdy/Workplace/hushine-worktrees/medium-cleanup/strategy-debugger-cli
-go run ../core-service/cmd/generate-spot-filter-vectors -out "$PWD/tests/fixtures/spot_filter_contract_v1.json"
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
   uv run --frozen --extra test pytest tests/test_import_package.py tests/test_replay_cli.py tests/test_spot_package_v2.py tests/test_mixed_route_package_v2.py tests/test_spot_filter_contract.py -q
 ```
@@ -1813,8 +1818,9 @@ The standalone test runs every currently released debugger minor satisfying `>=3
 cd /Users/xdy/Workplace/hushine-worktrees/medium-cleanup/gateway/quant-handler
 gofmt -w internal/app/debug_package.go internal/app/debug_package_parquet.go internal/app/debug_package_test.go internal/app/debugger.go internal/app/debugger_test.go
 go test ./internal/app -run 'TestDebugPackageV2|TestDebugPackage.*Spot|TestDebugger' -count=1
+cd /Users/xdy/Workplace/hushine-worktrees/medium-cleanup/core-service
+go run ./cmd/generate-spot-filter-vectors -check "/Users/xdy/Workplace/hushine-worktrees/medium-cleanup/strategy-debugger-cli/tests/fixtures/spot_filter_contract_v1.json"
 cd /Users/xdy/Workplace/hushine-worktrees/medium-cleanup/strategy-debugger-cli
-go run ../core-service/cmd/generate-spot-filter-vectors -check "$PWD/tests/fixtures/spot_filter_contract_v1.json"
 ./scripts/with-local-strategy-library-git.sh ../strategy-library \
   uv run --frozen --extra test pytest tests/ -q
 ```
@@ -1962,6 +1968,7 @@ git commit -m "feat(api): expose canonical spot routes and assets"
 - `SpotAsset` uses `{asset, free, locked, avg_entry_price?, price?}` strings. `SpotSymbolMetadata` exposes symbol/base/quote/status/order types/filters. UI never models `BTCUSDT` as an asset.
 - Spot Backtest venue editor always starts with an editable USDT asset row. Selecting a USDT symbol adds its metadata `base_asset`; it cannot add the symbol text or create duplicate assets.
 - Portfolio run and local-debug package controls derive routes from the selected active strategy. Spot and Futures can appear together; market labels and route keys remain distinct.
+- A debug-package request sends exactly `strategy_id`, selected `runtime_id`, `start_time_ms`, and `end_time_ms`; the UI never submits caller-authored input routes, order targets, wallet facts, credentials, or service endpoints.
 - Live Spot start controls are disabled with visible rollout text, but display/read-only venue data remains visible.
 - UI loads `/api/capabilities` and derives Backtest run, Demo run, offline package, and Live visibility from the exact effective flags. Missing/failed discovery renders every Spot action disabled; it never assumes support from a Venue's existence. Read-only history remains visible while a running disabled Session exposes only stop/drain actions. Futures controls ignore Spot flags.
 - Stop dialog presents two explicit actions. For Spot stop-and-close it lists declared target symbols and warns that all current `free` corresponding base-asset holdings at that venue, including pre-existing/manual holdings, will be sold; it also explains that any open order, locked amount, or unavoidable dust aborts the entire batch before orders.
