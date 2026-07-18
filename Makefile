@@ -103,7 +103,9 @@ clean:
 	@echo "✓ Clean done"
 
 local-infra-up:
-	@$(LOCAL_COMPOSE) up -d --build
+	@docker image inspect elk-kafka-es-bridge:latest >/dev/null 2>&1 || \
+		$(LOCAL_COMPOSE) build kafka-es-bridge
+	@$(LOCAL_COMPOSE) up -d --no-build
 
 local-infra-down:
 	@$(LOCAL_COMPOSE) down
