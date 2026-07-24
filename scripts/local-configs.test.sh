@@ -13,13 +13,27 @@ grep -Fq 'local-bootstrap: local-configs local-infra-up' "${DEPLOY_ROOT}/Makefil
 grep -Fq 'RUNTIME_COVERAGE_ENABLED=true' "${DEPLOY_ROOT}/Makefile"
 grep -Fq 'RUNTIME_COVERAGE_OUTPUT_DIR=' "${DEPLOY_ROOT}/Makefile"
 grep -Fq 'RUNTIME_COVERAGE_IMAGE=' "${DEPLOY_ROOT}/Makefile"
-grep -Fq 'build_strategy_runtime.sh --all "$${IMAGE_TAG:-dev}"' \
+grep -Fq 'build_strategy_runtime.sh --all --allow-dirty "$${IMAGE_TAG:-dev}"' \
   "${DEPLOY_ROOT}/Makefile"
 grep -Fq 'generate_runtime_channel_dev_certs.sh' "${DEPLOY_ROOT}/Makefile"
 grep -Fq 'COMPOSE_FILE="${ROOT_DIR}/deploy/local/docker-compose.yml"' \
   "${DEPLOY_ROOT}/scripts/wait-for-postgres.sh"
 grep -Fq 'docker compose -f "$COMPOSE_FILE" exec -T timescaledb' \
   "${DEPLOY_ROOT}/scripts/wait-for-postgres.sh"
+grep -Fq 'JAEGER_URL="${JAEGER_URL:-http://127.0.0.1:16686}"' \
+  "${DEPLOY_ROOT}/scripts/verify_tracing.sh"
+grep -Fq 'ES_URL="${ES_URL:-http://127.0.0.1:9200}"' \
+  "${DEPLOY_ROOT}/scripts/verify_tracing.sh"
+grep -Fq 'DB_HOST="${E2E_DB_HOST:-127.0.0.1}"' \
+  "${DEPLOY_ROOT}/scripts/e2e_full_flow.sh"
+grep -Fq 'build_strategy_runtime.sh" --allow-dirty dev' \
+  "${DEPLOY_ROOT}/scripts/e2e_full_flow.sh"
+if grep -En '192\.168\.88\.10' \
+  "${DEPLOY_ROOT}/scripts/verify_tracing.sh" \
+  "${DEPLOY_ROOT}/scripts/e2e_full_flow.sh"; then
+  echo "local verification scripts still default to shared infrastructure" >&2
+  exit 1
+fi
 
 make -C "${SOURCE_ROOT}" -f "${DEPLOY_ROOT}/Makefile" local-configs \
   LOCAL_RUNTIME_COVERAGE_IMAGE=hushine/strategy-runtime:test-coverage \
@@ -111,6 +125,10 @@ assert match.group(2) == str(cert_dir / "runtime-channel-server.pem")
 assert match.group(3) == str(cert_dir / "runtime-channel-server.key")
 assert match.group(4) == str(cert_dir / "runtime-client-ca.pem")
 assert match.group(5) == str(cert_dir / "runtime-client-ca.key")
+
+handler = (root / "gateway/quant-handler/config.local.yaml").read_text()
+assert '    - "http://localhost:5173"' in handler
+assert '    - "http://127.0.0.1:5173"' in handler
 
 log = json.loads((root / "scraper/log-config.local.json").read_text())
 assert log["kafka"] == {

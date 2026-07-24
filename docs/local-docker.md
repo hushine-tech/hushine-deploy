@@ -1,6 +1,6 @@
 # Local Docker Environment
 
-目标：把开发环境从默认共享依赖 `192.168.88.10` 切到本机 Docker，业务服务仍从源码本机运行。
+目标：在不依赖任何共享远端主机的情况下，用本机 Docker 提供基础设施，业务服务仍从源码本机运行。
 
 ## 组件
 
@@ -20,8 +20,9 @@ make local-start
 `runtime-image` 同时构建普通与 coverage runtime。`local-start` 会先执行
 `local-bootstrap`：从各服务的受跟踪配置确定性生成权限为 `0600` 的
 `config.local.yaml`，启动 Docker 基础设施、等待 TimescaleDB、创建数据库并应用
-migrations。生成器会把 DB/Kafka/Jaeger 切到本机，并关闭本地 RuntimeChannel TLS；
-不会向 runtime 注入 DB、Kafka、core-service 或 order.v1 地址。
+migrations。生成器会把 DB/Kafka/Jaeger 切到本机，生成本地 RuntimeChannel 开发
+证书并保持 mTLS 开启；不会向 runtime 注入 DB、Kafka、core-service 或 order.v1
+地址。
 
 本地 control-panel 默认开启 hosted runtime 覆盖率收集：
 
@@ -50,6 +51,24 @@ make local-infra-down
 ```bash
 USER_ID=<users.id> make smoke-hosted-runtime
 ```
+
+要同时验证 Hosted Runtime 生命周期、4 路声明输入以及 Go/Python 覆盖率最终落盘：
+
+```bash
+USER_ID=<users.id> \
+PORTFOLIO_ID=<portfolios.id> \
+EXPECTED_INPUT_COUNT=4 \
+COVERAGE_IMAGE=hushine/strategy-runtime:executor-coverage-dev \
+bash scripts/smoke_hosted_runtime_coverage.sh \
+  /absolute/path/to/.coverage/runtime-agent
+```
+
+该 smoke 默认精确要求 4 个 canonical 且互不重复的
+`exchange/market/kind/symbol/interval` 输入；若验收策略不是 4 路，必须显式设置
+`EXPECTED_INPUT_COUNT`。脚本的默认时间窗对应受控 2025 fixture；使用本机实时采集
+数据时还要显式传入共同有覆盖的 `START_TIME_MS` 与 `END_TIME_MS`。成功结束后必须
+看到 runtime `finalization.json` 为 `complete`、`forced_workers=0`，并生成
+`go.cover.out` 与非零 `python-coverage.json`。
 
 自定义 runtime 只走 RuntimeChannel，不需要也不应该拿到
 core-service / order.v1 / Kafka / 数据库地址：

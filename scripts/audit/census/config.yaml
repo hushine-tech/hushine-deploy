@@ -1,0 +1,90 @@
+observability:
+  required: true
+  elasticsearch_url: "http://127.0.0.1:9200"
+  jaeger_url: "http://127.0.0.1:16686"
+  es_index_patterns:
+    - "app-logs-*"
+  lookback_minutes: 1440
+
+output:
+  root: "census-runs"
+
+hosted_runtime_coverage:
+  stop_timeout_seconds: 10
+
+services:
+  - name: "core-service"
+    path: "core-service"
+    kind: "go-service"
+    cmd_package: "./cmd/core-service"
+    go_packages: "./..."
+    grpc_port: 50051
+    http_port: 8080
+  - name: "control-panel-service"
+    path: "control-panel-service"
+    kind: "go-service"
+    cmd_package: "./cmd/control-panel-service"
+    go_packages: "./..."
+    grpc_port: 50054
+    runtime_channel_port: 50055
+  - name: "quant-handler"
+    path: "gateway/quant-handler"
+    kind: "go-service"
+    cmd_package: "./cmd/quant-handler"
+    go_packages: "./..."
+    http_port: 8090
+  - name: "scraper"
+    path: "scraper"
+    kind: "go-service"
+    cmd_package: "./cmd/scraper"
+    go_packages: "./..."
+  - name: "runtime-agent"
+    path: "strategy-service"
+    kind: "go-service"
+    cmd_package: "./cmd/runtime-agent"
+    go_packages: "./..."
+  - name: "golang-lib"
+    path: "golang-lib"
+    kind: "go-library"
+    go_packages: "./..."
+  - name: "log-shipper"
+    path: "golang-lib/log-shipper"
+    kind: "go-library"
+    go_packages: "./..."
+  - name: "kafka-es-bridge"
+    path: "golang-lib/elk/kafka-es-bridge"
+    kind: "go-library"
+    go_packages: "./..."
+  - name: "session-worker"
+    path: "strategy-service"
+    kind: "python-library"
+    unit_command: "PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q"
+  - name: "strategy-library"
+    path: "strategy-library"
+    kind: "python-library"
+    unit_command: "uv run --isolated --no-project --with-editable '.[test]' pytest tests -q"
+  - name: "strategy-debugger-cli"
+    path: "strategy-debugger-cli"
+    kind: "python-cli"
+    unit_command: "uv run --frozen --extra test pytest tests -q"
+  - name: "py-log"
+    path: "golang-lib/py_log"
+    kind: "python-library"
+    unit_command: "uv run --isolated --no-project --with-editable '.[dev]' pytest log -q"
+  - name: "hushine-deploy-tooling"
+    path: "hushine-deploy"
+    kind: "python-tooling"
+    unit_command: "uv run --isolated --no-project --with-requirements scripts/audit/census/requirements.txt pytest scripts/audit/census/tests -q"
+  - name: "quant-frontend"
+    path: "gateway/quant-frontend"
+    kind: "frontend"
+    dev_url: "http://127.0.0.1:5173"
+
+protected_paths:
+  - "db/"
+  - "openspec/"
+  - "progress/"
+  - "**/migrations/"
+  - "**/proto/"
+  - "**/gen/"
+  - "**/tests/"

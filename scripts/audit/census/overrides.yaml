@@ -1,0 +1,14 @@
+classifications:
+  never_delete_by_coverage:
+    - path: "db/"
+      reason: "数据库迁移不能按覆盖率删除"
+    - path: "openspec/"
+      reason: "OpenSpec 是历史决策和变更依据"
+    - path: "progress/"
+      reason: "阶段记录需要人工归档后处理"
+    - path: "**/migrations/"
+      reason: "迁移文件是环境再现依据"
+    - path: "**/proto/"
+      reason: "proto 是跨服务契约"
+    - path: "**/gen/"
+      reason: "生成代码按来源契约治理"

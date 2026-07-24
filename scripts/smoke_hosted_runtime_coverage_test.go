@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -12,21 +13,30 @@ import (
 	"syscall"
 	"testing"
 
+	orderv1 "github.com/hushine-tech/core-service/gen/orderv1"
 	portfoliov1 "github.com/hushine-tech/core-service/gen/portfoliov1"
 	strategyv1 "github.com/hushine-tech/strategy-service/gen/strategyv1"
 )
 
-func TestPreviewReadyRequiresExactBacktestContract(t *testing.T) {
+func TestPreviewReadyRequiresValidBacktestContract(t *testing.T) {
 	ready := func() *strategyv1.PreviewRunStrategyResponse {
 		return &strategyv1.PreviewRunStrategyResponse{
-			Profile:        "backtest",
-			Supported:      true,
-			Ok:             true,
-			DeclaredInputs: []*strategyv1.LiveStreamBinding{{}},
+			Profile:   "backtest",
+			Supported: true,
+			Ok:        true,
+			DeclaredInputs: []*strategyv1.LiveStreamBinding{
+				{Exchange: "binance", Market: "perpetual_futures", Kind: "kline", Symbol: "BTCUSDT", Interval: "1m"},
+				{Exchange: "binance", Market: "perpetual_futures", Kind: "kline", Symbol: "BTCUSDT", Interval: "5m"},
+				{Exchange: "binance", Market: "perpetual_futures", Kind: "kline", Symbol: "ETHUSDT", Interval: "1m"},
+				{Exchange: "binance", Market: "spot", Kind: "kline", Symbol: "BTCUSDT", Interval: "1m"},
+			},
 		}
 	}
-	if !previewReady(ready()) {
-		t.Fatal("exact backtest preview must be accepted")
+	if !previewReady(ready(), 4) {
+		t.Fatal("four distinct canonical backtest inputs must be accepted")
+	}
+	if previewReady(ready(), 3) {
+		t.Fatal("unexpected declared input count must be rejected")
 	}
 	for _, tc := range []struct {
 		name   string
@@ -39,20 +49,183 @@ func TestPreviewReadyRequiresExactBacktestContract(t *testing.T) {
 			resp.Failures = []*strategyv1.PreflightFailureProto{{}}
 		}},
 		{name: "no input", mutate: func(resp *strategyv1.PreviewRunStrategyResponse) { resp.DeclaredInputs = nil }},
-		{name: "two inputs", mutate: func(resp *strategyv1.PreviewRunStrategyResponse) {
-			resp.DeclaredInputs = append(resp.DeclaredInputs, &strategyv1.LiveStreamBinding{})
+		{name: "empty canonical field", mutate: func(resp *strategyv1.PreviewRunStrategyResponse) {
+			resp.DeclaredInputs[0].Interval = ""
+		}},
+		{name: "duplicate canonical input", mutate: func(resp *strategyv1.PreviewRunStrategyResponse) {
+			resp.DeclaredInputs[1] = resp.DeclaredInputs[0]
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := ready()
 			tc.mutate(resp)
-			if previewReady(resp) {
+			if previewReady(resp, 4) {
 				t.Fatalf("previewReady accepted %+v", resp)
 			}
 		})
 	}
-	if previewReady(nil) {
+	if previewReady(nil, 0) {
 		t.Fatal("nil preview must be rejected")
+	}
+}
+
+func TestSpotPreviewReadyRequiresDemoMixedRouteContract(t *testing.T) {
+	ready := func() *strategyv1.PreviewRunStrategyResponse {
+		return &strategyv1.PreviewRunStrategyResponse{
+			Profile:   "demo",
+			Supported: true,
+			Ok:        true,
+			DeclaredInputs: []*strategyv1.LiveStreamBinding{
+				{Exchange: "binance", Market: "spot", Symbol: "BTCUSDT", Interval: "1m"},
+				{Exchange: "binance", Market: "spot", Symbol: "ETHUSDT", Interval: "5m"},
+				{Exchange: "binance", Market: "perpetual_futures", Symbol: "BTCUSDT", Interval: "1m"},
+			},
+			DeclaredOrderTargets: []*strategyv1.StrategyOrderTargetBinding{
+				{Exchange: "binance", Market: "spot", Symbol: "BTCUSDT"},
+				{Exchange: "binance", Market: "spot", Symbol: "ETHUSDT"},
+			},
+			RequiredRoutes: []*strategyv1.StrategyRouteBinding{
+				{Exchange: "binance", Market: "spot"},
+				{Exchange: "binance", Market: "perpetual_futures"},
+			},
+		}
+	}
+	if err := spotPreviewReady(ready()); err != nil {
+		t.Fatalf("exact Demo mixed-route preview rejected: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*strategyv1.PreviewRunStrategyResponse)
+	}{
+		{name: "wrong profile", mutate: func(resp *strategyv1.PreviewRunStrategyResponse) { resp.Profile = "backtest" }},
+		{name: "not ready", mutate: func(resp *strategyv1.PreviewRunStrategyResponse) { resp.Ok = false }},
+		{name: "missing ETH interval", mutate: func(resp *strategyv1.PreviewRunStrategyResponse) { resp.DeclaredInputs = resp.DeclaredInputs[:1] }},
+		{name: "missing Futures isolation route", mutate: func(resp *strategyv1.PreviewRunStrategyResponse) { resp.DeclaredInputs = resp.DeclaredInputs[:2] }},
+		{name: "Futures order target", mutate: func(resp *strategyv1.PreviewRunStrategyResponse) {
+			resp.DeclaredOrderTargets = append(resp.DeclaredOrderTargets, &strategyv1.StrategyOrderTargetBinding{Exchange: "binance", Market: "perpetual_futures", Symbol: "BTCUSDT"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := ready()
+			tc.mutate(resp)
+			if err := spotPreviewReady(resp); err == nil {
+				t.Fatalf("spotPreviewReady accepted %#v", resp)
+			}
+		})
+	}
+}
+
+func TestCompareSpotDemoFactsRequiresIndependentExactEvidence(t *testing.T) {
+	fixture := func() (spotDemoEvidence, []*orderv1.ExchangeOrderEntry, []*orderv1.OrderFillEntry, []*portfoliov1.ReconciliationRunEntry, spotDemoBaseline, spotDemoBaseline) {
+		evidence := spotDemoEvidence{
+			SchemaVersion: 1, Complete: true, UserID: 7, PortfolioID: 11, VenueID: 13, SessionID: "session-1",
+			Orders: []spotEvidenceOrder{
+				{Symbol: "BTCUSDT", Side: "BUY", Type: "MARKET", Status: "FILLED", OrderID: "9001", ClientOrderID: "client-btc", OrigQty: "0.00100000", ExecutedQty: "0.00100000", CumulativeQuoteQty: "50.00000000"},
+				{Symbol: "ETHUSDT", Side: "SELL", Type: "MARKET", Status: "FILLED", OrderID: "9002", ClientOrderID: "client-eth", OrigQty: "0.01000000", ExecutedQty: "0.01000000", CumulativeQuoteQty: "30.00000000"},
+			},
+			Trades: []spotEvidenceTrade{
+				{Symbol: "BTCUSDT", OrderID: "9001", TradeID: "7001", Qty: "0.00100000", Price: "50000.00000000", QuoteQty: "50.00000000", Commission: "0.00000100", CommissionAsset: "BTC"},
+				{Symbol: "ETHUSDT", OrderID: "9002", TradeID: "7002", Qty: "0.01000000", Price: "3000.00000000", QuoteQty: "30.00000000", Commission: "0.03000000", CommissionAsset: "USDT"},
+			},
+			Balances: []spotEvidenceBalance{
+				{Asset: "USDT", Free: "949.75000000", Locked: "0.00000000"},
+				{Asset: "BTC", Free: "0.00100000", Locked: "0.00000000"},
+				{Asset: "ETH", Free: "0.01000000", Locked: "0.00000000"},
+			},
+		}
+		orders := []*orderv1.ExchangeOrderEntry{
+			{ExchangeOrderId: "9001", ClientOrderId: "client-btc", Symbol: "BTCUSDT", Side: "BUY", Status: "FILLED", Environment: 1, Exchange: 1, Market: 1, VenueId: 13, OrigQtyDecimal: "0.001", ExecutedQtyDecimal: "0.001", CumulativeQuoteQtyDecimal: "50"},
+			{ExchangeOrderId: "9002", ClientOrderId: "client-eth", Symbol: "ETHUSDT", Side: "SELL", Status: "FILLED", Environment: 1, Exchange: 1, Market: 1, VenueId: 13, OrigQtyDecimal: "0.01", ExecutedQtyDecimal: "0.01", CumulativeQuoteQtyDecimal: "30"},
+		}
+		fills := []*orderv1.OrderFillEntry{
+			{ExchangeTradeId: "7001", ExchangeOrderId: "9001", Symbol: "BTCUSDT", Environment: 1, Exchange: 1, Market: 1, VenueId: 13, QtyDecimal: "0.001", FillPriceDecimal: "50000", QuoteQtyDecimal: "50", FeeDecimal: "0.000001", FeeAsset: "BTC"},
+			{ExchangeTradeId: "7002", ExchangeOrderId: "9002", Symbol: "ETHUSDT", Environment: 1, Exchange: 1, Market: 1, VenueId: 13, QtyDecimal: "0.01", FillPriceDecimal: "3000", QuoteQtyDecimal: "30", FeeDecimal: "0.03", FeeAsset: "USDT"},
+		}
+		snapshot := `{"spot":{"assets":[{"asset":"USDT","free":949.75,"locked":0,"free_decimal":"949.75000000","locked_decimal":"0.00000000"},{"asset":"BTC","free":0.001,"locked":0,"free_decimal":"0.00100000","locked_decimal":"0.00000000"},{"asset":"ETH","free":0.01,"locked":0,"free_decimal":"0.01000000","locked_decimal":"0.00000000"},{"asset":"BNB","free":1,"locked":0,"free_decimal":"1.00000000","locked_decimal":"0.00000000"}]}}`
+		reconciliation := []*portfoliov1.ReconciliationRunEntry{{
+			SessionId: "session-1", Environment: 1, HardPass: true,
+			LocalSnapshotJson: snapshot, ExchangeSnapshotJson: snapshot,
+		}}
+		baseline := spotDemoBaseline{
+			SchemaVersion: 1, PortfolioID: 11, VenueID: 13,
+			Futures: map[string]json.RawMessage{"14": json.RawMessage(`{"wallet_balance":1000}`)},
+			SpotAssets: map[string]spotBalanceFact{
+				"USDT": {Free: "1000", Locked: "0"}, "BTC": {Free: "0", Locked: "0"},
+				"ETH": {Free: "0.02", Locked: "0"}, "BNB": {Free: "1", Locked: "0"},
+			},
+		}
+		current := spotDemoBaseline{
+			SchemaVersion: 1, PortfolioID: 11, VenueID: 13,
+			Futures: map[string]json.RawMessage{"14": json.RawMessage(`{"wallet_balance":1000}`)},
+			SpotAssets: map[string]spotBalanceFact{
+				"USDT": {Free: "949.75", Locked: "0"}, "BTC": {Free: "0.001", Locked: "0"},
+				"ETH": {Free: "0.01", Locked: "0"}, "BNB": {Free: "1", Locked: "0"},
+			},
+		}
+		// BNB is undeclared and unchanged, but the final account evidence must
+		// still include it for exact account equality.
+		evidence.Balances = append(evidence.Balances, spotEvidenceBalance{Asset: "BNB", Free: "1.00000000", Locked: "0.00000000"})
+		return evidence, orders, fills, reconciliation, baseline, current
+	}
+
+	evidence, orders, fills, reconciliation, baseline, current := fixture()
+	if err := compareSpotDemoFacts(evidence, orders, fills, reconciliation, baseline, current); err != nil {
+		t.Fatalf("valid independent evidence rejected: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*spotDemoEvidence, []*orderv1.ExchangeOrderEntry, []*orderv1.OrderFillEntry, []*portfoliov1.ReconciliationRunEntry, *spotDemoBaseline)
+	}{
+		{name: "executed quantity", mutate: func(_ *spotDemoEvidence, orders []*orderv1.ExchangeOrderEntry, _ []*orderv1.OrderFillEntry, _ []*portfoliov1.ReconciliationRunEntry, _ *spotDemoBaseline) {
+			orders[0].ExecutedQtyDecimal = "0.002"
+		}},
+		{name: "cumulative quote quantity", mutate: func(_ *spotDemoEvidence, orders []*orderv1.ExchangeOrderEntry, _ []*orderv1.OrderFillEntry, _ []*portfoliov1.ReconciliationRunEntry, _ *spotDemoBaseline) {
+			orders[0].CumulativeQuoteQtyDecimal = "51"
+		}},
+		{name: "exchange trade ID", mutate: func(_ *spotDemoEvidence, _ []*orderv1.ExchangeOrderEntry, fills []*orderv1.OrderFillEntry, _ []*portfoliov1.ReconciliationRunEntry, _ *spotDemoBaseline) {
+			fills[0].ExchangeTradeId = "wrong"
+		}},
+		{name: "commission asset", mutate: func(_ *spotDemoEvidence, _ []*orderv1.ExchangeOrderEntry, fills []*orderv1.OrderFillEntry, _ []*portfoliov1.ReconciliationRunEntry, _ *spotDemoBaseline) {
+			fills[0].FeeAsset = "USDT"
+		}},
+		{name: "reconciliation hard pass", mutate: func(_ *spotDemoEvidence, _ []*orderv1.ExchangeOrderEntry, _ []*orderv1.OrderFillEntry, runs []*portfoliov1.ReconciliationRunEntry, _ *spotDemoBaseline) {
+			runs[0].HardPass = false
+		}},
+		{name: "undeclared asset", mutate: func(_ *spotDemoEvidence, _ []*orderv1.ExchangeOrderEntry, _ []*orderv1.OrderFillEntry, _ []*portfoliov1.ReconciliationRunEntry, current *spotDemoBaseline) {
+			current.SpotAssets["BNB"] = spotBalanceFact{Free: "2", Locked: "0"}
+		}},
+		{name: "Futures wallet", mutate: func(_ *spotDemoEvidence, _ []*orderv1.ExchangeOrderEntry, _ []*orderv1.OrderFillEntry, _ []*portfoliov1.ReconciliationRunEntry, current *spotDemoBaseline) {
+			current.Futures["14"] = json.RawMessage(`{"wallet_balance":999}`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evidence, orders, fills, reconciliation, baseline, current := fixture()
+			tc.mutate(&evidence, orders, fills, reconciliation, &current)
+			if err := compareSpotDemoFacts(evidence, orders, fills, reconciliation, baseline, current); err == nil {
+				t.Fatal("mismatch was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateSpotStopResponseSeparatesStopOnlyAndClose(t *testing.T) {
+	if err := validateSpotStopResponse("stop-only", &strategyv1.StopStrategyResponse{Stopped: true}); err != nil {
+		t.Fatalf("stop-only rejected: %v", err)
+	}
+	closeResponse := &strategyv1.StopStrategyResponse{
+		Stopped: true, OperationId: "op-1", ReconciliationRunId: "reconcile-1",
+		TargetResults: []*strategyv1.StopTargetResult{
+			{Exchange: 1, Market: 1, Symbol: "BTCUSDT", Status: "FILLED"},
+			{Exchange: 1, Market: 1, Symbol: "ETHUSDT", Status: "NO_BALANCE"},
+		},
+	}
+	if err := validateSpotStopResponse("stop-close", closeResponse); err != nil {
+		t.Fatalf("stop-close rejected: %v", err)
+	}
+	closeResponse.TargetResults[1].Market = 2
+	if err := validateSpotStopResponse("stop-close", closeResponse); err == nil {
+		t.Fatal("Futures target was accepted in Spot stop-close response")
 	}
 }
 

@@ -5,6 +5,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SCRIPT="${ROOT}/scripts/smoke_hosted_runtime_coverage.sh"
 HELPER="${ROOT}/scripts/smoke_hosted_runtime_coverage.go"
 HELPER_TEST="${ROOT}/scripts/smoke_hosted_runtime_coverage_test.go"
+COVERAGE_LIB="${ROOT}/scripts/lib/runtime_coverage.sh"
 
 fail() {
   echo "hosted runtime coverage smoke contract failed: $*" >&2
@@ -17,9 +18,15 @@ require_literal() {
   grep -Fq -- "${literal}" "${file}" || fail "missing ${literal} in $(basename "${file}")"
 }
 
+require_runtime_literal() {
+  local literal="$1"
+  grep -Fq -- "${literal}" "${SCRIPT}" "${COVERAGE_LIB}" \
+    || fail "missing shared runtime coverage contract: ${literal}"
+}
+
 forbid_literal() {
   local literal="$1"
-  if grep -Fq -- "${literal}" "${SCRIPT}" "${HELPER}"; then
+  if grep -Fq -- "${literal}" "${SCRIPT}" "${COVERAGE_LIB}" "${HELPER}"; then
     fail "unsafe or obsolete literal present: ${literal}"
   fi
 }
@@ -27,17 +34,33 @@ forbid_literal() {
 test -x "${SCRIPT}" || fail "smoke script is not executable"
 test -f "${HELPER}" || fail "Go helper is missing"
 test -f "${HELPER_TEST}" || fail "Go helper strict-status test is missing"
+test -f "${COVERAGE_LIB}" || fail "shared runtime coverage library is missing"
 bash -n "${SCRIPT}"
+bash -n "${COVERAGE_LIB}"
+require_literal "${SCRIPT}" 'source "${DEPLOY_ROOT}/scripts/lib/runtime_coverage.sh"'
+require_literal "${SCRIPT}" 'START_TIME_MS="${START_TIME_MS:-1735689600000}"'
+require_literal "${SCRIPT}" 'END_TIME_MS="${END_TIME_MS:-1735701600000}"'
+for literal in \
+  'runtime_coverage_prepare_output_root() {' \
+  'runtime_coverage_validate_layout() {' \
+  'runtime_coverage_container_owned() {' \
+  'runtime_coverage_reject_internal_env_names() {' \
+  'runtime_coverage_stage_locked_inputs() {' \
+  'runtime_coverage_require_finalization() {' \
+  'runtime_coverage_require_python_hits() {' \
+  'runtime_coverage_generate_reports() {'; do
+  require_literal "${COVERAGE_LIB}" "${literal}"
+done
 
 # Coverage identity, trusted mount, and canonical path containment.
 for literal in \
   'coverage_run_id' \
-  'EXPECTED_RUN_LABEL' \
+  'runtime_coverage_expected_run_label' \
   'runtime_id has unsafe characters' \
   '[[ ! -d "${directory}" || -L "${directory}" ]]' \
-  '[[ "${RUNTIME_ROOT}" != "${RUNTIMES_ROOT}/${RUNTIME_ID}" ]]' \
-  '"${MOUNT_SOURCE}" != "${RUNTIME_ROOT}"'; do
-  require_literal "${SCRIPT}" "${literal}"
+  '[[ "${runtime_root}" != "${runtimes_root}/${runtime_id}" ]]' \
+  '"${mount_source}" != "${runtime_root}"'; do
+  require_runtime_literal "${literal}"
 done
 
 # Fallback cleanup is allowed only for the exact labeled image/runtime/user.
@@ -46,11 +69,11 @@ for literal in \
   'hushine.runtime.runtime_id' \
   'hushine.runtime.user_id' \
   'hushine.runtime.coverage' \
-  '"${image_id}" == "${IMAGE_ID}"' \
+  '"${actual_image}" == "${image_id}"' \
   'refusing fallback cleanup: container ownership labels do not match smoke runtime' \
   'docker stop --time 10' \
   'docker rm -f'; do
-  require_literal "${SCRIPT}" "${literal}"
+  require_runtime_literal "${literal}"
 done
 
 # EXIT cleanup reconciles sessions that may exist even when RunStrategy's
@@ -78,9 +101,11 @@ done
 # Preview, active-session rejection, worker recreation, and final runtime state
 # are semantic assertions rather than RPC-success-only checks.
 for literal in \
-  '!previewReady(resp)' \
-  'resp.GetProfile() == "backtest"' \
-  'len(resp.GetDeclaredInputs()) == 1' \
+  '!previewReady(resp, *expectedInputCount)' \
+  'resp.GetProfile() != "backtest"' \
+  'expectedInputCount > 0 && len(resp.GetDeclaredInputs()) != expectedInputCount' \
+  'strings.ToLower(strings.TrimSpace(input.GetMarket()))' \
+  'if _, duplicate := seen[key]; duplicate' \
   'grpcStatus.Code() != codes.AlreadyExists' \
   'end_runtime_active_session=blocked code=AlreadyExists' \
   'StopAction_STOP_ACTION_STOP_ONLY' \
@@ -93,17 +118,19 @@ for literal in \
   require_literal "${HELPER}" "${literal}"
 done
 require_literal "${SCRIPT}" '"${SESSION_TWO_ID}" == "${SESSION_ONE_ID}"'
+require_literal "${SCRIPT}" '-expected-input-count "${EXPECTED_INPUT_COUNT}"'
+require_literal "${SCRIPT}" 'EXPECTED_INPUT_COUNT="${EXPECTED_INPUT_COUNT:-4}"'
 
 # The finalization marker must attest one complete boot with no forced worker,
 # and graceful lifecycle facts must occur in exact order.
 for literal in \
-  'FINALIZATION_FILE="${RUNTIME_ROOT}/finalization.json"' \
+  'finalization_file="${runtime_root}/finalization.json"' \
   '.schema_version == 1' \
   '.state == "complete"' \
   '.worker_shutdown == "ok"' \
   '.forced_workers == 0' \
   '.go_snapshot == "ok"'; do
-  require_literal "${SCRIPT}" "${literal}"
+  require_runtime_literal "${literal}"
 done
 for literal in \
   'EVENT_UNTIL="$(( $(date +%s) + 2 ))"' \
@@ -113,6 +140,7 @@ for literal in \
 done
 
 fixture_dir="$(mktemp -d)"
+fixture_dir="$(cd -- "${fixture_dir}" && pwd -P)"
 ordered_events="${fixture_dir}/ordered.jsonl"
 unordered_events="${fixture_dir}/unordered.jsonl"
 cat >"${ordered_events}" <<'EOF'
@@ -163,19 +191,38 @@ if jq -e "${finalization_query}" "${forced_finalization}" >/dev/null; then
   fail "forced finalization fixture was accepted"
 fi
 
+nonzero_python_coverage="${fixture_dir}/nonzero-python-coverage.json"
+zero_python_coverage="${fixture_dir}/zero-python-coverage.json"
+printf '%s\n' '{"totals":{"covered_lines":1}}' >"${nonzero_python_coverage}"
+printf '%s\n' '{"totals":{"covered_lines":0}}' >"${zero_python_coverage}"
+source "${COVERAGE_LIB}"
+runtime_coverage_require_python_hits "${nonzero_python_coverage}" \
+  || fail "nonzero Python coverage was rejected"
+if runtime_coverage_require_python_hits "${zero_python_coverage}"; then
+  fail "zero-hit Python coverage was accepted"
+fi
+
+safe_runtime_env_names=$'GOCOVERDIR\nHUSHINE_RUNTIME_COVERAGE_DIR\nRUNTIME_CHANNEL_GRPC_ADDR\nRUNTIME_CREDENTIAL_JSON\nRUNTIME_CHANNEL_TLS_BUNDLE_JSON'
+unsafe_runtime_env_names=$'RUNTIME_CHANNEL_GRPC_ADDR\nKAFKA_BROKERS\nDATABASE_PASSWORD\nORDER_SERVICE_GRPC_ADDR\nEXCHANGE_API_SECRET'
+runtime_coverage_reject_internal_env_names "${safe_runtime_env_names}" \
+  || fail "safe RuntimeChannel-only environment names were rejected"
+if runtime_coverage_reject_internal_env_names "${unsafe_runtime_env_names}"; then
+  fail "internal service or exchange secret environment names were accepted"
+fi
+
 # The container mount is treated as untrusted raw input after exit. Reports and
 # combined Python input live in a host-only 0700 sibling tree, and the Go helper
 # performs recursive special-file rejection plus identity-stable shard copies.
 for literal in \
-  'REPORT_ROOT="${OUTPUT_ROOT}/smoke-reports/${RUNTIME_ID}"' \
+  'report_root="${output_root}/smoke-reports/${runtime_id}"' \
   '-action stage-coverage' \
-  '-output-root "${OUTPUT_ROOT}"' \
-  '-runtime-root "${RUNTIME_ROOT}"' \
-  '-report-root "${REPORT_ROOT}"' \
-  'PYTHON_INPUT_DIR="${REPORT_ROOT}/python-input"' \
-  'COVERAGE_FILE="${PYTHON_INPUT_DIR}/.coverage"' \
-  'uv run --frozen --extra coverage coverage combine --keep "${PYTHON_INPUT_DIR}"'; do
-  require_literal "${SCRIPT}" "${literal}"
+  '-output-root "${output_root}"' \
+  '-runtime-root "${runtime_root}"' \
+  '-report-root "${report_root}"' \
+  'RUNTIME_COVERAGE_PYTHON_INPUT_DIR="${report_root}/python-input"' \
+  'COVERAGE_FILE="${python_input_dir}/.coverage"' \
+  'uv run --frozen --extra coverage coverage combine --keep "${python_input_dir}"'; do
+  require_runtime_literal "${literal}"
 done
 for literal in \
   'stageRuntimeCoverage' \

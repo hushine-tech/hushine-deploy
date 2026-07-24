@@ -1170,4 +1170,82 @@ ON CONFLICT (plan_code) DO UPDATE SET
     custom_rate_limit_burst = EXCLUDED.custom_rate_limit_burst,
     updated_at = NOW();
 INSERT INTO schema_migrations (filename) VALUES ('0001_current_schema_baseline.sql') ON CONFLICT (filename) DO NOTHING;
+
+-- Source: core-service/internal/storage/migrations/0002_spot_risk_facts.sql
+CREATE TABLE IF NOT EXISTS spot_session_risk_facts (
+    snapshot_id text PRIMARY KEY,
+    session_id text NOT NULL,
+    portfolio_id bigint NOT NULL,
+    venue_id bigint NOT NULL,
+    user_id bigint NOT NULL,
+    exchange smallint NOT NULL,
+    environment smallint NOT NULL,
+    market smallint NOT NULL,
+    symbol text NOT NULL,
+    captured_at timestamp with time zone NOT NULL,
+    facts_json jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_spot_session_risk_facts_environment CHECK (environment = ANY (ARRAY[0, 1, 2])),
+    CONSTRAINT chk_spot_session_risk_facts_market CHECK (market = 1),
+    CONSTRAINT uq_spot_session_risk_facts_route UNIQUE (session_id, venue_id, exchange, market, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_spot_session_risk_facts_session
+    ON spot_session_risk_facts (session_id, user_id, captured_at DESC);
+INSERT INTO schema_migrations (filename) VALUES ('0002_spot_risk_facts.sql') ON CONFLICT (filename) DO NOTHING;
+
+-- Source: core-service/internal/storage/migrations/0003_spot_reconciliation_repair.sql
+ALTER TABLE reconciliation_runs
+    ADD COLUMN IF NOT EXISTS repair_source text DEFAULT ''::text NOT NULL,
+    ADD COLUMN IF NOT EXISTS repair_status text DEFAULT 'compare_only'::text NOT NULL,
+    ADD COLUMN IF NOT EXISTS repaired_identities_json jsonb DEFAULT '[]'::jsonb NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_run_id
+    ON reconciliation_runs (run_id, "time" DESC);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'reconciliation_runs'::regclass
+          AND conname = 'chk_reconciliation_runs_repair_source'
+    ) THEN
+        ALTER TABLE reconciliation_runs
+            ADD CONSTRAINT chk_reconciliation_runs_repair_source
+            CHECK (repair_source IN ('', 'user_stream_reconnect', 'order_event', 'periodic', 'accepted_timeout', 'stop_close'))
+            NOT VALID;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'reconciliation_runs'::regclass
+          AND conname = 'chk_reconciliation_runs_repair_status'
+    ) THEN
+        ALTER TABLE reconciliation_runs
+            ADD CONSTRAINT chk_reconciliation_runs_repair_status
+            CHECK (repair_status IN ('compare_only', 'succeeded', 'failed'))
+            NOT VALID;
+    END IF;
+END
+$$;
+INSERT INTO schema_migrations (filename) VALUES ('0003_spot_reconciliation_repair.sql') ON CONFLICT (filename) DO NOTHING;
+
+-- Source: core-service/internal/storage/migrations/0004_spot_close_reconciliation_pending.sql
+-- Spot close must persist a reconciliation tombstone before returning a
+-- failure response. Keep the historical terminal rows and add a pending state
+-- without changing the 0001 baseline.
+
+ALTER TABLE reconciliation_runs
+    DROP CONSTRAINT IF EXISTS chk_reconciliation_runs_repair_status;
+
+ALTER TABLE reconciliation_runs
+    ADD CONSTRAINT chk_reconciliation_runs_repair_status
+    CHECK (repair_status IN ('compare_only', 'pending', 'succeeded', 'failed'))
+    NOT VALID;
+
+CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_pending_run_id
+    ON reconciliation_runs (run_id, "time" DESC)
+    WHERE repair_status = 'pending';
+INSERT INTO schema_migrations (filename) VALUES ('0004_spot_close_reconciliation_pending.sql') ON CONFLICT (filename) DO NOTHING;
 COMMIT;

@@ -17,7 +17,7 @@ else
     ROOT="${SCRIPT_ROOT}"
 fi
 PYTHON="${PYTHON:-/opt/anaconda3/bin/python3}"
-DB_HOST="${E2E_DB_HOST:-192.168.88.10}"
+DB_HOST="${E2E_DB_HOST:-127.0.0.1}"
 PORTFOLIO_DB_NAME="${E2E_PORTFOLIO_DB:-portfolio}"
 ORDER_DB_NAME="${E2E_ORDER_DB:-order}"
 TIMESCALE_DB_PATTERN="${E2E_TIMESCALE_DB_PATTERN:-}"
@@ -370,7 +370,8 @@ fi
 # Step 7: Ensure hosted runtime + run backtest
 # ══════════════════════════════════════════════════════════════════════════════
 info "Step 7: Ensure hosted runtime"
-bash "$ROOT/strategy-service/scripts/build_strategy_runtime.sh" dev >/tmp/e2e-runtime-image.log 2>&1
+bash "$ROOT/strategy-service/scripts/build_strategy_runtime.sh" --allow-dirty dev \
+    >/tmp/e2e-runtime-image.log 2>&1
 cd "$ROOT/control-panel-service"
 set +e
 RUNTIME_RESP=$(go run scripts/smoke_ensure_runtime.go \

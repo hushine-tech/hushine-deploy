@@ -1,5 +1,7 @@
 # 生产部署 Checklist
 
+最后核验：2026-07-23。
+
 本文档用于从 GitHub 多仓库重新部署 Hushine。目标是让部署步骤可重复、可回滚，并在上线前明确验证数据库、Kafka、ELK、Jaeger、runtime 和核心交易链路。
 
 ## 1. 代码拉取
@@ -25,14 +27,17 @@ git clone git@github.com:hushine-tech/golang-lib.git golang-lib
 
 生产或共享开发环境至少需要以下组件可达：
 
-| 组件 | 默认地址 | 验收命令 |
+| 组件 | 示例地址 | 验收命令 |
 |---|---|---|
-| TimescaleDB/PostgreSQL | `192.168.88.10:5432` | `pg_isready -h 192.168.88.10 -p 5432 -U postgres` |
-| Kafka | `192.168.88.10:19092` | `kafka-broker-api-versions --bootstrap-server 192.168.88.10:19092` |
-| Elasticsearch | `http://192.168.88.10:9200` | `curl -fsS http://192.168.88.10:9200` |
-| Kibana | `http://192.168.88.10:5601` | `curl -fsS http://192.168.88.10:5601/api/status` |
-| Jaeger | `http://192.168.88.10:16686` | `curl -fsS http://192.168.88.10:16686/api/services` |
-| OTLP HTTP | `http://192.168.88.10:4318` | 通过 `scripts/verify_tracing.sh` 验证 |
+| TimescaleDB/PostgreSQL | `${INFRA_HOST}:5432` | `pg_isready -h "$INFRA_HOST" -p 5432 -U "$PGUSER"` |
+| Kafka | `${INFRA_HOST}:19092` | `kafka-broker-api-versions --bootstrap-server "$INFRA_HOST:19092"` |
+| Elasticsearch | `http://${INFRA_HOST}:9200` | `curl -fsS "http://$INFRA_HOST:9200"` |
+| Kibana | `http://${INFRA_HOST}:5601` | `curl -fsS "http://$INFRA_HOST:5601/api/status"` |
+| Jaeger | `http://${INFRA_HOST}:16686` | `curl -fsS "http://$INFRA_HOST:16686/api/services"` |
+| OTLP HTTP | `http://${INFRA_HOST}:4318` | 通过 `scripts/verify_tracing.sh` 验证 |
+
+不要把曾经的共享开发机 `192.168.88.10` 当成部署前提；当前无法访问该机器时，
+必须使用下面的本机隔离栈，并让所有生成的 `config.local.yaml` 指向本机。
 
 如果使用本机隔离环境：
 
@@ -103,10 +108,13 @@ make ensure-dbs
 
 成功标准：
 
-- `portfolio` migrations 全部 applied/skipped
-- `order` migrations 全部 applied/skipped
-- `control_panel` migrations 全部 applied/skipped
-- `binance_YYYY` / `okx_YYYY` 或指定年库 migrations 全部 applied/skipped
+- `portfolio` 依次应用 `0000..0004`，ledger 共 5 条
+- `order` 依次应用 `0000..0003`，ledger 共 4 条
+- `control_panel` 依次应用 `0000..0001`，ledger 共 2 条
+- 每个 `binance_YYYY` / `okx_YYYY` 年库应用 `0001`，ledger 共 1 条
+- 对同一空库连续执行两次，第二次全部 skipped，schema 和 ledger hash 不变
+- Spot repair/close、exact decimal、runtime dependency admission 和 indicator chunk
+  相关新增表、约束、索引均存在；已有业务行和 identity/sequence 不被重置
 
 数据库清单见 [db/README.md](../db/README.md)。
 
@@ -197,12 +205,48 @@ bash scripts/e2e_full_flow.sh
 - `strategy_id` / `portfolio_id` / `user_id` / `session_id` 归属正确
 - `portfolio_snapshots` 写入成功
 
+### 6.4 Binance Spot USDT 分层门禁
+
+Spot 的四个能力由 core-service 单独控制，默认全部关闭：
+
+```yaml
+product_capabilities:
+  spot_usdt:
+    backtest_spot_usdt: false
+    demo_spot_usdt: false
+    offline_spot_usdt: false
+    live_spot_usdt: false
+```
+
+等价环境变量是 `BACKTEST_SPOT_USDT_ENABLED`、`DEMO_SPOT_USDT_ENABLED`、
+`OFFLINE_SPOT_USDT_ENABLED`、`LIVE_SPOT_USDT_ENABLED`。一次只打开已通过验收的
+能力；即使配置 Live 为 true，当前实现仍必须以 `SPOT_LIVE_ROLLOUT_GUARD`
+fail closed。能力发现失败时，handler/frontend 不得猜测为可用。
+
+不带真实凭据的本地契约验收：
+
+```bash
+bash scripts/verify_spot_usdt.sh all-local
+bash scripts/smoke_spot_demo.test.sh
+bash scripts/acceptance/observe_spot_demo.test.sh
+```
+
+真实 Demo 验收只能使用 run-owned Venue 和继承的 credential FD；key/secret 不得
+出现在环境变量、argv、日志、coverage 或 evidence。完整操作见
+[`spot-usdt.md`](spot-usdt.md) 和
+[`acceptance/2026-07-14-binance-spot-demo.md`](acceptance/2026-07-14-binance-spot-demo.md)。
+
+浏览器验收至少覆盖：Spot Venue 绑定、钱包 asset 展示、Backtest、Demo、Local
+Debug package v2、订单 exact decimal、stop-only、stop-and-close、reconciliation、
+Live guard；还要覆盖 Futures 正常回归、同币种多 interval、不同币种以及
+Spot/Futures 混合输入。只跑 shell/proto 测试不能替代真实页面验收。
+
 ## 7. Tracing / ELK 验收
 
 ```bash
 HANDLER_URL=http://127.0.0.1:8090 \
-JAEGER_URL=http://192.168.88.10:16686 \
-ES_URL=http://192.168.88.10:9200 \
+JAEGER_URL=http://127.0.0.1:16686 \
+ES_URL=http://127.0.0.1:9200 \
 bash scripts/verify_tracing.sh
 ```
 

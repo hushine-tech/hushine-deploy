@@ -11,8 +11,9 @@
 # strategy-service/scripts/seed_test_strategies.py + bootstrap docs).
 #
 # Env vars:
-#   HANDLER_URL       default http://localhost:8090
-#   JAEGER_URL        default http://192.168.88.10:16686
+#   HANDLER_URL       default http://127.0.0.1:8090
+#   JAEGER_URL        default http://127.0.0.1:16686
+#   ES_URL            default http://127.0.0.1:9200
 #   EXPECT_SERVICES   default "quant-handler,core-service"
 #                     (with RUN_E2E=1, set to
 #                      "quant-handler,core-service,strategy-service")
@@ -21,8 +22,8 @@
 
 set -euo pipefail
 
-HANDLER_URL="${HANDLER_URL:-http://localhost:8090}"
-JAEGER_URL="${JAEGER_URL:-http://192.168.88.10:16686}"
+HANDLER_URL="${HANDLER_URL:-http://127.0.0.1:8090}"
+JAEGER_URL="${JAEGER_URL:-http://127.0.0.1:16686}"
 EXPECT_SERVICES="${EXPECT_SERVICES:-quant-handler,core-service}"
 RUN_E2E="${RUN_E2E:-0}"
 SLEEP_AFTER_FIRE="${SLEEP_AFTER_FIRE:-7}"
@@ -126,7 +127,7 @@ fi
 
 # ── 5. Confirm trace_id shows up in ES app-logs ─────────────────────────────
 
-ES_URL="${ES_URL:-http://192.168.88.10:9200}"
+ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 info "confirming trace_id=$TRACE_ID appears in ES app-logs-*"
 ES_HITS=$(curl -fsS -H 'Content-Type: application/json' \
     "$ES_URL/app-logs-*/_count" \

@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hushine.tech/schemas/spot-demo-evidence-v1.json",
+  "title": "Hushine Binance Spot Demo exchange evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "complete",
+    "run_id",
+    "user_id",
+    "portfolio_id",
+    "venue_id",
+    "session_id",
+    "capture_started_at",
+    "capture_completed_at",
+    "subscription",
+    "orders",
+    "trades",
+    "balances",
+    "requested_endpoints",
+    "canonical_payload_sha256"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "complete": { "const": true },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "user_id": { "type": "integer", "minimum": 1 },
+    "portfolio_id": { "type": "integer", "minimum": 1 },
+    "venue_id": { "type": "integer", "minimum": 1 },
+    "session_id": { "type": "string", "minLength": 1 },
+    "capture_started_at": { "type": "string", "format": "date-time" },
+    "capture_completed_at": { "type": "string", "format": "date-time" },
+    "subscription": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "subscription_id", "status"],
+      "properties": {
+        "request_id": { "type": "string", "minLength": 1 },
+        "subscription_id": { "type": "string", "minLength": 1 },
+        "status": { "const": "acknowledged" }
+      }
+    },
+    "orders": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["symbol", "side", "type", "status", "orderId", "clientOrderId", "origQty", "executedQty", "cummulativeQuoteQty"],
+        "properties": {
+          "symbol": { "type": "string", "minLength": 1 },
+          "side": { "enum": ["BUY", "SELL"] },
+          "type": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "minLength": 1 },
+          "orderId": { "type": "string", "minLength": 1 },
+          "clientOrderId": { "type": "string", "minLength": 1 },
+          "origQty": { "$ref": "#/$defs/decimal" },
+          "executedQty": { "$ref": "#/$defs/decimal" },
+          "cummulativeQuoteQty": { "$ref": "#/$defs/decimal" }
+        }
+      }
+    },
+    "trades": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["symbol", "orderId", "id", "qty", "price", "quoteQty", "commission", "commissionAsset", "time"],
+        "properties": {
+          "symbol": { "type": "string", "minLength": 1 },
+          "orderId": { "type": "string", "minLength": 1 },
+          "id": { "type": "string", "minLength": 1 },
+          "qty": { "$ref": "#/$defs/decimal" },
+          "price": { "$ref": "#/$defs/decimal" },
+          "quoteQty": { "$ref": "#/$defs/decimal" },
+          "commission": { "$ref": "#/$defs/decimal" },
+          "commissionAsset": { "type": "string", "minLength": 1 },
+          "time": { "type": "string", "pattern": "^[0-9]+$" }
+        }
+      }
+    },
+    "balances": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["asset", "free", "locked"],
+        "properties": {
+          "asset": { "type": "string", "minLength": 1 },
+          "free": { "$ref": "#/$defs/decimal" },
+          "locked": { "$ref": "#/$defs/decimal" }
+        }
+      }
+    },
+    "requested_endpoints": {
+      "type": "array",
+      "minItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "status"],
+        "properties": {
+          "path": { "type": "string", "pattern": "^/[^?]*$" },
+          "status": { "type": "integer", "minimum": 100, "maximum": 599 }
+        }
+      }
+    },
+    "canonical_payload_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  },
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$" }
+  }
+}

@@ -82,3 +82,13 @@ if ! grep -Fq 'go run scripts/smoke_ensure_runtime.go' scripts/smoke_d3_hosted_r
   echo "hosted runtime smoke no longer calls smoke_ensure_runtime.go" >&2
   exit 1
 fi
+
+for literal in \
+  'build_args=()' \
+  'build_args+=(--allow-dirty)' \
+  '"${build_args[@]}" "${IMAGE_TAG}"'; do
+  if ! grep -Fq -- "$literal" scripts/smoke_d3_hosted_runtime.sh; then
+    echo "hosted runtime dev smoke does not preserve dirty-source provenance: $literal" >&2
+    exit 1
+  fi
+done

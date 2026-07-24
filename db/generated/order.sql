@@ -537,4 +537,244 @@ SELECT create_hypertable(
     if_not_exists => TRUE
 );
 INSERT INTO schema_migrations (filename) VALUES ('0001_current_schema_baseline.sql') ON CONFLICT (filename) DO NOTHING;
+
+-- Source: core-service/internal/order/storage/migrations/0002_spot_order_route_identity.sql
+-- Add lossless Spot execution facts and route-qualified idempotency without
+-- rewriting the deployed 0001 baseline. The migration runner executes this
+-- body and its schema_migrations ledger insert in one transaction.
+
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS cumulative_quote_qty numeric(38,18);
+
+ALTER TABLE order_fills
+    ADD COLUMN IF NOT EXISTS quote_qty numeric(38,18),
+    ADD COLUMN IF NOT EXISTS quote_qty_unresolved boolean DEFAULT false NOT NULL;
+
+UPDATE order_fills
+SET quote_qty = qty * fill_price,
+    quote_qty_unresolved = false
+WHERE quote_qty IS NULL
+  AND qty IS NOT NULL
+  AND fill_price IS NOT NULL;
+
+UPDATE order_fills
+SET quote_qty_unresolved = true
+WHERE quote_qty IS NULL;
+
+UPDATE orders AS o
+SET cumulative_quote_qty = totals.quote_qty
+FROM (
+    SELECT order_id, SUM(quote_qty) AS quote_qty
+    FROM order_fills
+    WHERE quote_qty IS NOT NULL
+    GROUP BY order_id
+) AS totals
+WHERE o.order_id = totals.order_id
+  AND o.cumulative_quote_qty IS NULL;
+
+ALTER TABLE order_lifecycle_events
+    ADD COLUMN IF NOT EXISTS symbol text;
+
+UPDATE order_lifecycle_events AS event
+SET symbol = COALESCE(
+    NULLIF(BTRIM(event.fill_delta_json ->> 'symbol'), ''),
+    NULLIF(BTRIM(event.order_state_json ->> 'symbol'), ''),
+    (
+        SELECT NULLIF(BTRIM(intent.symbol), '')
+        FROM order_intents AS intent
+        WHERE intent.intent_id = event.intent_id
+        LIMIT 1
+    ),
+    (
+        SELECT NULLIF(BTRIM(intent.symbol), '')
+        FROM orders AS linked_order
+        JOIN order_intents AS intent ON intent.intent_id = linked_order.intent_id
+        WHERE linked_order.order_id = event.order_id
+        LIMIT 1
+    )
+)
+WHERE event.symbol IS NULL OR BTRIM(event.symbol) = '';
+
+DO $migration$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = to_regclass('order_lifecycle_events')
+          AND conname = 'chk_order_lifecycle_events_new_symbol'
+    ) THEN
+        ALTER TABLE order_lifecycle_events
+            ADD CONSTRAINT chk_order_lifecycle_events_new_symbol
+            CHECK (symbol IS NOT NULL AND BTRIM(symbol) <> '') NOT VALID;
+    END IF;
+END
+$migration$;
+
+CREATE TABLE IF NOT EXISTS order_fill_identities (
+    venue_id bigint NOT NULL,
+    exchange smallint NOT NULL,
+    market smallint NOT NULL,
+    symbol text NOT NULL,
+    exchange_order_id text NOT NULL,
+    exchange_trade_id text NOT NULL,
+    fill_id text NOT NULL,
+    order_id text NOT NULL,
+    first_seen_at timestamp with time zone NOT NULL DEFAULT NOW(),
+    last_seen_at timestamp with time zone NOT NULL DEFAULT NOW(),
+    CONSTRAINT order_fill_identities_pkey PRIMARY KEY (
+        venue_id, exchange, market, symbol, exchange_order_id, exchange_trade_id
+    ),
+    CONSTRAINT chk_order_fill_identities_symbol CHECK (BTRIM(symbol) <> ''),
+    CONSTRAINT chk_order_fill_identities_order CHECK (BTRIM(exchange_order_id) <> ''),
+    CONSTRAINT chk_order_fill_identities_trade CHECK (BTRIM(exchange_trade_id) <> '')
+);
+
+INSERT INTO order_fill_identities (
+    venue_id, exchange, market, symbol, exchange_order_id, exchange_trade_id,
+    fill_id, order_id, first_seen_at, last_seen_at
+)
+SELECT intent.venue_id, intent.exchange, intent.market, UPPER(intent.symbol),
+       fill.exchange_order_id, fill.exchange_trade_id,
+       fill.fill_id, fill.order_id, fill.time, fill.time
+FROM order_fills AS fill
+JOIN orders AS linked_order ON linked_order.order_id = fill.order_id
+JOIN order_intents AS intent ON intent.intent_id = linked_order.intent_id
+WHERE fill.exchange_order_id IS NOT NULL
+  AND BTRIM(fill.exchange_order_id) <> ''
+  AND fill.exchange_trade_id IS NOT NULL
+  AND BTRIM(fill.exchange_trade_id) <> ''
+  AND BTRIM(intent.symbol) <> ''
+ON CONFLICT (venue_id, exchange, market, symbol, exchange_order_id, exchange_trade_id)
+DO UPDATE SET
+    fill_id = EXCLUDED.fill_id,
+    order_id = EXCLUDED.order_id,
+    first_seen_at = LEAST(order_fill_identities.first_seen_at, EXCLUDED.first_seen_at),
+    last_seen_at = GREATEST(order_fill_identities.last_seen_at, EXCLUDED.last_seen_at);
+
+DROP INDEX IF EXISTS uidx_order_lifecycle_exchange_trade;
+DROP INDEX IF EXISTS uidx_order_lifecycle_event_identity;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_order_lifecycle_exchange_trade_route
+    ON order_lifecycle_events (
+        venue_id, exchange, market, symbol, exchange_order_id, exchange_trade_id
+    )
+    WHERE symbol IS NOT NULL
+      AND BTRIM(symbol) <> ''
+      AND exchange_order_id IS NOT NULL
+      AND BTRIM(exchange_order_id) <> ''
+      AND exchange_trade_id IS NOT NULL
+      AND BTRIM(exchange_trade_id) <> '';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_order_lifecycle_event_identity_route
+    ON order_lifecycle_events (
+        venue_id, exchange, market, symbol, event_identity
+    )
+    WHERE symbol IS NOT NULL
+      AND BTRIM(symbol) <> ''
+      AND event_identity IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_order_fill_identities_order
+    ON order_fill_identities (order_id, first_seen_at);
+INSERT INTO schema_migrations (filename) VALUES ('0002_spot_order_route_identity.sql') ON CONFLICT (filename) DO NOTHING;
+
+-- Source: core-service/internal/order/storage/migrations/0003_spot_close_operations.sql
+-- Durable, restart-safe Spot stop-and-close operations and their admission
+-- fences. This is additive; deployed 0001/0002 migrations remain immutable.
+
+CREATE TABLE IF NOT EXISTS spot_close_operations (
+    session_id text NOT NULL,
+    operation_id text NOT NULL,
+    user_id bigint NOT NULL,
+    portfolio_id bigint NOT NULL,
+    strategy_id bigint NOT NULL,
+    request_hash text NOT NULL,
+    phase text NOT NULL DEFAULT 'planning',
+    status text NOT NULL DEFAULT 'planning',
+    failure_code text NOT NULL DEFAULT '',
+    failure_message text NOT NULL DEFAULT '',
+    reconciliation_run_id text NOT NULL DEFAULT '',
+    reconciliation_required boolean NOT NULL DEFAULT false,
+    final_response_json jsonb,
+    created_at timestamp with time zone NOT NULL DEFAULT NOW(),
+    updated_at timestamp with time zone NOT NULL DEFAULT NOW(),
+    CONSTRAINT spot_close_operations_pkey PRIMARY KEY (session_id, operation_id),
+    CONSTRAINT chk_spot_close_operation_identity CHECK (BTRIM(session_id) <> '' AND BTRIM(operation_id) <> ''),
+    CONSTRAINT chk_spot_close_operation_owner CHECK (user_id > 0 AND portfolio_id > 0 AND strategy_id > 0),
+    CONSTRAINT chk_spot_close_operation_hash CHECK (BTRIM(request_hash) <> ''),
+    CONSTRAINT chk_spot_close_operation_status CHECK (status IN ('planning', 'planned', 'stopped', 'stop_failed'))
+);
+
+CREATE TABLE IF NOT EXISTS spot_close_targets (
+    session_id text NOT NULL,
+    operation_id text NOT NULL,
+    venue_id bigint NOT NULL,
+    exchange smallint NOT NULL,
+    market smallint NOT NULL,
+    symbol text NOT NULL,
+    base_asset text NOT NULL,
+    planned_qty numeric(38,18),
+    status text NOT NULL DEFAULT 'planning',
+    code text NOT NULL DEFAULT '',
+    message text NOT NULL DEFAULT '',
+    intent_id text NOT NULL DEFAULT '',
+    client_order_id text NOT NULL DEFAULT '',
+    attempt_id text NOT NULL DEFAULT '',
+    order_id text NOT NULL DEFAULT '',
+    exchange_order_id text NOT NULL DEFAULT '',
+    lease_generation bigint NOT NULL DEFAULT 0,
+    last_recovery_fact jsonb,
+    created_at timestamp with time zone NOT NULL DEFAULT NOW(),
+    updated_at timestamp with time zone NOT NULL DEFAULT NOW(),
+    CONSTRAINT spot_close_targets_pkey PRIMARY KEY (
+        session_id, operation_id, venue_id, exchange, market, base_asset
+    ),
+    CONSTRAINT fk_spot_close_targets_operation FOREIGN KEY (session_id, operation_id)
+        REFERENCES spot_close_operations (session_id, operation_id) ON DELETE RESTRICT,
+    CONSTRAINT chk_spot_close_target_route CHECK (
+        venue_id > 0 AND exchange = 1 AND market = 1 AND
+        BTRIM(symbol) <> '' AND BTRIM(base_asset) <> ''
+    ),
+    CONSTRAINT chk_spot_close_target_qty CHECK (planned_qty IS NULL OR planned_qty >= 0),
+    CONSTRAINT chk_spot_close_target_status CHECK (status IN (
+        'planning', 'planned', 'sending', 'submitted', 'recovery_pending',
+        'terminal', 'failed', 'already_closed', 'unattempted'
+    ))
+);
+
+CREATE TABLE IF NOT EXISTS spot_order_admission_leases (
+    venue_id bigint NOT NULL,
+    exchange smallint NOT NULL,
+    market smallint NOT NULL,
+    base_asset text NOT NULL,
+    owner_session_id text NOT NULL,
+    owner_operation_id text NOT NULL,
+    generation bigint NOT NULL,
+    state text NOT NULL DEFAULT 'active',
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone NOT NULL DEFAULT NOW(),
+    updated_at timestamp with time zone NOT NULL DEFAULT NOW(),
+    CONSTRAINT spot_order_admission_leases_pkey PRIMARY KEY (venue_id, exchange, market, base_asset),
+    CONSTRAINT fk_spot_order_admission_lease_owner FOREIGN KEY (owner_session_id, owner_operation_id)
+        REFERENCES spot_close_operations (session_id, operation_id) ON DELETE RESTRICT,
+    CONSTRAINT chk_spot_order_admission_lease_route CHECK (
+        venue_id > 0 AND exchange = 1 AND market = 1 AND BTRIM(base_asset) <> ''
+    ),
+    CONSTRAINT chk_spot_order_admission_lease_generation CHECK (generation > 0),
+    CONSTRAINT chk_spot_order_admission_lease_state CHECK (state IN ('active', 'blocking'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_spot_close_operations_portfolio
+    ON spot_close_operations (portfolio_id, session_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_spot_close_targets_intent
+    ON spot_close_targets (intent_id)
+    WHERE BTRIM(intent_id) <> '';
+
+CREATE INDEX IF NOT EXISTS idx_spot_close_targets_exchange_order
+    ON spot_close_targets (venue_id, exchange, market, symbol, exchange_order_id)
+    WHERE BTRIM(exchange_order_id) <> '';
+
+CREATE INDEX IF NOT EXISTS idx_spot_order_admission_lease_owner
+    ON spot_order_admission_leases (owner_session_id, owner_operation_id, generation);
+INSERT INTO schema_migrations (filename) VALUES ('0003_spot_close_operations.sql') ON CONFLICT (filename) DO NOTHING;
 COMMIT;

@@ -1,5 +1,7 @@
 # Runtime 操作流程
 
+最后核验：2026-07-24。
+
 本文描述当前 RuntimeChannel 实现。所有策略请求和 session 路由都只使用
 `runtime_id`；runtime 名称只是展示字段，不能作为路由键。
 
@@ -31,7 +33,7 @@ PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
 这条命令用于源码开发，不能证明镜像或 debugger 的安装闭包。安装态检查必须
 清除 `PYTHONPATH` / `PYTHONHOME` / `VIRTUAL_ENV` 并使用 `python -I`。
 
-## Runtime 启动、HELLO 与 RESUME
+## Runtime 启动、HELLO 与当前断线语义
 
 1. runtime-agent 从镜像环境读取 profile、commit、build ID 和公开 roots。
 2. agent 用安装态 Python 运行 dependency startup probe。失败时进程在建立
@@ -39,12 +41,18 @@ PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
 3. Hosted 的单行安全失败记录由 Docker provisioner读取；Self-hosted 只能用
    自己的 credential/mTLS 发送签名的 failure-only report。Bare 不走该上报面。
    失败上报只能记录启动失败，不能注册 runtime、恢复 route 或发送普通帧。
-4. probe 成功后，HELLO 对完整 profile 签名。断线恢复时 RESUME 携带同一组
-   不可变 profile 字段和 resume token。
+4. probe 成功后，HELLO 对完整 profile 签名。
 5. control-panel 先要求 HELLO/RESUME 完整携带 schema、name、version、digest、
    Python、排序且唯一的公开 roots、service/library commit 和 image build ID；
    再把 schema/name/version/digest 与部署配置精确比较。不完整或不一致都会记录
    `runtime_admission_failures`，route 不会变为 active。
+
+control-panel 服务端支持把 `RESUME` 作为 RuntimeChannel 第一帧，agent 代码也有
+`BuildResumeRuntimeFrame` 构造器；但当前 `RuntimeChannelClient.Run` 每次只建立一条
+stream，发送 HELLO 后运行到连接关闭，没有自动重连循环，也没有在运行路径中自动
+发送 RESUME。运维上必须把“协议支持 RESUME”与“当前 agent 已自动恢复”区分开：
+连接断开后由进程重启/外部 supervisor 重新连接，旧 active session 进入
+`recoverable`，不能宣称原 session 自动续跑。
 
 正常与 coverage 镜像必须成对构建、验证和 smoke。两者的 profile/version/
 digest/源码 commit 完全相同，build ID 必须不同；`coverage` 只允许作为镜像
@@ -85,6 +93,30 @@ import → 成功后才开始 session。同步错误和 download job 轮询错�
 | `STRATEGY_IMPORT_FAILED` | 模块存在，但初始化失败；不暴露传递依赖、路径或 traceback |
 | `RUNTIME_DEPENDENCY_PROFILE_INVALID` | runtime 本地 profile/安装闭包在 HELLO 前无效 |
 | `RUNTIME_DEPENDENCY_PROFILE_MISMATCH` | HELLO/RESUME profile 与 control-panel 期望值不一致 |
+
+## Agent 与 worker 隔离
+
+Go runtime-agent 与每个 Python session worker 是两个进程。agent 在
+`127.0.0.1:0` 创建随机 loopback TCP listener，worker 通过
+`runtime.worker.v1` 双向 gRPC stream 连接。这里不使用 Unix domain socket，
+因此不会把 Bare 模式限定在 macOS/Linux；Windows 使用 `.venv/Scripts/python.exe`
+和对应进程组/信号实现。
+
+RuntimeChannel heartbeat 由 Go agent 的独立 goroutine 发送。用户策略在 Python
+worker 中命中断点或长时间循环不会阻塞 agent heartbeat；它只会阻塞该 session
+的 callback/data consumption。Demo/Live 队列仍受 lag/backpressure 限制，长期
+阻塞可能让 session failed/recoverable，但不能让 runtime-agent 因 Python GIL 或
+用户断点停止心跳。
+
+worker 从白名单构造的干净环境启动，只包含 session/token/loopback agent address、
+隔离 HOME/TMP/cache、公开 runtime profile 和三个展示用 runtime facts。它不继承
+父进程中的 DB、Kafka、core/order、credential、JWT、tracing 或其他 secret。
+Hosted、Self-hosted 与 Bare 都只能通过 RuntimeChannel platform call 访问平台能力。
+
+control-panel 停机时先把 readiness 置为 false、关闭全部 RuntimeChannel stream，
+再对 RuntimeChannel 与内部 gRPC server 执行同一个 10 秒有界
+`GracefulStop`。如果连接仍卡在 HELLO/认证前或 handler 未返回，超时后会调用
+`Stop` 并等待 server 退出，不能让 pre-auth stream 无限阻塞整个服务停机。
 
 ## 已保存 Strategy 的只读兼容扫描
 
@@ -154,6 +186,67 @@ core-service、core-service 承载的 order.v1、Kafka 或数据库地址。
 4. 新 session 会绑定到所选 runtime；旧 `recoverable` session 保留为审计历史。
 
 不要直接在数据库里把 `recoverable` 改回 `running`。旧 runtime 重新连上也不应自动继续旧 session。
+
+## Bare worker-only restart
+
+内部调试命令：
+
+```bash
+strategy-service/scripts/restart-bare-worker-session.sh [old_session_id]
+```
+
+本地 control endpoint 也是 `127.0.0.1` TCP，不依赖 Unix socket。当前顺序是：
+
+1. 校验旧 session 属于当前 `runtime_id` 与 user；优先取平台事实，平台不支持时才用
+   agent 缓存的原始 RunStrategyRequest。
+2. 取得旧 worker generation 的 cleanup ownership；此后 IPC disconnect 的通用清理
+   必须等待显式 restart 完成，不能抢先删除 indicator 状态。
+3. 只停止旧 Python worker，Go agent 和 RuntimeChannel 保持运行，并等待该 generation
+   已准入的处理全部 drain。
+4. 调用 `FinalizeSession`，等待正在执行的 flush，封存并重试落库 agent 已接收的
+   indicator partial tail。
+5. 把旧 session 更新为 `recoverable`。
+6. 只有 finalization 和状态更新都成功后，才清除旧
+   generation、pending/ready/platform-call/run-request/indicator state。
+7. 用保留的 run request 创建新 `session_id` 和新 worker，并加载当前本地策略源码。
+
+这不是 RuntimeChannel RESUME，也不是把旧 session 改回 running。如果 indicator
+finalization 失败，旧 session 会标为 `recoverable`，agent 保留可重试的 dirty tail，
+命令返回错误且不会启动新 worker；再次执行 restart 可以重试 finalization。
+同一旧 session 的并发 restart 只允许一个调用执行，其余调用等待并复用同一个
+replacement session 结果，不会启动多个新 worker。cleanup 一旦关闭 generation，
+已认证帧就始终携带该 generation 指针完成 admission；即使 registry 已删除映射，
+迟到 indicator 也不能退化为无门禁写入。
+默认策略源码目录为：
+
+```text
+.hushine-runtime/strategies/user-<user_id>/strategy-<strategy_id>-<name>-<version>.py
+```
+
+## Indicator 在线分块
+
+Python worker 随每根 bar 发送 indicator frame；Go agent 按
+`(session_id, stream_key, indicator_key)` 缓冲。默认 1024 点一块、dirty open chunk
+每 2 秒同步：
+
+- 1–1023 点是可增长 open chunk。
+- 第 1024 点到达时，chunk 0 在内存立即封为 `finalized=true`，并触发 immediate flush。
+- 第 1025 点进入 chunk 1。由于 goroutine 调度，持久化请求可能先发送 finalized
+  1024、稍后发送 open 1，也可能一个请求同时带两块；两者最终状态等价。
+- 同一 series 相同 `market_time_ms` 的重复点不会 dirty；更小时间被拒绝。
+- 已 ACK 且没有新点的 1023 open chunk 不会在每个 tick 重复 UPDATE。写失败时保留
+  dirty/pending state，后续重试。
+- core-service 在一个 DB transaction 中保存一次请求的 definitions/chunks；只有未
+  finalized 且 count 单调增加的 row 可以更新，相同 finalized upgrade 只允许内容完全
+  相同，finalized row 永不回退。
+- terminal finished 会 seal partial tail 并重试；无法确认时改为 `recoverable`。
+  failed/stopped/stop_failed 保留原终态，同时报告 finalization 失败。
+- restart 与非预期 disconnect 都先关闭 generation 的新准入、等待在途 platform/
+  indicator 处理 drain，再 finalization 和 reconciliation；失败保留 buffer 与
+  generation 并调度重试。
+
+Spot 的完整 ownership、过滤器、订单、停止与 reconciliation 见
+[`spot-usdt.md`](spot-usdt.md)。
 
 ## legacy unbound session
 

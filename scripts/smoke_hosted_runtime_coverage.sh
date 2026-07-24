@@ -5,6 +5,7 @@
 set -euo pipefail
 
 DEPLOY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+source "${DEPLOY_ROOT}/scripts/lib/runtime_coverage.sh"
 SOURCE_ROOT="${HUSHINE_SOURCE_ROOT:-${DEPLOY_ROOT}}"
 if [[ ! -d "${SOURCE_ROOT}/strategy-service" && -d "${DEPLOY_ROOT}/../strategy-service" ]]; then
   SOURCE_ROOT="$(cd "${DEPLOY_ROOT}/.." && pwd -P)"
@@ -18,14 +19,8 @@ if [[ "$#" -ne 1 ]]; then
   echo "usage: USER_ID=<users.id> $0 /absolute/runtime-coverage-output-dir" >&2
   exit 2
 fi
-OUTPUT_ROOT="$1"
-case "${OUTPUT_ROOT}" in
-  /*) ;;
-  *)
-    echo "output directory must be absolute: ${OUTPUT_ROOT}" >&2
-    exit 2
-    ;;
-esac
+runtime_coverage_prepare_output_root "$1"
+OUTPUT_ROOT="${RUNTIME_COVERAGE_OUTPUT_ROOT}"
 
 USER_ID="${USER_ID:-}"
 PORTFOLIO_ID="${PORTFOLIO_ID:-0}"
@@ -33,8 +28,11 @@ PROFILE="${PROFILE:-small}"
 CONTROL_PANEL_ADDR="${CONTROL_PANEL_ADDR:-127.0.0.1:50054}"
 PORTFOLIO_ADDR="${PORTFOLIO_ADDR:-127.0.0.1:50051}"
 COVERAGE_IMAGE="${COVERAGE_IMAGE:-hushine/strategy-runtime:executor-coverage}"
-START_TIME_MS="${START_TIME_MS:-1780272000000}"
-END_TIME_MS="${END_TIME_MS:-1783728000000}"
+# Defaults match strategy-service/scripts/seed_test_data.py (2025-01-01,
+# 200 one-minute fixture bars). Real-data runs can override both bounds.
+START_TIME_MS="${START_TIME_MS:-1735689600000}"
+END_TIME_MS="${END_TIME_MS:-1735701600000}"
+EXPECTED_INPUT_COUNT="${EXPECTED_INPUT_COUNT:-4}"
 
 if [[ ! "${USER_ID}" =~ ^[1-9][0-9]*$ ]]; then
   echo "USER_ID must be a positive integer" >&2
@@ -44,6 +42,10 @@ if [[ ! "${PORTFOLIO_ID}" =~ ^[0-9]+$ ]]; then
   echo "PORTFOLIO_ID must be zero or a positive integer" >&2
   exit 2
 fi
+if [[ ! "${EXPECTED_INPUT_COUNT}" =~ ^[0-9]+$ ]]; then
+  echo "EXPECTED_INPUT_COUNT must be zero or a positive integer" >&2
+  exit 2
+fi
 for command in docker go jq uv; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "required command not found: ${command}" >&2
@@ -51,9 +53,6 @@ for command in docker go jq uv; do
   fi
 done
 
-mkdir -p "${OUTPUT_ROOT}"
-chmod 0700 "${OUTPUT_ROOT}"
-OUTPUT_ROOT="$(cd "${OUTPUT_ROOT}" && pwd -P)"
 IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${COVERAGE_IMAGE}" 2>/dev/null || true)"
 if [[ -z "${IMAGE_ID}" ]]; then
   echo "coverage image not found: ${COVERAGE_IMAGE}" >&2
@@ -103,15 +102,7 @@ stop_running_sessions() {
 }
 
 owned_smoke_container() {
-  local runtime_label user_label coverage_label image_id
-  if ! docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
-    return 1
-  fi
-  runtime_label="$(docker container inspect --format '{{index .Config.Labels "hushine.runtime.runtime_id"}}' "${CONTAINER_NAME}")"
-  user_label="$(docker container inspect --format '{{index .Config.Labels "hushine.runtime.user_id"}}' "${CONTAINER_NAME}")"
-  coverage_label="$(docker container inspect --format '{{index .Config.Labels "hushine.runtime.coverage"}}' "${CONTAINER_NAME}")"
-  image_id="$(docker container inspect --format '{{.Image}}' "${CONTAINER_NAME}")"
-  [[ "${runtime_label}" == "${RUNTIME_ID}" && "${user_label}" == "${USER_ID}" && "${coverage_label}" == "true" && "${image_id}" == "${IMAGE_ID}" ]]
+  runtime_coverage_container_owned "${CONTAINER_NAME}" "${RUNTIME_ID}" "${USER_ID}" "${IMAGE_ID}"
 }
 
 fallback_cleanup_container() {
@@ -218,46 +209,16 @@ fi
 echo "runtime_id=${RUNTIME_ID} provisioned=true"
 
 CONTAINER_NAME="hushine-runtime-${RUNTIME_ID}"
-RUNTIMES_ROOT="${OUTPUT_ROOT}/runtimes"
-RUNTIME_ROOT="${RUNTIMES_ROOT}/${RUNTIME_ID}"
-GO_DIR="${RUNTIME_ROOT}/go"
-PYTHON_DIR="${RUNTIME_ROOT}/python"
-for directory in "${RUNTIMES_ROOT}" "${RUNTIME_ROOT}" "${GO_DIR}" "${PYTHON_DIR}"; do
-  if [[ ! -d "${directory}" || -L "${directory}" ]]; then
-    echo "expected safe coverage directory missing: ${directory}" >&2
-    exit 1
-  fi
-done
-RUNTIMES_ROOT="$(cd "${RUNTIMES_ROOT}" && pwd -P)"
-RUNTIME_ROOT="$(cd "${RUNTIME_ROOT}" && pwd -P)"
-if [[ "${RUNTIME_ROOT}" != "${RUNTIMES_ROOT}/${RUNTIME_ID}" ]]; then
-  echo "runtime coverage path escapes output root" >&2
-  exit 1
-fi
-GO_DIR="${RUNTIME_ROOT}/go"
-PYTHON_DIR="${RUNTIME_ROOT}/python"
-
-CONTAINER_ID="$(docker container inspect --format '{{.Id}}' "${CONTAINER_NAME}")"
-CONTAINER_IMAGE_ID="$(docker container inspect --format '{{.Image}}' "${CONTAINER_NAME}")"
-COVERAGE_LABEL="$(docker container inspect --format '{{index .Config.Labels "hushine.runtime.coverage"}}' "${CONTAINER_NAME}")"
-RUN_LABEL="$(docker container inspect --format '{{index .Config.Labels "hushine.runtime.coverage_run_id"}}' "${CONTAINER_NAME}")"
-MOUNT_SOURCE="$(docker container inspect "${CONTAINER_NAME}" | jq -r '.[0].Mounts[] | select(.Destination == "/coverage") | .Source')"
-ENV_NAMES="$(docker container inspect "${CONTAINER_NAME}" | jq -r '.[0].Config.Env | map(split("=")[0]) | .[]')"
-EXPECTED_RUN_LABEL="$(basename "${OUTPUT_ROOT}")"
-if [[ "${EXPECTED_RUN_LABEL}" == "runtime-agent" && "$(basename "$(dirname "${OUTPUT_ROOT}")")" == "coverage" ]]; then
-  EXPECTED_RUN_LABEL="$(basename "$(dirname "$(dirname "${OUTPUT_ROOT}")")")"
-fi
-if [[ "${CONTAINER_IMAGE_ID}" != "${IMAGE_ID}" || "${COVERAGE_LABEL}" != "true" || "${RUN_LABEL}" != "${EXPECTED_RUN_LABEL}" || "${MOUNT_SOURCE}" != "${RUNTIME_ROOT}" ]]; then
-  echo "coverage container image/label/mount validation failed" >&2
-  exit 1
-fi
-for name in GOCOVERDIR HUSHINE_RUNTIME_COVERAGE_DIR; do
-  if ! grep -Fxq "${name}" <<<"${ENV_NAMES}"; then
-    echo "coverage environment name missing: ${name}" >&2
-    exit 1
-  fi
-done
-echo "container_id=${CONTAINER_ID} image_id=${CONTAINER_IMAGE_ID} coverage_label=${COVERAGE_LABEL} coverage_run_id=${RUN_LABEL}"
+runtime_coverage_validate_layout "${OUTPUT_ROOT}" "${RUNTIME_ID}"
+RUNTIMES_ROOT="${RUNTIME_COVERAGE_RUNTIMES_ROOT}"
+RUNTIME_ROOT="${RUNTIME_COVERAGE_RUNTIME_ROOT}"
+GO_DIR="${RUNTIME_COVERAGE_GO_DIR}"
+PYTHON_DIR="${RUNTIME_COVERAGE_PYTHON_DIR}"
+runtime_coverage_validate_container "${CONTAINER_NAME}" "${RUNTIME_ID}" "${USER_ID}" "${IMAGE_ID}" "${RUNTIME_ROOT}" "${OUTPUT_ROOT}"
+CONTAINER_ID="${RUNTIME_COVERAGE_CONTAINER_ID}"
+CONTAINER_IMAGE_ID="${RUNTIME_COVERAGE_CONTAINER_IMAGE_ID}"
+RUN_LABEL="${RUNTIME_COVERAGE_RUN_LABEL}"
+echo "container_id=${CONTAINER_ID} image_id=${CONTAINER_IMAGE_ID} coverage_label=true coverage_run_id=${RUN_LABEL}"
 
 echo "→ PreviewRunStrategy through RuntimeChannel (one-shot Python worker)"
 (
@@ -271,6 +232,7 @@ echo "→ PreviewRunStrategy through RuntimeChannel (one-shot Python worker)"
     -portfolio "${PORTFOLIO_ID}" \
     -start-time-ms "${START_TIME_MS}" \
     -end-time-ms "${END_TIME_MS}" \
+    -expected-input-count "${EXPECTED_INPUT_COUNT}" \
     -timeout 45s
 )
 
@@ -366,41 +328,12 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 
-REPORT_ROOT="${OUTPUT_ROOT}/smoke-reports/${RUNTIME_ID}"
 echo "→ validate stopped runtime mount and stage Python coverage"
-(
-  cd "${SOURCE_ROOT}/control-panel-service"
-  "${HELPER_BIN}" \
-    -action stage-coverage \
-    -output-root "${OUTPUT_ROOT}" \
-    -runtime-root "${RUNTIME_ROOT}" \
-    -report-root "${REPORT_ROOT}" \
-    -strategy-root "${SOURCE_ROOT}/strategy-service" \
-    -runtime "${RUNTIME_ID}" \
-    -timeout 45s
-)
-PYTHON_INPUT_DIR="${REPORT_ROOT}/python-input"
-
-FINALIZATION_FILE="${RUNTIME_ROOT}/finalization.json"
-if [[ ! -f "${FINALIZATION_FILE}" || -L "${FINALIZATION_FILE}" ]]; then
-  echo "runtime coverage finalization marker is missing or unsafe" >&2
-  exit 1
-fi
-if ! jq -e --arg runtime_id "${RUNTIME_ID}" '
-  type == "object"
-  and (keys == ["boot_id", "completed_at", "forced_workers", "go_snapshot", "runtime_id", "schema_version", "state", "worker_shutdown"])
-  and .schema_version == 1
-  and .runtime_id == $runtime_id
-  and (.boot_id | type == "string" and length > 0)
-  and .state == "complete"
-  and .worker_shutdown == "ok"
-  and .forced_workers == 0
-  and .go_snapshot == "ok"
-  and (.completed_at | type == "string" and length > 0)
-' "${FINALIZATION_FILE}" >/dev/null; then
-  echo "runtime coverage finalization marker is not complete" >&2
-  exit 1
-fi
+runtime_coverage_stage_locked_inputs "${HELPER_BIN}" "${SOURCE_ROOT}" "${OUTPUT_ROOT}" "${RUNTIME_ROOT}" "${RUNTIME_ID}"
+REPORT_ROOT="${RUNTIME_COVERAGE_REPORT_ROOT}"
+PYTHON_INPUT_DIR="${RUNTIME_COVERAGE_PYTHON_INPUT_DIR}"
+runtime_coverage_require_finalization "${RUNTIME_ROOT}" "${RUNTIME_ID}"
+FINALIZATION_FILE="${RUNTIME_COVERAGE_FINALIZATION_FILE}"
 
 EVENTS_FILE="${REPORT_ROOT}/docker-events.jsonl"
 # Docker can publish the destroy event just after container disappearance.
@@ -423,56 +356,7 @@ if ! jq -s -e '
   exit 1
 fi
 
-if ! find "${GO_DIR}" -type f -print -quit | grep -q .; then
-  echo "Go coverage output is missing: ${GO_DIR}" >&2
-  exit 1
-fi
-if ! find "${PYTHON_INPUT_DIR}" -maxdepth 1 -name '.coverage*' -type f -print -quit | grep -q .; then
-  echo "staged Python coverage output is missing: ${PYTHON_INPUT_DIR}" >&2
-  exit 1
-fi
-
-GO_MERGED="${REPORT_ROOT}/go-merged"
-generate_go_reports() {
-  mkdir -p "${GO_MERGED}"
-  (
-    cd "${SOURCE_ROOT}/strategy-service"
-    go tool covdata merge -i="${GO_DIR}" -o="${GO_MERGED}"
-    go tool covdata textfmt -i="${GO_MERGED}" -o="${REPORT_ROOT}/go.cover.out"
-    go tool cover -func="${REPORT_ROOT}/go.cover.out" >"${REPORT_ROOT}/go-functions.txt"
-  )
-}
-generate_go_reports
-
-PYTHON_RC="${REPORT_ROOT}/python-report.coveragerc"
-{
-  echo '[run]'
-  echo 'source = strategy_service'
-  echo
-  echo '[paths]'
-  echo 'source ='
-  printf '    %s\n' "${SOURCE_ROOT}/strategy-service/strategy_service"
-  echo '    /app/strategy-service/strategy_service'
-} >"${PYTHON_RC}"
-export COVERAGE_FILE="${PYTHON_INPUT_DIR}/.coverage"
-export COVERAGE_RCFILE="${PYTHON_RC}"
-(
-  cd "${SOURCE_ROOT}/strategy-service"
-  uv run --frozen --extra coverage coverage combine --keep "${PYTHON_INPUT_DIR}"
-  uv run --frozen --extra coverage coverage report --keep-combined >"${REPORT_ROOT}/python-report.txt"
-  uv run --frozen --extra coverage coverage json --keep-combined -o "${REPORT_ROOT}/python-coverage.json"
-)
-
-for report in \
-  "${REPORT_ROOT}/go.cover.out" \
-  "${REPORT_ROOT}/go-functions.txt" \
-  "${REPORT_ROOT}/python-report.txt" \
-  "${REPORT_ROOT}/python-coverage.json"; do
-  if [[ ! -s "${report}" ]]; then
-    echo "coverage report is missing or empty: ${report}" >&2
-    exit 1
-  fi
-done
+runtime_coverage_generate_reports "${SOURCE_ROOT}" "${GO_DIR}" "${PYTHON_INPUT_DIR}" "${REPORT_ROOT}"
 
 if ! cleanup_local_work; then
   exit 1

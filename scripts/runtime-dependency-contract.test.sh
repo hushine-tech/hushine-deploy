@@ -335,10 +335,10 @@ text = Path(sys.argv[1]).read_text(encoding="utf-8")
 required = (
     "runtime-dependency-envs:",
     'test "$${#RUNTIME_DEPENDENCY_BASE_SHA}" -eq 40',
-    'git -C strategy-library cat-file -e "$${RUNTIME_DEPENDENCY_BASE_SHA}^{commit}"',
-    "test ! -e strategy-library/uv.lock",
+    'git -C "$(SOURCE_ROOT)/strategy-library" cat-file -e "$${RUNTIME_DEPENDENCY_BASE_SHA}^{commit}"',
+    'test ! -e "$(SOURCE_ROOT)/strategy-library/uv.lock"',
     "uv run --isolated --no-project --with-editable '.[test]'",
-    "uv sync --project strategy-service --python 3.13 --frozen --extra dev",
+    'uv sync --project "$(SOURCE_ROOT)/strategy-service" --python 3.13 --frozen --extra dev',
     "./scripts/with-local-strategy-library-git.sh",
     "runtime-dependency-contract: runtime-dependency-envs",
     "--installed-python strategy-service=../strategy-service/.venv/bin/python",
@@ -346,14 +346,14 @@ required = (
     "--baseline-ref \"$(RUNTIME_DEPENDENCY_BASE_SHA)\"",
     "--json",
     "runtime-images-verify:",
-    "$(MAKE) -C strategy-service runtime-images-verify",
+    '$(MAKE) -C "$(SOURCE_ROOT)/strategy-service" runtime-images-verify',
     "runtime-dependency-acceptance: runtime-dependency-contract runtime-images-verify",
-    'RUNTIME_DEPENDENCY_CHECKER_JSON="$$(cd strategy-library',
-    "bash hushine-deploy/scripts/runtime-dependency-contract.test.sh",
+    'RUNTIME_DEPENDENCY_CHECKER_JSON="$$(cd "$(SOURCE_ROOT)/strategy-library"',
+    'bash $(DEPLOY_ROOT)/scripts/runtime-dependency-contract.test.sh',
 )
 for literal in required:
     assert literal in text, literal
-assert text.count("test ! -e strategy-library/uv.lock") >= 2
+assert text.count('test ! -e "$(SOURCE_ROOT)/strategy-library/uv.lock"') >= 2
 assert "RUNTIME_DEPENDENCY_BASE_SHA ?=" not in text
 assert "RUNTIME_DEPENDENCY_BASE_SHA :=" not in text
 PY

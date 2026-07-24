@@ -62,22 +62,8 @@ hushine/
 
 ## Quick Start
 
-Default source development uses shared remote infrastructure on
-`192.168.88.10`:
-
-- TimescaleDB: `192.168.88.10:5432`
-- Kafka external listener: `192.168.88.10:19092`
-- Elasticsearch: `http://192.168.88.10:9200`
-- Kibana: `http://192.168.88.10:5601`
-- Jaeger: `http://192.168.88.10:16686`, OTLP HTTP `http://192.168.88.10:4318`
-
-Run services from source:
-
-```bash
-make dev
-```
-
-For an isolated local-only stack:
+The reproducible development path is the isolated local stack. It does not
+depend on the retired/shared `192.168.88.10` host:
 
 ```bash
 IMAGE_TAG=dev make runtime-image  # normal + coverage runtime images
@@ -91,6 +77,10 @@ make local-stop
 tracked service configs, rewrites infrastructure endpoints to localhost, and
 creates the runtime coverage output directory. Hosted runtimes started by the
 local control panel use the coverage image by default.
+
+`make dev` still runs services against each repository's explicitly selected
+config. Use it with remote infrastructure only after supplying and probing that
+environment; no remote host is assumed by this README.
 
 Details: [docs/local-docker.md](docs/local-docker.md).
 

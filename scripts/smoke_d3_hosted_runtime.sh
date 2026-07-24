@@ -31,7 +31,12 @@ if [[ -z "${USER_ID}" ]]; then
 fi
 
 echo "→ build hosted runtime image hushine/strategy-runtime:${IMAGE_TAG}"
-bash "${SOURCE_ROOT}/strategy-service/scripts/build_strategy_runtime.sh" "${IMAGE_TAG}"
+build_args=()
+if [[ "${IMAGE_TAG}" == "dev" ]]; then
+  build_args+=(--allow-dirty)
+fi
+bash "${SOURCE_ROOT}/strategy-service/scripts/build_strategy_runtime.sh" \
+  "${build_args[@]}" "${IMAGE_TAG}"
 
 echo "→ EnsureHostedRuntime via ${CONTROL_PANEL_ADDR}"
 (

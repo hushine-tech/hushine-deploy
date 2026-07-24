@@ -4,9 +4,11 @@ This is the deployment inventory for a fresh Hushine environment. Service
 repositories own the schema source files; this repository owns orchestration,
 review bundles, and deployment instructions.
 
-The current schema is a rebuild baseline. It does not upgrade an older
-Account-era or multi-migration database in place. Wipe and rebuild the target
-environment before switching to this baseline.
+The current schema starts from a rebuild baseline and then applies tracked
+additive migrations. It does not upgrade an Account-era database to the
+baseline in place. Rebuild an Account-era environment first; once the current
+`0001` baseline is installed, later numbered migrations are forward-only and
+must not be rewritten.
 
 ## One-shot bootstrap
 
@@ -64,20 +66,106 @@ The deterministic output is stored under `db/generated/`:
 | `market_data_year.sql` | every `{exchange}_{year}` database |
 
 Each schema bundle is transactional, idempotent, and maintains the same
-`schema_migrations` ledger used by service bootstrap commands. The bundles are
-for Baseline/fresh rebuild and review, not in-place upgrades of old databases.
+`schema_migrations` ledger used by service bootstrap commands. One bundle run
+on an empty database creates the complete current schema; running the same
+bundle again is a no-op at the object and ledger level. The bundles are for
+fresh rebuild and review, not an Account-era in-place upgrade.
 
 ## Schema sources
 
 | Database | Owning repository | Source |
 |---|---|---|
-| `portfolio` | `core-service` | `internal/storage/migrations/0000_create_schema_migrations.sql` and `0001_current_schema_baseline.sql` |
-| `order` | `core-service` | `internal/order/storage/migrations/0000_create_schema_migrations.sql` and `0001_current_schema_baseline.sql` |
+| `portfolio` | `core-service` | `internal/storage/migrations/0000` through `0004`, in filename order |
+| `order` | `core-service` | `internal/order/storage/migrations/0000` through `0003`, in filename order |
 | `control_panel` | `control-panel-service` | `internal/storage/migrations/0000_create_schema_migrations.sql` and `0001_current_schema_baseline.sql` |
 | `{exchange}_{year}` | `scraper` | `internal/storage/migrations/0001_current_schema_baseline.sql` |
 
-Future additive migrations continue with the next filename after the baseline;
-do not rewrite an already deployed filename.
+Exact current order:
+
+### `portfolio`
+
+1. `0000_create_schema_migrations.sql`
+2. `0001_current_schema_baseline.sql`
+3. `0002_spot_risk_facts.sql`
+4. `0003_spot_reconciliation_repair.sql`
+5. `0004_spot_close_reconciliation_pending.sql`
+
+`0002` adds immutable per-session Spot risk facts. `0003` adds repair source,
+status and identities to reconciliation history. `0004` adds the synchronous
+`pending` repair tombstone used by Spot close failure handling. Because
+`reconciliation_runs` is a Timescale hypertable, the pending lookup index is a
+non-unique partial index on `(run_id, time DESC)`; a unique index that omits
+the partitioning column cannot be created by TimescaleDB. Application-level
+idempotency is serialized with a transaction-scoped advisory lock on `run_id`.
+
+### `order`
+
+1. `0000_create_schema_migrations.sql`
+2. `0001_current_schema_baseline.sql`
+3. `0002_spot_order_route_identity.sql`
+4. `0003_spot_close_operations.sql`
+
+`0002` adds exact cumulative/quote quantities, route-qualified fill identity
+and route-qualified lifecycle indexes. `0003` adds durable Spot close
+operations, target state and admission leases.
+
+Future additive migrations continue with the next filename. Do not edit,
+rename, reorder or reuse an already deployed filename.
+
+## Fresh-bundle verification
+
+Generate twice and require byte-identical output:
+
+```bash
+make db-schema-bundle
+before="$(shasum -a 256 db/generated/*.sql db/generated/README.md)"
+make db-schema-bundle
+test "$before" = "$(shasum -a 256 db/generated/*.sql db/generated/README.md)"
+```
+
+For release acceptance, create four transient empty databases, apply the
+matching bundle once, capture table/view/index/constraint/hypertable and ledger
+inventories, apply the bundle a second time, and require identical inventories.
+The current ledger counts are:
+
+| Database | Expected migration rows |
+|---|---:|
+| `portfolio` | 5 |
+| `order` | 4 |
+| `control_panel` | 2 |
+| one market-data year DB | 1 |
+
+Both `0001_current_schema_baseline.sql` files are immutable compatibility
+anchors. Verify their approved SHA-256 values before a release:
+
+```text
+portfolio 5b2bf5a34e9a65e7f2c6fca69a71553dac4c1b00f8b720e5cde3f71eaec5cafe
+order     6e2d179b9ecf706de8461ca6443efacfd22cb084ef6b49a0e2c94f2e49881b60
+```
+
+## Populated-upgrade checks
+
+Before applying additive Spot migrations to a current-baseline database:
+
+1. Record row counts and stable identities for `orders`, `order_fills`,
+   `order_lifecycle_events`, `portfolio_snapshots`, `reconciliation_runs`,
+   `strategy_sessions` and wallet-state tables.
+2. Record route identity columns for every existing Futures order/fill and the
+   current `schema_migrations` filenames.
+3. Apply each pending migration with the service migration runner; body and
+   ledger insert must commit atomically.
+4. Re-run the same migration runner and require every migration to be skipped.
+5. Compare pre/post row counts and identities. Backfill may populate new
+   columns or `order_fill_identities`; it must not delete, renumber or merge
+   historical order/fill/lifecycle/session/snapshot rows.
+6. Run Spot migration integration tests and the focused Futures regression
+   matrix before enabling any Spot capability.
+
+Rollback is capability-first: disable new Spot admission and roll consumers
+back in reverse order. Never delete order, fill, close-operation, wallet,
+snapshot or reconciliation history, and never remove an applied migration
+from `schema_migrations`. Correct a database defect with a new forward
+migration.
 
 ## Current object inventory
 
@@ -88,7 +176,8 @@ do not rewrite an already deployed filename.
 - Portfolio/Venue state: `portfolios`, `venues`, `venue_wallet_states`,
   `venue_events`, `portfolio_strategies`.
 - Strategy execution: `strategies`, `strategy_sessions`, `session_venues`,
-  `strategy_indicator_definitions`, `strategy_indicator_chunks`.
+  `strategy_indicator_definitions`, `strategy_indicator_chunks`,
+  `spot_session_risk_facts`.
 - Audit/state history: `portfolio_snapshots` and `reconciliation_runs` are
   Timescale hypertables with seven-day chunks.
 - Read model: `current_portfolio_snapshots` view.
@@ -104,6 +193,10 @@ API and intentionally do not depend on local `users` foreign keys.
 - `orders`
 - `order_fills` (Timescale hypertable with one-day chunks)
 - `order_lifecycle_events`
+- `order_fill_identities`
+- `spot_close_operations`
+- `spot_close_targets`
+- `spot_order_admission_leases`
 
 These tables preserve Portfolio/Venue/Session route facts, MARKET/LIMIT
 semantics, risk decisions, recovery state, and lifecycle event identity.
