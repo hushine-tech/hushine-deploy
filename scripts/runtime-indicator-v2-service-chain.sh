@@ -1447,43 +1447,45 @@ assert_cutover_markers() {
           shape
         }
       ] as $actual
-      | [
-          {
-            sequence:4,
-            offset:4,
-            time_ms:($start + 4 * 60000),
-            text:"BUY",
-            price:104,
-            color:"#16a34a",
-            position:"belowBar",
-            shape:"arrowUp"
-          },
-          {
-            sequence:9,
-            offset:9,
-            time_ms:($start + 9 * 60000),
-            text:"SELL",
-            price:109,
-            color:"#dc2626",
-            position:"aboveBar",
-            shape:"arrowDown"
-          }
-        ]
-        + (
-          if $state == "two-full-plus-tail" then
-            [{
-              sequence:1438,
-              offset:414,
-              time_ms:($start + 1438 * 60000),
+      | (
+          [
+            {
+              sequence:4,
+              offset:4,
+              time_ms:($start + 4 * 60000),
               text:"BUY",
-              price:138,
+              price:104,
               color:"#16a34a",
               position:"belowBar",
               shape:"arrowUp"
-            }]
-          else
-            []
-          end
+            },
+            {
+              sequence:9,
+              offset:9,
+              time_ms:($start + 9 * 60000),
+              text:"SELL",
+              price:109,
+              color:"#dc2626",
+              position:"aboveBar",
+              shape:"arrowDown"
+            }
+          ]
+          + (
+            if $state == "two-full-plus-tail" then
+              [{
+                sequence:1438,
+                offset:414,
+                time_ms:($start + 1438 * 60000),
+                text:"BUY",
+                price:138,
+                color:"#16a34a",
+                position:"belowBar",
+                shape:"arrowUp"
+              }]
+            else
+              []
+            end
+          )
         ) as $expected
       | $actual == $expected
     ' <<<"${snapshot}" >/dev/null
