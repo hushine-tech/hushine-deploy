@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 import time
@@ -93,6 +94,7 @@ while true; do sleep 1; done
         body: str,
     ) -> tuple[Path, int]:
         source_root = root / "source"
+        ready = root / "covered-service.ready"
         coverage = (
             source_root
             / "census-runs/instrumented-test/coverage"
@@ -100,7 +102,11 @@ while true; do sleep 1; done
         coverage.mkdir(parents=True)
         child = root / "covered-service.sh"
         child.write_text(
-            "#!/usr/bin/env bash\nset -e\n" + body + "\n",
+            "#!/usr/bin/env bash\n"
+            "set -e\n"
+            f"export CENSUS_TEST_READY_FILE={shlex.quote(str(ready))}\n"
+            + body
+            + "\n",
             encoding="utf-8",
         )
         child.chmod(0o755)
@@ -125,9 +131,22 @@ while true; do sleep 1; done
         )
         self.assertEqual(spawned.returncode, 0, spawned.stdout)
         pid = int(spawned.stdout.strip())
-        # launch_child intentionally detaches; allow the child to exec its
-        # interpreter and install signal handlers before exercising stop.
-        time.sleep(0.5)
+        # launch_child intentionally detaches. Wait for the child to confirm
+        # that its signal handler is installed instead of guessing with a
+        # wall-clock sleep, which is flaky under concurrent test load.
+        deadline = time.monotonic() + 15
+        while not ready.exists():
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                self.fail("covered service exited before readiness")
+            if time.monotonic() >= deadline:
+                try:
+                    os.killpg(pid, 9)
+                except ProcessLookupError:
+                    pass
+                self.fail("covered service did not become ready")
+            time.sleep(0.01)
         (coverage / "instrumented-stack-pids.tsv").write_text(
             f"core-service\t{pid}\t{log}\n",
             encoding="utf-8",
@@ -165,10 +184,16 @@ while true; do sleep 1; done
 
     def test_stop_records_fast_and_delayed_graceful_exit(self) -> None:
         cases = (
-            ("fast", "trap 'exit 0' TERM INT\nwhile true; do sleep 1; done"),
+            (
+                "fast",
+                "trap 'exit 0' TERM INT\n"
+                "printf 'ready\\n' > \"$CENSUS_TEST_READY_FILE\"\n"
+                "while true; do sleep 1; done",
+            ),
             (
                 "delayed",
                 "trap 'sleep 0.05; exit 0' TERM INT\n"
+                "printf 'ready\\n' > \"$CENSUS_TEST_READY_FILE\"\n"
                 "while true; do sleep 1; done",
             ),
         )
@@ -193,8 +218,10 @@ while true; do sleep 1; done
         with tempfile.TemporaryDirectory() as td:
             source_root, pid = self._spawn_stop_fixture(
                 Path(td),
-                "exec python3 -c 'import signal, time; "
+                "exec python3 -c 'import os, signal, time; "
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "open(os.environ[\"CENSUS_TEST_READY_FILE\"], "
+                "\"w\", encoding=\"utf-8\").write(\"ready\\\\n\"); "
                 "time.sleep(60)'",
             )
             proc, status = self._stop_fixture(source_root, timeout="0.05")
@@ -212,11 +239,65 @@ while true; do sleep 1; done
             )
             self.assertIn("forced core-service", proc.stdout)
 
+    def test_stop_forces_a_surviving_process_group_after_root_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grandchild_pid_file = root / "covered-service-grandchild.pid"
+            source_root, pid = self._spawn_stop_fixture(
+                root,
+                "trap 'exit 0' TERM INT\n"
+                "python3 -c 'import signal, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "time.sleep(60)' &\n"
+                f"printf '%s\\n' \"$!\" > "
+                f"{shlex.quote(str(grandchild_pid_file))}\n"
+                "printf 'ready\\n' > \"$CENSUS_TEST_READY_FILE\"\n"
+                "while true; do sleep 1; done",
+            )
+            grandchild_pid = int(
+                grandchild_pid_file.read_text(encoding="utf-8").strip()
+            )
+            try:
+                proc, status = self._stop_fixture(
+                    source_root,
+                    timeout="0.05",
+                )
+
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                self.assertEqual(
+                    status["services"],
+                    [
+                        {
+                            "service": "core-service",
+                            "pid": pid,
+                            "status": "forced",
+                        }
+                    ],
+                )
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(grandchild_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail(
+                        "covered service grandchild survived forced shutdown"
+                    )
+            finally:
+                try:
+                    os.killpg(pid, 9)
+                except ProcessLookupError:
+                    pass
+
     def test_stop_timeout_must_be_a_positive_bounded_number(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             source_root, pid = self._spawn_stop_fixture(
                 Path(td),
-                "trap 'exit 0' TERM INT\nwhile true; do sleep 1; done",
+                "trap 'exit 0' TERM INT\n"
+                "printf 'ready\\n' > \"$CENSUS_TEST_READY_FILE\"\n"
+                "while true; do sleep 1; done",
             )
             try:
                 proc, status = self._stop_fixture(

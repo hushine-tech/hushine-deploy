@@ -108,13 +108,14 @@ if [ ! -d "$RUN_DIR" ]; then
   exit 1
 fi
 
-terminate_process_tree() {
-  local pid="$1" signal="$2" child
-  while IFS= read -r child; do
-    [ -n "$child" ] || continue
-    terminate_process_tree "$child" "$signal"
-  done < <(pgrep -P "$pid" 2>/dev/null || true)
-  kill "-${signal}" "$pid" 2>/dev/null || true
+process_group_alive() {
+  local pid="$1"
+  kill -0 -- "-${pid}" 2>/dev/null
+}
+
+signal_process_group() {
+  local pid="$1" signal="$2"
+  kill "-${signal}" -- "-${pid}" 2>/dev/null || true
 }
 
 stop_stack() {
@@ -156,7 +157,7 @@ PY
       echo "invalid instrumented stack pid entry" >&2
       exit 1
     fi
-    if kill -0 "$pid" >/dev/null 2>&1; then
+    if process_group_alive "$pid"; then
       printf '%s\t%s\tpending\n' "$service" "$pid" >> "$state_file"
     else
       printf '%s\t%s\talready-stopped\n' "$service" "$pid" >> "$state_file"
@@ -167,7 +168,7 @@ PY
   while IFS=$'\t' read -r service pid status; do
     if [ "$status" = pending ]; then
       echo "stopping ${service} pid=${pid}"
-      terminate_process_tree "$pid" TERM
+      signal_process_group "$pid" TERM
     fi
   done < "$state_file"
 
@@ -189,9 +190,9 @@ for line in state_path.read_text(encoding="utf-8").splitlines():
     rows.append((service, int(raw_pid), initial))
 
 
-def alive(pid):
+def group_alive(pid):
     try:
-        os.kill(pid, 0)
+        os.killpg(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -203,20 +204,20 @@ deadline = time.monotonic() + timeout
 pending = {
     pid
     for _service, pid, initial in rows
-    if initial == "pending" and alive(pid)
+    if initial == "pending" and group_alive(pid)
 }
 while pending:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         break
     time.sleep(min(poll, remaining))
-    pending = {pid for pid in pending if alive(pid)}
+    pending = {pid for pid in pending if group_alive(pid)}
 
 with result_path.open("w", encoding="utf-8") as handle:
     for service, pid, initial in rows:
         if initial == "already-stopped":
             status = initial
-        elif alive(pid):
+        elif group_alive(pid):
             status = "forced"
         else:
             status = "graceful"
@@ -227,7 +228,7 @@ PY
     case "$status" in
       forced)
         echo "forced ${service} pid=${pid}"
-        terminate_process_tree "$pid" KILL
+        signal_process_group "$pid" KILL
         ;;
       graceful)
         echo "graceful ${service} pid=${pid}"
