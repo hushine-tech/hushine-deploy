@@ -10,6 +10,32 @@ runtime_coverage_error() {
   return 1
 }
 
+runtime_coverage_resolve_uv_bin() {
+  local candidate configured candidate_dir candidate_base canonical_dir
+  configured="${UV_BIN:-${UV:-}}"
+  candidate="${configured}"
+  if [[ -n "${configured}" ]]; then
+    if [[ "${candidate}" != */* ]]; then
+      candidate="$(command -v "${candidate}" 2>/dev/null || true)"
+    fi
+  else
+    candidate="$(command -v uv 2>/dev/null || true)"
+  fi
+  if [[ -z "${candidate}" && -z "${configured}" && -n "${HOME:-}" && -x "${HOME}/.local/bin/uv" ]]; then
+    candidate="${HOME}/.local/bin/uv"
+  fi
+  if [[ "${candidate}" == */* ]]; then
+    candidate_dir="$(dirname -- "${candidate}")"
+    candidate_base="$(basename -- "${candidate}")"
+    canonical_dir="$(cd -- "${candidate_dir}" 2>/dev/null && pwd -P)" || candidate=""
+    if [[ -n "${candidate}" ]]; then
+      candidate="${canonical_dir}/${candidate_base}"
+    fi
+  fi
+  [[ -n "${candidate}" && -x "${candidate}" ]] || return 1
+  printf '%s\n' "${candidate}"
+}
+
 runtime_coverage_safe_component() {
   local value="$1"
   [[ "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "${value}" != "." && "${value}" != ".." ]]
@@ -178,7 +204,7 @@ runtime_coverage_require_python_hits() {
 
 runtime_coverage_generate_reports() {
   local source_root="$1" go_dir="$2" python_input_dir="$3" report_root="$4"
-  local go_merged python_rc report
+  local go_merged python_rc report uv_bin
   if ! find "${go_dir}" -type f -print -quit | grep -q .; then
     runtime_coverage_error "Go coverage output is missing: ${go_dir}"
     return 1
@@ -198,6 +224,10 @@ runtime_coverage_generate_reports() {
   )
 
   python_rc="${report_root}/python-report.coveragerc"
+  if ! uv_bin="$(runtime_coverage_resolve_uv_bin)"; then
+    runtime_coverage_error "required command not found: uv"
+    return 1
+  fi
   {
     echo '[paths]'
     echo 'source ='
@@ -209,9 +239,9 @@ runtime_coverage_generate_reports() {
     export COVERAGE_FILE="${python_input_dir}/.coverage"
     export COVERAGE_RCFILE="${python_rc}"
     cd "${source_root}/strategy-service"
-    uv run --frozen --extra coverage coverage combine --keep "${python_input_dir}"
-    uv run --frozen --extra coverage coverage report --keep-combined >"${report_root}/python-report.txt"
-    uv run --frozen --extra coverage coverage json --keep-combined -o "${report_root}/python-coverage.json"
+    "${uv_bin}" run --frozen --extra coverage coverage combine --keep "${python_input_dir}"
+    "${uv_bin}" run --frozen --extra coverage coverage report --keep-combined >"${report_root}/python-report.txt"
+    "${uv_bin}" run --frozen --extra coverage coverage json --keep-combined -o "${report_root}/python-coverage.json"
   )
 
   for report in \

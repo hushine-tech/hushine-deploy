@@ -385,7 +385,14 @@ mkdir -m 0700 -p "${fallback_home}/.local/bin"
 cp "${fake_bin}/go" "${fallback_bin}/go"
 cp "${fake_bin}/uv" "${fallback_home}/.local/bin/uv"
 chmod 0700 "${fallback_bin}/go" "${fallback_home}/.local/bin/uv"
-HOME="${fallback_home}" PATH="${fallback_bin}:${PATH}" \
+fallback_path=""
+IFS=: read -r -a fallback_path_entries <<<"${PATH}"
+for path_entry in "${fallback_path_entries[@]}"; do
+  [[ -n "${path_entry}" ]] || continue
+  [[ ! -x "${path_entry}/uv" && ! -x "${path_entry}/uv.exe" ]] || continue
+  fallback_path="${fallback_path:+${fallback_path}:}${path_entry}"
+done
+HOME="${fallback_home}" PATH="${fallback_bin}:${fallback_path}" \
   HUSHINE_SOURCE_ROOT="${source_root}" \
   "${SCRIPT}" capture-coexistence \
   --state-dir "${fallback_state}" \

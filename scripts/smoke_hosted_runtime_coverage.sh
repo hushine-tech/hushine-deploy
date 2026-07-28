@@ -46,12 +46,17 @@ if [[ ! "${EXPECTED_INPUT_COUNT}" =~ ^[0-9]+$ ]]; then
   echo "EXPECTED_INPUT_COUNT must be zero or a positive integer" >&2
   exit 2
 fi
-for command in docker go jq uv; do
+for command in docker go jq; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "required command not found: ${command}" >&2
     exit 1
   fi
 done
+if ! UV_BIN="$(runtime_coverage_resolve_uv_bin)"; then
+  echo "required command not found: uv" >&2
+  exit 1
+fi
+export UV_BIN
 
 IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${COVERAGE_IMAGE}" 2>/dev/null || true)"
 if [[ -z "${IMAGE_ID}" ]]; then

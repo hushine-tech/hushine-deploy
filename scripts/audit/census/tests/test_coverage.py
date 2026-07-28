@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -2078,6 +2077,33 @@ class CoverageTests(unittest.TestCase):
             self.assertIn("python-repo", str(caught.exception))
             self.assertTrue((ctx.run_dir / "coverage/unit-coverage-summary.json").exists())
 
+    def test_resolve_uv_executable_falls_back_to_home_local_bin(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            uv = home / ".local" / "bin" / ("uv.exe" if os.name == "nt" else "uv")
+            uv.parent.mkdir(parents=True)
+            uv.write_text("", encoding="utf-8")
+            uv.chmod(0o700)
+
+            resolved = coverage.resolve_uv_executable(
+                {"HOME": str(home), "PATH": str(home / "empty-path")}
+            )
+
+        self.assertEqual(resolved, str(uv.resolve()))
+
+    def test_resolve_uv_executable_rejects_missing_configured_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(CoverageCollectionFailed) as caught:
+                coverage.resolve_uv_executable(
+                    {
+                        "HOME": td,
+                        "PATH": str(Path(td) / "empty-path"),
+                        "UV_BIN": str(Path(td) / "missing-uv"),
+                    }
+                )
+
+        self.assertIn("configured uv executable was not found", str(caught.exception))
+
     def test_collect_unit_coverage_includes_every_frontend_contract(self):
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td)
@@ -2181,7 +2207,8 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(
             calls[0][0],
             [
-                "uv", "run", "--frozen", "--extra", "dev", "--with", "coverage",
+                coverage.resolve_uv_executable(),
+                "run", "--frozen", "--extra", "dev", "--with", "coverage",
                 "coverage", "run", "--parallel-mode", "-m", "pytest", "tests/", "-q",
             ],
         )
@@ -2250,7 +2277,7 @@ class CoverageTests(unittest.TestCase):
             )
 
         locked_prefix = [
-            "uv",
+            coverage.resolve_uv_executable(),
             "run",
             "--frozen",
             "--extra",
@@ -2314,8 +2341,11 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(result["python"]["status"], "error")
         self.assertEqual(result["python"]["step"], "coverage json has zero covered lines")
 
-    @unittest.skipUnless(shutil.which("uv"), "uv is required for real coverage data")
     def test_hosted_python_report_remaps_container_source_paths(self):
+        try:
+            uv_executable = coverage.resolve_uv_executable()
+        except CoverageCollectionFailed as exc:
+            self.skipTest(str(exc))
         tool_root = Path(__file__).resolve().parents[5]
         source_root = Path(os.environ.get("CODE_CENSUS_SOURCE_ROOT", tool_root))
         source_dir = source_root / "strategy-service"
@@ -2359,7 +2389,7 @@ class CoverageTests(unittest.TestCase):
             )
             generated = subprocess.run(
                 [
-                    "uv",
+                    uv_executable,
                     "run",
                     "--frozen",
                     "--extra",
@@ -2389,8 +2419,11 @@ class CoverageTests(unittest.TestCase):
         self.assertTrue(raw_data_preserved)
         self.assertIn(source_path.as_posix(), report)
 
-    @unittest.skipUnless(shutil.which("uv"), "uv is required for real coverage data")
     def test_hosted_python_report_remaps_isolated_venv_source_paths(self):
+        try:
+            uv_executable = coverage.resolve_uv_executable()
+        except CoverageCollectionFailed as exc:
+            self.skipTest(str(exc))
         tool_root = Path(__file__).resolve().parents[5]
         source_root = Path(os.environ.get("CODE_CENSUS_SOURCE_ROOT", tool_root))
         source_dir = source_root / "strategy-service"
@@ -2415,7 +2448,7 @@ class CoverageTests(unittest.TestCase):
             )
             generated = subprocess.run(
                 [
-                    "uv", "run", "--frozen", "--extra", "coverage",
+                    uv_executable, "run", "--frozen", "--extra", "coverage",
                     "python", "-c", create_data,
                 ],
                 cwd=source_dir,

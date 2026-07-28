@@ -2,6 +2,7 @@
 set -euo pipefail
 
 DEPLOY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+source "${DEPLOY_ROOT}/scripts/lib/runtime_coverage.sh"
 SOURCE_ROOT="${HUSHINE_SOURCE_ROOT:-$(cd "${DEPLOY_ROOT}/.." && pwd -P)}"
 DRY_RUN="${HUSHINE_VERIFY_SPOT_DRY_RUN:-0}"
 COMMAND_LOG="${HUSHINE_VERIFY_SPOT_COMMAND_LOG:-}"
@@ -85,7 +86,7 @@ require_futures_pytest_collection() {
   fi
   output="$(
     cd "${directory}"
-    env PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+    env PYTHONPATH=.:../strategy-library "${UV_BIN}" run --frozen --extra dev pytest \
       tests/test_wallet_runtime.py tests/test_grpc_server.py --collect-only -q \
       -k 'futures_control_unchanged or futures_stop_paths_unchanged'
   )"
@@ -170,7 +171,7 @@ run_backtest() {
   run_in "${SOURCE_ROOT}/core-service" go run ./cmd/generate-spot-filter-vectors -check "${core_fixture}"
   require_go_test_exact "${SOURCE_ROOT}/core-service" ./internal/order/risk TestSpotFilterContract
   run_in "${SOURCE_ROOT}/core-service" go test ./internal/order/risk -run '^TestSpotFilterContract$' -count=1
-  run_in "${SOURCE_ROOT}/strategy-service" env PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/test_spot_filter_contract.py tests/test_spot_end_to_end.py -q
+  run_in "${SOURCE_ROOT}/strategy-service" env PYTHONPATH=.:../strategy-library "${UV_BIN}" run --frozen --extra dev pytest tests/test_spot_filter_contract.py tests/test_spot_end_to_end.py -q
 }
 
 run_offline() {
@@ -178,8 +179,8 @@ run_offline() {
   verify_fixture_hashes
   run_in "${SOURCE_ROOT}/core-service" go run ./cmd/generate-spot-filter-vectors -check "${SOURCE_ROOT}/strategy-library/tests/fixtures/spot_filter_contract_v1.json"
   run_in "${SOURCE_ROOT}/core-service" go run ./cmd/generate-spot-filter-vectors -check "${SOURCE_ROOT}/strategy-debugger-cli/tests/fixtures/spot_filter_contract_v1.json"
-  run_in "${SOURCE_ROOT}/strategy-library" uv run --isolated --no-project --with-editable '.[test]' pytest tests/hushine_strategy/test_spot_filter_contract.py -q
-  run_debugger uv run --frozen --extra test pytest tests/test_spot_filter_contract.py tests/test_spot_package_v2.py tests/test_mixed_route_package_v2.py -q
+  run_in "${SOURCE_ROOT}/strategy-library" "${UV_BIN}" run --isolated --no-project --with-editable '.[test]' pytest tests/hushine_strategy/test_spot_filter_contract.py -q
+  run_debugger "${UV_BIN}" run --frozen --extra test pytest tests/test_spot_filter_contract.py tests/test_spot_package_v2.py tests/test_mixed_route_package_v2.py -q
 }
 
 run_filters() {
@@ -190,9 +191,9 @@ run_filters() {
   run_in "${SOURCE_ROOT}/core-service" go run ./cmd/generate-spot-filter-vectors -check "${core_fixture}"
   require_go_test_exact "${SOURCE_ROOT}/core-service" ./internal/order/risk TestSpotFilterContract
   run_in "${SOURCE_ROOT}/core-service" go test ./internal/order/risk -run '^TestSpotFilterContract$' -count=1
-  run_in "${SOURCE_ROOT}/strategy-service" env PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/test_spot_filter_contract.py tests/test_spot_end_to_end.py -q
-  run_in "${SOURCE_ROOT}/strategy-library" uv run --isolated --no-project --with-editable '.[test]' pytest tests/hushine_strategy/test_spot_filter_contract.py tests/hushine_strategy/test_mixed_route_replay.py -q
-  run_debugger uv run --frozen --extra test pytest tests/test_spot_filter_contract.py tests/test_spot_package_v2.py tests/test_mixed_route_package_v2.py -q
+  run_in "${SOURCE_ROOT}/strategy-service" env PYTHONPATH=.:../strategy-library "${UV_BIN}" run --frozen --extra dev pytest tests/test_spot_filter_contract.py tests/test_spot_end_to_end.py -q
+  run_in "${SOURCE_ROOT}/strategy-library" "${UV_BIN}" run --isolated --no-project --with-editable '.[test]' pytest tests/hushine_strategy/test_spot_filter_contract.py tests/hushine_strategy/test_mixed_route_replay.py -q
+  run_debugger "${UV_BIN}" run --frozen --extra test pytest tests/test_spot_filter_contract.py tests/test_spot_package_v2.py tests/test_mixed_route_package_v2.py -q
 }
 
 run_stop() {
@@ -203,7 +204,7 @@ run_stop() {
   run_in "${SOURCE_ROOT}/core-service" go test ./internal/order/storage/migrations -run '^TestSpotCloseOperationsMigrationContract$' -count=1
   require_go_test_pattern "${SOURCE_ROOT}/control-panel-service" ./internal/runtimechannel '^TestCloseSpotTargetsProxy'
   run_in "${SOURCE_ROOT}/control-panel-service" go test ./internal/runtimechannel -run '^TestCloseSpotTargetsProxy' -count=1
-  run_in "${SOURCE_ROOT}/strategy-service" env PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/test_grpc_server.py -q -k 'spot and stop'
+  run_in "${SOURCE_ROOT}/strategy-service" env PYTHONPATH=.:../strategy-library "${UV_BIN}" run --frozen --extra dev pytest tests/test_grpc_server.py -q -k 'spot and stop'
 }
 
 run_futures() {
@@ -215,7 +216,7 @@ run_futures() {
   require_go_test_exact "${SOURCE_ROOT}/core-service" ./internal/order/service TestFuturesMarketLimitRiskLifecycleControlUnchanged
   run_in "${SOURCE_ROOT}/core-service" go test ./internal/order/service -run '^TestFuturesMarketLimitRiskLifecycleControlUnchanged$' -count=1
   require_futures_pytest_collection
-  run_in "${SOURCE_ROOT}/strategy-service" env PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/test_wallet_runtime.py tests/test_grpc_server.py -q -k 'futures_control_unchanged or futures_stop_paths_unchanged'
+  run_in "${SOURCE_ROOT}/strategy-service" env PYTHONPATH=.:../strategy-library "${UV_BIN}" run --frozen --extra dev pytest tests/test_wallet_runtime.py tests/test_grpc_server.py -q -k 'futures_control_unchanged or futures_stop_paths_unchanged'
   require_go_test_exact "${SOURCE_ROOT}/control-panel-service" ./internal/runtimechannel TestFuturesRuntimeChannelOrderAndStopProxyUnchanged
   run_in "${SOURCE_ROOT}/control-panel-service" go test ./internal/runtimechannel -run '^TestFuturesRuntimeChannelOrderAndStopProxyUnchanged$' -count=1
 }
@@ -275,6 +276,14 @@ case "${scope}" in
     usage
     ;;
 esac
+
+if [[ "${DRY_RUN}" == "1" ]]; then
+  UV_BIN="${UV_BIN:-uv}"
+elif ! UV_BIN="$(runtime_coverage_resolve_uv_bin)"; then
+  echo "verify Spot USDT requires uv (set UV_BIN/UV or install it in PATH or HOME/.local/bin)" >&2
+  exit 127
+fi
+export UV_BIN
 
 case "${scope}" in
   backtest) run_backtest ;;

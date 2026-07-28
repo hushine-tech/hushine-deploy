@@ -94,6 +94,20 @@ for required in \
   }
 done
 
+fallback_uv_home="$tmpdir/fallback-uv-home"
+mkdir -p "$fallback_uv_home/.local/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fallback_uv_home/.local/bin/uv"
+chmod 0700 "$fallback_uv_home/.local/bin/uv"
+fallback_uv_command="$(
+  HOME="$fallback_uv_home" PATH="/usr/bin:/bin" \
+    make -n -f "$deploy_root/Makefile" SOURCE_ROOT="$explicit" \
+      RUN_ID=source-root-test code-census-static
+)"
+grep -Fq -- "\"$fallback_uv_home/.local/bin/uv\" run" <<<"$fallback_uv_command" || {
+  echo 'Makefile did not resolve uv from HOME/.local/bin' >&2
+  exit 1
+}
+
 for target in \
   ensure-dbs db-schema-bundle local-configs local-infra-up local-infra-down \
   local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs \

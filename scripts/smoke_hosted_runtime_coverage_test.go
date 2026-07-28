@@ -251,6 +251,17 @@ func TestTerminalRuntimeStatusRequiresCancelled(t *testing.T) {
 	}
 }
 
+func TestCoverageDebugExecutableHonorsUVBin(t *testing.T) {
+	t.Setenv("UV_BIN", " /portable/tools/uv ")
+	if got := coverageDebugExecutable(); got != "/portable/tools/uv" {
+		t.Fatalf("coverageDebugExecutable() = %q, want UV_BIN override", got)
+	}
+	t.Setenv("UV_BIN", "")
+	if got := coverageDebugExecutable(); got != "uv" {
+		t.Fatalf("coverageDebugExecutable() = %q, want PATH fallback", got)
+	}
+}
+
 func TestRunningSessionIDsAreSafeDeterministicAndUnique(t *testing.T) {
 	got := runningSessionIDs([]*portfoliov1.StrategySessionEntry{
 		{SessionId: " session-b "},

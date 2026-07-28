@@ -81,12 +81,17 @@ while IFS= read -r environment_name; do
   esac
 done < <(compgen -e)
 
-for command in docker go jq python3 uv; do
+for command in docker go jq python3; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "required command not found: ${command}" >&2
     exit 1
   fi
 done
+if ! UV_BIN="$(runtime_coverage_resolve_uv_bin)"; then
+  echo "required command not found: uv" >&2
+  exit 1
+fi
+export UV_BIN
 IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${COVERAGE_IMAGE}" 2>/dev/null || true)"
 if [[ -z "${IMAGE_ID}" ]]; then
   echo "coverage image not found: ${COVERAGE_IMAGE}" >&2
@@ -311,7 +316,7 @@ fi
     exit 1
   }
   ./scripts/with-local-strategy-library-git.sh "${SOURCE_ROOT}/strategy-library" \
-    "${library_commit}" uv run --frozen --extra test pytest \
+    "${library_commit}" "${UV_BIN}" run --frozen --extra test pytest \
       tests/test_spot_package_v2.py tests/test_mixed_route_package_v2.py -q
 )
 

@@ -3,6 +3,7 @@ set -euo pipefail
 
 DEPLOY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SOURCE_ROOT="${HUSHINE_SOURCE_ROOT:-$(cd "${DEPLOY_ROOT}/.." && pwd -P)}"
+source "${DEPLOY_ROOT}/scripts/lib/runtime_coverage.sh"
 SCANNER="${DEPLOY_ROOT}/scripts/scan-saved-strategy-imports.py"
 SERVICE_PYTHON="${RUNTIME_DEPENDENCY_PYTHON:-${SOURCE_ROOT}/strategy-service/.venv/bin/python}"
 
@@ -337,8 +338,8 @@ required = (
     'test "$${#RUNTIME_DEPENDENCY_BASE_SHA}" -eq 40',
     'git -C "$(SOURCE_ROOT)/strategy-library" cat-file -e "$${RUNTIME_DEPENDENCY_BASE_SHA}^{commit}"',
     'test ! -e "$(SOURCE_ROOT)/strategy-library/uv.lock"',
-    "uv run --isolated --no-project --with-editable '.[test]'",
-    'uv sync --project "$(SOURCE_ROOT)/strategy-service" --python 3.13 --frozen --extra dev',
+    '"$(UV)" run --isolated --no-project --with-editable \'.[test]\'',
+    '"$(UV)" sync --project "$(SOURCE_ROOT)/strategy-service" --python 3.13 --frozen --extra dev',
     "./scripts/with-local-strategy-library-git.sh",
     "runtime-dependency-contract: runtime-dependency-envs",
     "--installed-python strategy-service=../strategy-service/.venv/bin/python",
@@ -659,7 +660,7 @@ PY
 }
 
 run_acceptance() {
-  local checker_json base_sha service_dir verify_script smoke_script source_test_runner
+  local checker_json base_sha service_dir verify_script smoke_script source_test_runner uv_bin
   local normal_image coverage_image fault_build_image fault_startup_image fault_dockerfile
   local checker_values profile version digest inspect_json metadata_status
   local coverage_probe fault_distribution fault_status startup_timeout
@@ -683,6 +684,8 @@ run_acceptance() {
   [[ -f "${fault_dockerfile}" ]] || fail "missing dependency fault Dockerfile"
   [[ "${startup_timeout}" =~ ^[0-9]+$ && "${startup_timeout}" -ge 1 && "${startup_timeout}" -le 120 ]] \
     || fail "RUNTIME_STARTUP_FAULT_TIMEOUT_SECONDS must be between 1 and 120"
+  uv_bin="$(runtime_coverage_resolve_uv_bin)" \
+    || fail "uv is required (set UV_BIN/UV or install it in PATH or HOME/.local/bin)"
 
   set +e
   checker_values="$(RUNTIME_CHECKER_INPUT="${checker_json}" \
@@ -745,7 +748,7 @@ PY
   else
     (
       cd "${service_dir}"
-      PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest \
+      PYTHONPATH=.:../strategy-library "${uv_bin}" run --frozen --extra dev pytest \
         tests/test_strategy_runtime_dockerfile.py \
         tests/test_runtime_image_scripts.py -q
     )

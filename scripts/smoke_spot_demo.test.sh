@@ -50,6 +50,8 @@ for literal in \
   'runtime_coverage_generate_reports'; do
   require_literal "${SCRIPT}" "${literal}"
 done
+require_literal "${SCRIPT}" 'runtime_coverage_resolve_uv_bin'
+require_literal "${COVERAGE_LIB}" '${HOME}/.local/bin/uv'
 
 if grep -Fq 'set -x' "${SCRIPT}"; then
   fail "smoke must never enable shell tracing"
@@ -59,6 +61,9 @@ if grep -Fq 'exec {SPOT_DEMO_OBSERVER_SESSION_FD}>&- 2>/dev/null' "${SCRIPT}"; t
 fi
 if rg -n 'PYTHONPATH=' "${SCRIPT}" >/dev/null; then
   fail "production Spot Demo smoke must use the frozen installed environment"
+fi
+if grep -Fq '/Users/xdy/.local/bin/uv' "${SCRIPT}"; then
+  fail "production Spot Demo smoke contains a machine-specific uv path"
 fi
 
 for literal in \
@@ -330,7 +335,7 @@ set -euo pipefail
 [[ "$#" -ge 4 ]]
 [[ "$1" == "${TEST_EXPECTED_LIBRARY_SOURCE}" ]]
 [[ "$2" == "${TEST_EXPECTED_LIBRARY_COMMIT}" ]]
-[[ "$3" == 'uv' ]]
+[[ "$3" == "${TEST_EXPECTED_UV_BIN}" ]]
 printf 'offline-wrapper\n' >>"${TEST_OFFLINE_LOG}"
 EOF
 chmod +x \
@@ -433,6 +438,7 @@ run_smoke() {
     TEST_OFFLINE_LOG="${offline_log}" \
     TEST_EXPECTED_LIBRARY_SOURCE="${fake_source}/strategy-library" \
     TEST_EXPECTED_LIBRARY_COMMIT="${expected_library_commit}" \
+    TEST_EXPECTED_UV_BIN="${fake_bin}/uv" \
     TEST_ENDED_FILE="${ended_file}" \
     TEST_RUN_COUNTER="${run_counter}" \
     TEST_RUNTIME_ROOT="${runtime_root}" \

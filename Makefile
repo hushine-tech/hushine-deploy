@@ -12,7 +12,9 @@
 DEPLOY_ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 SOURCE_ROOT ?= $(if $(wildcard $(DEPLOY_ROOT)/core-service),$(DEPLOY_ROOT),$(abspath $(DEPLOY_ROOT)/..))
 SERVICES := core-service control-panel-service strategy-service gateway/quant-handler gateway/quant-frontend scraper
-CODE_CENSUS ?= uv run --isolated --no-project --with-requirements $(DEPLOY_ROOT)/scripts/audit/census/requirements.txt python $(DEPLOY_ROOT)/scripts/audit/census/code_census.py
+UV ?= $(shell if command -v uv >/dev/null 2>&1; then command -v uv; elif [ -n "$$HOME" ] && [ -x "$$HOME/.local/bin/uv" ]; then printf '%s\n' "$$HOME/.local/bin/uv"; else printf '%s\n' uv; fi)
+export UV
+CODE_CENSUS ?= "$(UV)" run --isolated --no-project --with-requirements $(DEPLOY_ROOT)/scripts/audit/census/requirements.txt python $(DEPLOY_ROOT)/scripts/audit/census/code_census.py
 CODE_CENSUS_ARGS := --source-root $(SOURCE_ROOT) --config $(DEPLOY_ROOT)/scripts/audit/census/config.yaml
 LOCAL_COMPOSE := docker compose -f $(DEPLOY_ROOT)/deploy/local/docker-compose.yml
 DEV_NO_PROXY_HOSTS ?= 127.0.0.1,localhost,::1,host.docker.internal
@@ -171,16 +173,16 @@ runtime-dependency-envs:
 	test "$${#RUNTIME_DEPENDENCY_BASE_SHA}" -eq 40
 	git -C "$(SOURCE_ROOT)/strategy-library" cat-file -e "$${RUNTIME_DEPENDENCY_BASE_SHA}^{commit}"
 	test ! -e "$(SOURCE_ROOT)/strategy-library/uv.lock"
-	cd "$(SOURCE_ROOT)/strategy-library" && uv run --isolated --no-project --with-editable '.[test]' \
+	cd "$(SOURCE_ROOT)/strategy-library" && "$(UV)" run --isolated --no-project --with-editable '.[test]' \
 		python -c 'import hushine_strategy, pytest'
 	test ! -e "$(SOURCE_ROOT)/strategy-library/uv.lock"
-	uv sync --project "$(SOURCE_ROOT)/strategy-service" --python 3.13 --frozen --extra dev
+	"$(UV)" sync --project "$(SOURCE_ROOT)/strategy-service" --python 3.13 --frozen --extra dev
 	cd "$(SOURCE_ROOT)/strategy-debugger-cli" && LIBRARY_COMMIT="$$(git -C "$(SOURCE_ROOT)/strategy-library" rev-parse HEAD)" && \
 		./scripts/with-local-strategy-library-git.sh \
-		"$(SOURCE_ROOT)/strategy-library" "$$LIBRARY_COMMIT" uv sync --frozen --extra test
+		"$(SOURCE_ROOT)/strategy-library" "$$LIBRARY_COMMIT" "$(UV)" sync --frozen --extra test
 
 runtime-dependency-contract: runtime-dependency-envs
-	cd "$(SOURCE_ROOT)/strategy-library" && uv run --isolated --no-project --with-editable '.[test]' \
+	cd "$(SOURCE_ROOT)/strategy-library" && "$(UV)" run --isolated --no-project --with-editable '.[test]' \
 		python scripts/check_runtime_dependency_contract.py \
 		--service-project ../strategy-service/pyproject.toml \
 		--service-lock ../strategy-service/uv.lock \
@@ -198,7 +200,7 @@ runtime-images-verify:
 
 runtime-dependency-acceptance: runtime-dependency-contract runtime-images-verify
 	@RUNTIME_DEPENDENCY_CHECKER_JSON="$$(cd "$(SOURCE_ROOT)/strategy-library" && \
-		uv run --isolated --no-project --with-editable '.[test]' \
+		"$(UV)" run --isolated --no-project --with-editable '.[test]' \
 		python scripts/check_runtime_dependency_contract.py \
 		--service-project ../strategy-service/pyproject.toml \
 		--service-lock ../strategy-service/uv.lock \

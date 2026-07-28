@@ -53,6 +53,39 @@ class CoverageCollectionFailed(RuntimeError):
     pass
 
 
+def resolve_uv_executable(env: dict[str, str] | None = None) -> str:
+    values = os.environ if env is None else env
+    path_value = values.get("PATH") or os.defpath
+    configured = (values.get("UV_BIN") or values.get("UV") or "").strip()
+    if configured:
+        resolved = shutil.which(configured, path=path_value)
+        if resolved:
+            return str(Path(resolved).resolve())
+        candidate = Path(configured)
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+        raise CoverageCollectionFailed(
+            f"FAILED_COVERAGE: configured uv executable was not found: {configured}"
+        )
+
+    resolved = shutil.which("uv", path=path_value)
+    if resolved:
+        return str(Path(resolved).resolve())
+    home = values.get("HOME", "").strip()
+    if home:
+        names = ("uv.exe", "uv") if os.name == "nt" else ("uv",)
+        for name in names:
+            candidate = Path(home) / ".local" / "bin" / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate.resolve())
+    raise CoverageCollectionFailed(
+        "FAILED_COVERAGE: uv executable was not found "
+        "(set UV_BIN/UV or install it in PATH or HOME/.local/bin)"
+    )
+
+
 def collect_unit_coverage(ctx, cfg) -> list[dict]:
     results = []
     for service in cfg.services:
@@ -98,6 +131,8 @@ def run_python_unit_coverage(ctx, service):
     env.update(assignments)
     coverage_file = out / ".coverage"
     env["COVERAGE_FILE"] = str(coverage_file)
+    uv_executable = resolve_uv_executable(env)
+    unit_command[0] = uv_executable
     logs = []
     test = subprocess.run(
         unit_command,
@@ -111,7 +146,7 @@ def run_python_unit_coverage(ctx, service):
     exit_code = test.returncode
     coverage_status = "missing"
     coverage_tool = [
-        "uv",
+        uv_executable,
         "run",
         "--isolated",
         "--no-project",
@@ -2479,7 +2514,7 @@ def _collect_combined_python_coverage(
         _write_hosted_python_report_config(combined_dir, source_dir)
     )
     coverage_command = [
-        "uv",
+        resolve_uv_executable(env),
         "run",
         "--frozen",
         "--extra",
@@ -2645,7 +2680,7 @@ def _collect_hosted_python_coverage(
         _write_hosted_python_report_config(runtime_dir, source_dir)
     )
     coverage = [
-        "uv",
+        resolve_uv_executable(env),
         "run",
         "--frozen",
         "--extra",
@@ -2814,14 +2849,15 @@ def collect_python_runtime_coverage(ctx, service: dict, out: Path) -> dict:
     repo = ctx.workspace / service["path"]
     env = os.environ.copy()
     env["COVERAGE_FILE"] = str(out / ".coverage")
-    combine = subprocess.run(["uv", "run", "--with", "coverage", "coverage", "combine", str(out)], cwd=repo, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    uv_executable = resolve_uv_executable(env)
+    combine = subprocess.run([uv_executable, "run", "--with", "coverage", "coverage", "combine", str(out)], cwd=repo, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (out / "coverage-combine-output.txt").write_text(combine.stdout, encoding="utf-8")
     if combine.returncode != 0:
         return {"service": service["name"], "kind": "python_runtime_coverage", "status": "error", "exit_code": combine.returncode, "output": str(out.relative_to(ctx.run_dir))}
     with (out / "functions.txt").open("w", encoding="utf-8") as fh:
-        report = subprocess.run(["uv", "run", "--with", "coverage", "coverage", "report"], cwd=repo, env=env, text=True, stdout=fh, stderr=subprocess.STDOUT)
+        report = subprocess.run([uv_executable, "run", "--with", "coverage", "coverage", "report"], cwd=repo, env=env, text=True, stdout=fh, stderr=subprocess.STDOUT)
     json_out = out / "runtime-coverage.json"
-    subprocess.run(["uv", "run", "--with", "coverage", "coverage", "json", "-o", str(json_out)], cwd=repo, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    subprocess.run([uv_executable, "run", "--with", "coverage", "coverage", "json", "-o", str(json_out)], cwd=repo, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return {"service": service["name"], "kind": "python_runtime_coverage", "status": "ok" if report.returncode == 0 else "error", "exit_code": report.returncode, "output": str(out.relative_to(ctx.run_dir))}
 
 

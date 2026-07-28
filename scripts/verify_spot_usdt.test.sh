@@ -12,6 +12,8 @@ fail() {
 test -x "${SCRIPT}" || fail "verifier is missing or not executable"
 bash -n "${SCRIPT}"
 grep -Fq 'set -euo pipefail' "${SCRIPT}" || fail "strict mode is required"
+grep -Fq 'source "${DEPLOY_ROOT}/scripts/lib/runtime_coverage.sh"' "${SCRIPT}" \
+  || fail "shared tool-path resolver is required"
 if grep -Fq 'set -x' "${SCRIPT}"; then
   fail "verifier must never enable shell tracing"
 fi
@@ -59,6 +61,26 @@ assert_ordered_scopes 'all-local backtest offline ui filters stop futures'
 if grep -Fxq 'scope:demo' "${log}"; then
   fail "all-local must never run Demo"
 fi
+
+fallback_home="${tmp}/fallback-home"
+fallback_uv_log="${tmp}/fallback-uv.log"
+mkdir -p "${fallback_home}/.local/bin"
+cat >"${fallback_home}/.local/bin/uv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${FAKE_UV_LOG}"
+EOF
+chmod 0700 "${fallback_home}/.local/bin/uv"
+go_bin_dir="$(dirname -- "$(command -v go)")"
+GOCACHE="$(go env GOCACHE)" \
+GOMODCACHE="$(go env GOMODCACHE)" \
+HOME="${fallback_home}" \
+PATH="${go_bin_dir}:/usr/local/bin:/usr/bin:/bin" \
+FAKE_UV_LOG="${fallback_uv_log}" \
+  "${SCRIPT}" backtest
+grep -Fq 'run --frozen --extra dev pytest tests/test_spot_filter_contract.py tests/test_spot_end_to_end.py -q' \
+  "${fallback_uv_log}" \
+  || fail "verifier did not resolve uv from HOME/.local/bin"
 
 for literal in \
   'go run ./cmd/generate-spot-filter-vectors -check' \

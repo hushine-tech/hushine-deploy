@@ -1161,11 +1161,18 @@ func stableFileIdentity(left, right fs.FileInfo) bool {
 		left.ModTime().Equal(right.ModTime())
 }
 
+func coverageDebugExecutable() string {
+	if executable := strings.TrimSpace(os.Getenv("UV_BIN")); executable != "" {
+		return executable
+	}
+	return "uv"
+}
+
 func lockedCoverageDebugRunner(strategyRoot string) coverageDebugRunner {
 	return func(ctx context.Context, shard string, output io.Writer) error {
 		cmd := exec.CommandContext(
 			ctx,
-			"uv", "run", "--frozen", "--extra", "coverage", "coverage", "debug", "data",
+			coverageDebugExecutable(), "run", "--frozen", "--extra", "coverage", "coverage", "debug", "data",
 		)
 		cmd.Dir = strategyRoot
 		cmd.Env = environmentWithValue(os.Environ(), "COVERAGE_FILE", shard)

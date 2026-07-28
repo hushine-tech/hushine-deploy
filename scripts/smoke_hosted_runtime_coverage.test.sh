@@ -48,6 +48,7 @@ for literal in \
   'runtime_coverage_stage_locked_inputs() {' \
   'runtime_coverage_require_finalization() {' \
   'runtime_coverage_require_python_hits() {' \
+  'runtime_coverage_resolve_uv_bin() {' \
   'runtime_coverage_generate_reports() {'; do
   require_literal "${COVERAGE_LIB}" "${literal}"
 done
@@ -196,6 +197,41 @@ zero_python_coverage="${fixture_dir}/zero-python-coverage.json"
 printf '%s\n' '{"totals":{"covered_lines":1}}' >"${nonzero_python_coverage}"
 printf '%s\n' '{"totals":{"covered_lines":0}}' >"${zero_python_coverage}"
 source "${COVERAGE_LIB}"
+relative_uv_root="${fixture_dir}/relative-uv"
+mkdir -p "${relative_uv_root}/tools"
+cat >"${relative_uv_root}/tools/uv" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 0700 "${relative_uv_root}/tools/uv"
+(
+  cd "${relative_uv_root}"
+  UV_BIN=tools/uv
+  resolved_uv="$(runtime_coverage_resolve_uv_bin)"
+  [[ "${resolved_uv}" == "${relative_uv_root}/tools/uv" ]] \
+    || fail "relative UV_BIN was not normalized to an absolute executable"
+  cd /
+  "${resolved_uv}" --version
+)
+(
+  cd "${relative_uv_root}"
+  unset UV_BIN
+  UV=tools/uv
+  HOME="${fixture_dir}/empty-home"
+  PATH="/usr/bin:/bin"
+  resolved_uv="$(runtime_coverage_resolve_uv_bin)"
+  [[ "${resolved_uv}" == "${relative_uv_root}/tools/uv" ]] \
+    || fail "relative UV override was not normalized to an absolute executable"
+)
+if UV_BIN="${fixture_dir}/missing-uv" \
+  UV= \
+  HOME="${fixture_dir}/empty-home" \
+  PATH="/usr/bin:/bin" \
+  runtime_coverage_resolve_uv_bin >/dev/null; then
+  fail "missing explicit UV_BIN unexpectedly fell back to another executable"
+fi
+UV_BIN="$(runtime_coverage_resolve_uv_bin)" || fail "uv executable is unavailable"
+export UV_BIN
 runtime_coverage_require_python_hits "${nonzero_python_coverage}" \
   || fail "nonzero Python coverage was rejected"
 if runtime_coverage_require_python_hits "${zero_python_coverage}"; then
@@ -221,7 +257,8 @@ for literal in \
   '-report-root "${report_root}"' \
   'RUNTIME_COVERAGE_PYTHON_INPUT_DIR="${report_root}/python-input"' \
   'COVERAGE_FILE="${python_input_dir}/.coverage"' \
-  'uv run --frozen --extra coverage coverage combine --keep "${python_input_dir}"'; do
+  'uv_bin="$(runtime_coverage_resolve_uv_bin)"' \
+  '"${uv_bin}" run --frozen --extra coverage coverage combine --keep "${python_input_dir}"'; do
   require_runtime_literal "${literal}"
 done
 for literal in \
@@ -230,7 +267,7 @@ for literal in \
   'os.Lstat' \
   'os.SameFile' \
   'unix.O_NOFOLLOW' \
-  'uv", "run", "--frozen", "--extra", "coverage", "coverage", "debug", "data"'; do
+  'coverageDebugExecutable(), "run", "--frozen", "--extra", "coverage", "coverage", "debug", "data"'; do
   require_literal "${HELPER}" "${literal}"
 done
 
@@ -383,7 +420,7 @@ valid_report="${valid_output}/smoke-reports/rt-valid"
 mkdir -p "${valid_runtime}/go" "${valid_runtime}/python"
 (
   cd "${strategy_root}"
-  uv run --frozen --extra coverage coverage run --parallel-mode \
+  "$(runtime_coverage_resolve_uv_bin)" run --frozen --extra coverage coverage run --parallel-mode \
     --data-file="${valid_runtime}/python/.coverage" \
     -m strategy_service.gen.strategy_service_pb2
 )
