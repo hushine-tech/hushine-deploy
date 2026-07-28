@@ -309,14 +309,33 @@ CREATE TABLE IF NOT EXISTS strategy_indicator_chunks (
     stream_key text NOT NULL,
     indicator_key text NOT NULL,
     chunk_index integer NOT NULL,
+    start_sequence bigint NOT NULL,
+    end_sequence bigint NOT NULL,
     start_time_ms bigint NOT NULL,
     end_time_ms bigint NOT NULL,
     interval_ms bigint NOT NULL,
     count integer NOT NULL,
-    values_json jsonb NOT NULL,
+    times_ms bigint[] NOT NULL,
+    scalar_values double precision[] DEFAULT '{}'::double precision[] NOT NULL,
+    markers_json jsonb DEFAULT '[]'::jsonb NOT NULL,
+    revision bigint NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    finalized boolean DEFAULT false NOT NULL
+    finalized boolean DEFAULT false NOT NULL,
+    protocol_version smallint DEFAULT 2 NOT NULL,
+    CONSTRAINT chk_strategy_indicator_chunks_chunk_index CHECK ((chunk_index >= 0)),
+    CONSTRAINT chk_strategy_indicator_chunks_start_sequence_nonnegative CHECK ((start_sequence >= 0)),
+    CONSTRAINT chk_strategy_indicator_chunks_end_sequence_order CHECK ((end_sequence >= start_sequence)),
+    CONSTRAINT chk_strategy_indicator_chunks_start_time_positive CHECK ((start_time_ms > 0)),
+    CONSTRAINT chk_strategy_indicator_chunks_end_time_positive CHECK ((end_time_ms > 0)),
+    CONSTRAINT chk_strategy_indicator_chunks_interval_positive CHECK ((interval_ms > 0)),
+    CONSTRAINT chk_strategy_indicator_chunks_revision_positive CHECK ((revision > 0)),
+    CONSTRAINT chk_strategy_indicator_chunks_count CHECK (((count > 0) AND (count <= 1024))),
+    CONSTRAINT chk_strategy_indicator_chunks_sequence CHECK (((start_sequence = ((chunk_index)::bigint * 1024)) AND (end_sequence = ((start_sequence + count) - 1)))),
+    CONSTRAINT chk_strategy_indicator_chunks_times CHECK (((cardinality(times_ms) = count) AND (array_ndims(times_ms) = 1) AND (array_lower(times_ms, 1) = 1) AND (array_upper(times_ms, 1) = count) AND (start_time_ms = times_ms[1]) AND (end_time_ms = times_ms[count]))),
+    CONSTRAINT chk_strategy_indicator_chunks_revision CHECK ((revision = count)),
+    CONSTRAINT chk_strategy_indicator_chunks_markers_array CHECK ((jsonb_typeof(markers_json) = 'array'::text)),
+    CONSTRAINT chk_strategy_indicator_chunks_protocol CHECK ((protocol_version = 2))
 );
 
 
@@ -336,8 +355,12 @@ CREATE TABLE IF NOT EXISTS strategy_indicator_definitions (
     unit text DEFAULT ''::text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
     config_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    protocol_version smallint DEFAULT 2 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_strategy_indicator_definitions_type CHECK ((type = ANY (ARRAY['line'::text, 'histogram'::text, 'marker'::text]))),
+    CONSTRAINT chk_strategy_indicator_definitions_config_object CHECK ((jsonb_typeof(config_json) = 'object'::text)),
+    CONSTRAINT chk_strategy_indicator_definitions_protocol CHECK ((protocol_version = 2))
 );
 
 
@@ -367,6 +390,7 @@ CREATE TABLE IF NOT EXISTS strategy_sessions (
     runtime_version text DEFAULT ''::text NOT NULL,
     session_name text DEFAULT ''::text NOT NULL,
     leverage double precision DEFAULT 1 NOT NULL,
+    indicator_finalization_pending boolean DEFAULT false NOT NULL,
     started_at timestamp with time zone,
     completed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -766,6 +790,36 @@ END IF;
 END
 $baseline$;
 
+DO $baseline$
+BEGIN
+IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = to_regclass('strategy_indicator_definitions')
+      AND conname = 'strategy_indicator_definitions_session_id_fkey'
+) THEN
+ALTER TABLE ONLY strategy_indicator_definitions
+    ADD CONSTRAINT strategy_indicator_definitions_session_id_fkey
+    FOREIGN KEY (session_id) REFERENCES strategy_sessions(session_id) ON DELETE CASCADE;
+END IF;
+END
+$baseline$;
+
+DO $baseline$
+BEGIN
+IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = to_regclass('strategy_indicator_chunks')
+      AND conname = 'strategy_indicator_chunks_definition_fkey'
+) THEN
+ALTER TABLE ONLY strategy_indicator_chunks
+    ADD CONSTRAINT strategy_indicator_chunks_definition_fkey
+    FOREIGN KEY (session_id, stream_key, indicator_key)
+    REFERENCES strategy_indicator_definitions(session_id, stream_key, indicator_key)
+    ON DELETE CASCADE;
+END IF;
+END
+$baseline$;
+
 
 --
 -- Name: portfolios uq_portfolios_user_name; Type: CONSTRAINT; Schema: public; Owner: -
@@ -1129,6 +1183,206 @@ END IF;
 END
 $baseline$;
 
+CREATE OR REPLACE FUNCTION strategy_indicator_chunks_v2_validate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $indicator_v2$
+DECLARE
+    definition_type text;
+    marker jsonb;
+    marker_sequence bigint;
+    marker_offset integer;
+    marker_time_ms bigint;
+    marker_price double precision;
+    time_index integer;
+    scalar_value double precision;
+BEGIN
+    IF TG_OP = 'INSERT' AND NEW.finalized THEN
+        RAISE EXCEPTION 'indicator chunk must be inserted open';
+    END IF;
+    IF TG_OP = 'UPDATE' AND OLD.finalized THEN
+        RAISE EXCEPTION 'finalized indicator chunk is immutable';
+    END IF;
+    IF TG_OP = 'UPDATE'
+       AND NEW.finalized
+       AND NOT OLD.finalized
+       AND ROW(
+           NEW.session_id,
+           NEW.stream_key,
+           NEW.indicator_key,
+           NEW.chunk_index,
+           NEW.start_sequence,
+           NEW.end_sequence,
+           NEW.start_time_ms,
+           NEW.end_time_ms,
+           NEW.interval_ms,
+           NEW.count,
+           NEW.times_ms,
+           NEW.scalar_values,
+           NEW.markers_json,
+           NEW.revision,
+           NEW.protocol_version,
+           NEW.created_at
+       ) IS DISTINCT FROM ROW(
+           OLD.session_id,
+           OLD.stream_key,
+           OLD.indicator_key,
+           OLD.chunk_index,
+           OLD.start_sequence,
+           OLD.end_sequence,
+           OLD.start_time_ms,
+           OLD.end_time_ms,
+           OLD.interval_ms,
+           OLD.count,
+           OLD.times_ms,
+           OLD.scalar_values,
+           OLD.markers_json,
+           OLD.revision,
+           OLD.protocol_version,
+           OLD.created_at
+       ) THEN
+        RAISE EXCEPTION 'indicator finalization cannot mutate chunk payload';
+    END IF;
+
+    SELECT type INTO definition_type
+    FROM strategy_indicator_definitions
+    WHERE session_id = NEW.session_id
+      AND stream_key = NEW.stream_key
+      AND indicator_key = NEW.indicator_key;
+
+    IF definition_type IS NULL THEN
+        RAISE EXCEPTION 'indicator definition is required before chunk';
+    END IF;
+    IF jsonb_typeof(NEW.markers_json) <> 'array' THEN
+        RAISE EXCEPTION 'markers_json must be an array';
+    END IF;
+    IF array_ndims(NEW.times_ms) <> 1
+       OR array_lower(NEW.times_ms, 1) <> 1
+       OR array_upper(NEW.times_ms, 1) <> NEW.count THEN
+        RAISE EXCEPTION 'times_ms must use one-based contiguous bounds';
+    END IF;
+    FOR time_index IN 1..cardinality(NEW.times_ms)
+    LOOP
+        IF NEW.times_ms[time_index] <= 0
+           OR (
+               time_index > 1
+               AND NEW.times_ms[time_index] <= NEW.times_ms[time_index - 1]
+           ) THEN
+            RAISE EXCEPTION 'times_ms must contain positive strictly increasing values';
+        END IF;
+    END LOOP;
+    FOREACH scalar_value IN ARRAY NEW.scalar_values
+    LOOP
+        IF scalar_value IS NOT NULL
+           AND (
+               scalar_value = 'NaN'::double precision
+               OR scalar_value = 'Infinity'::double precision
+               OR scalar_value = '-Infinity'::double precision
+           ) THEN
+            RAISE EXCEPTION 'scalar indicator values must be finite';
+        END IF;
+    END LOOP;
+    IF definition_type IN ('line', 'histogram') THEN
+        IF cardinality(NEW.scalar_values) <> NEW.count THEN
+            RAISE EXCEPTION 'scalar indicator cardinality must equal count';
+        END IF;
+        IF array_ndims(NEW.scalar_values) <> 1
+           OR array_lower(NEW.scalar_values, 1) <> 1
+           OR array_upper(NEW.scalar_values, 1) <> NEW.count THEN
+            RAISE EXCEPTION 'scalar indicator values must use one-based contiguous bounds';
+        END IF;
+        IF jsonb_array_length(NEW.markers_json) <> 0 THEN
+            RAISE EXCEPTION 'scalar indicator cannot contain markers';
+        END IF;
+    ELSIF definition_type = 'marker' THEN
+        IF cardinality(NEW.scalar_values) <> 0 THEN
+            RAISE EXCEPTION 'marker indicator cannot contain scalar values';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'unsupported indicator type: %', definition_type;
+    END IF;
+
+    FOR marker IN SELECT value FROM jsonb_array_elements(NEW.markers_json)
+    LOOP
+        IF jsonb_typeof(marker) <> 'object'
+           OR NOT (marker ? 'sequence')
+           OR NOT (marker ? 'offset')
+           OR NOT (marker ? 'time_ms')
+           OR NOT (marker ? 'text')
+           OR NOT (marker ? 'color')
+           OR NOT (marker ? 'position')
+           OR NOT (marker ? 'shape')
+           OR jsonb_typeof(marker -> 'sequence') <> 'number'
+           OR jsonb_typeof(marker -> 'offset') <> 'number'
+           OR jsonb_typeof(marker -> 'time_ms') <> 'number'
+           OR jsonb_typeof(marker -> 'text') <> 'string'
+           OR jsonb_typeof(marker -> 'color') <> 'string'
+           OR jsonb_typeof(marker -> 'position') <> 'string'
+           OR jsonb_typeof(marker -> 'shape') <> 'string'
+           OR (marker ->> 'sequence') !~ '^[0-9]+$'
+           OR (marker ->> 'offset') !~ '^[0-9]+$'
+           OR (marker ->> 'time_ms') !~ '^[0-9]+$' THEN
+            RAISE EXCEPTION 'marker fields have invalid types';
+        END IF;
+        marker_sequence := (marker ->> 'sequence')::bigint;
+        marker_offset := (marker ->> 'offset')::integer;
+        marker_time_ms := (marker ->> 'time_ms')::bigint;
+        IF marker_sequence < NEW.start_sequence
+           OR marker_sequence > NEW.end_sequence
+           OR marker_offset <> marker_sequence - NEW.start_sequence
+           OR marker_offset < 0
+           OR marker_offset >= NEW.count
+           OR marker_time_ms <> NEW.times_ms[marker_offset + 1] THEN
+            RAISE EXCEPTION 'marker sequence, offset, and time_ms do not match chunk';
+        END IF;
+        IF (marker ->> 'position') NOT IN ('', 'aboveBar', 'belowBar', 'inBar') THEN
+            RAISE EXCEPTION 'marker position is invalid';
+        END IF;
+        IF (marker ->> 'shape') NOT IN ('', 'circle', 'square', 'arrowUp', 'arrowDown') THEN
+            RAISE EXCEPTION 'marker shape is invalid';
+        END IF;
+        IF marker ? 'price' THEN
+            IF jsonb_typeof(marker -> 'price') <> 'number' THEN
+                RAISE EXCEPTION 'marker price must be numeric';
+            END IF;
+            BEGIN
+                marker_price := (marker ->> 'price')::double precision;
+            EXCEPTION
+                WHEN numeric_value_out_of_range OR invalid_text_representation THEN
+                    RAISE EXCEPTION 'marker price must be finite';
+            END;
+            IF marker_price = 'NaN'::double precision
+               OR marker_price = 'Infinity'::double precision
+               OR marker_price = '-Infinity'::double precision THEN
+                RAISE EXCEPTION 'marker price must be finite';
+            END IF;
+        END IF;
+    END LOOP;
+    RETURN NEW;
+END
+$indicator_v2$;
+
+CREATE OR REPLACE FUNCTION strategy_indicator_definitions_v2_immutable()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $indicator_v2_definition$
+BEGIN
+    RAISE EXCEPTION 'indicator definitions are immutable within a session';
+END
+$indicator_v2_definition$;
+
+DROP TRIGGER IF EXISTS strategy_indicator_definitions_v2_immutable_trigger
+ON strategy_indicator_definitions;
+CREATE TRIGGER strategy_indicator_definitions_v2_immutable_trigger
+BEFORE UPDATE ON strategy_indicator_definitions
+FOR EACH ROW EXECUTE FUNCTION strategy_indicator_definitions_v2_immutable();
+
+DROP TRIGGER IF EXISTS strategy_indicator_chunks_v2_validate_trigger
+ON strategy_indicator_chunks;
+CREATE TRIGGER strategy_indicator_chunks_v2_validate_trigger
+BEFORE INSERT OR UPDATE ON strategy_indicator_chunks
+FOR EACH ROW EXECUTE FUNCTION strategy_indicator_chunks_v2_validate();
+
 
 --
 -- PostgreSQL database dump complete
@@ -1248,4 +1502,340 @@ CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_pending_run_id
     ON reconciliation_runs (run_id, "time" DESC)
     WHERE repair_status = 'pending';
 INSERT INTO schema_migrations (filename) VALUES ('0004_spot_close_reconciliation_pending.sql') ON CONFLICT (filename) DO NOTHING;
+
+-- Source: core-service/internal/storage/migrations/0005_runtime_indicator_v2.sql
+ALTER TABLE strategy_sessions
+    ADD COLUMN IF NOT EXISTS indicator_finalization_pending boolean
+    DEFAULT false NOT NULL;
+
+DO $indicator_v2_cutover$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'strategy_indicator_chunks'
+          AND column_name = 'values_json'
+    ) THEN
+        IF current_setting('hushine.indicator_v2_cutover', true)
+           IS DISTINCT FROM 'approved' THEN
+            RAISE EXCEPTION
+                'INDICATOR_V2_CUTOVER_AUTHORIZATION_REQUIRED: legacy indicator tables were not changed';
+        END IF;
+        DROP TABLE strategy_indicator_chunks;
+        DROP TABLE strategy_indicator_definitions;
+    END IF;
+END
+$indicator_v2_cutover$;
+
+CREATE TABLE IF NOT EXISTS strategy_indicator_definitions (
+    session_id text NOT NULL,
+    strategy_id bigint DEFAULT 0 NOT NULL,
+    stream_key text NOT NULL,
+    indicator_key text NOT NULL,
+    name text DEFAULT '' NOT NULL,
+    type text NOT NULL,
+    pane text NOT NULL,
+    color text DEFAULT '' NOT NULL,
+    unit text DEFAULT '' NOT NULL,
+    description text DEFAULT '' NOT NULL,
+    config_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    protocol_version smallint DEFAULT 2 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (session_id, stream_key, indicator_key),
+    CONSTRAINT strategy_indicator_definitions_session_id_fkey
+        FOREIGN KEY (session_id)
+        REFERENCES strategy_sessions(session_id)
+        ON DELETE CASCADE,
+    CONSTRAINT chk_strategy_indicator_definitions_type
+        CHECK (type IN ('line', 'histogram', 'marker')),
+    CONSTRAINT chk_strategy_indicator_definitions_config_object
+        CHECK (jsonb_typeof(config_json) = 'object'),
+    CONSTRAINT chk_strategy_indicator_definitions_protocol
+        CHECK (protocol_version = 2)
+);
+
+CREATE TABLE IF NOT EXISTS strategy_indicator_chunks (
+    session_id text NOT NULL,
+    stream_key text NOT NULL,
+    indicator_key text NOT NULL,
+    chunk_index integer NOT NULL,
+    start_sequence bigint NOT NULL,
+    end_sequence bigint NOT NULL,
+    start_time_ms bigint NOT NULL,
+    end_time_ms bigint NOT NULL,
+    interval_ms bigint NOT NULL,
+    count integer NOT NULL,
+    times_ms bigint[] NOT NULL,
+    scalar_values double precision[] DEFAULT '{}'::double precision[] NOT NULL,
+    markers_json jsonb DEFAULT '[]'::jsonb NOT NULL,
+    revision bigint NOT NULL,
+    finalized boolean DEFAULT false NOT NULL,
+    protocol_version smallint DEFAULT 2 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (session_id, stream_key, indicator_key, chunk_index),
+    CONSTRAINT strategy_indicator_chunks_definition_fkey
+        FOREIGN KEY (session_id, stream_key, indicator_key)
+        REFERENCES strategy_indicator_definitions(session_id, stream_key, indicator_key)
+        ON DELETE CASCADE,
+    CONSTRAINT chk_strategy_indicator_chunks_chunk_index
+        CHECK (chunk_index >= 0),
+    CONSTRAINT chk_strategy_indicator_chunks_start_sequence_nonnegative
+        CHECK (start_sequence >= 0),
+    CONSTRAINT chk_strategy_indicator_chunks_end_sequence_order
+        CHECK (end_sequence >= start_sequence),
+    CONSTRAINT chk_strategy_indicator_chunks_start_time_positive
+        CHECK (start_time_ms > 0),
+    CONSTRAINT chk_strategy_indicator_chunks_end_time_positive
+        CHECK (end_time_ms > 0),
+    CONSTRAINT chk_strategy_indicator_chunks_interval_positive
+        CHECK (interval_ms > 0),
+    CONSTRAINT chk_strategy_indicator_chunks_revision_positive
+        CHECK (revision > 0),
+    CONSTRAINT chk_strategy_indicator_chunks_count
+        CHECK (count > 0 AND count <= 1024),
+    CONSTRAINT chk_strategy_indicator_chunks_sequence
+        CHECK (
+            start_sequence = chunk_index::bigint * 1024
+            AND end_sequence = start_sequence + count - 1
+        ),
+    CONSTRAINT chk_strategy_indicator_chunks_times
+        CHECK (
+            cardinality(times_ms) = count
+            AND array_ndims(times_ms) = 1
+            AND array_lower(times_ms, 1) = 1
+            AND array_upper(times_ms, 1) = count
+            AND start_time_ms = times_ms[1]
+            AND end_time_ms = times_ms[count]
+        ),
+    CONSTRAINT chk_strategy_indicator_chunks_revision
+        CHECK (revision = count),
+    CONSTRAINT chk_strategy_indicator_chunks_markers_array
+        CHECK (jsonb_typeof(markers_json) = 'array'),
+    CONSTRAINT chk_strategy_indicator_chunks_protocol
+        CHECK (protocol_version = 2)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_indicator_definitions_session
+    ON strategy_indicator_definitions (session_id, stream_key);
+CREATE INDEX IF NOT EXISTS idx_strategy_indicator_chunks_window
+    ON strategy_indicator_chunks (
+        session_id,
+        stream_key,
+        indicator_key,
+        start_time_ms,
+        end_time_ms
+    );
+CREATE INDEX IF NOT EXISTS idx_strategy_indicator_chunks_finalized
+    ON strategy_indicator_chunks (
+        session_id,
+        stream_key,
+        indicator_key,
+        finalized
+    );
+
+CREATE OR REPLACE FUNCTION strategy_indicator_chunks_v2_validate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $indicator_v2$
+DECLARE
+    definition_type text;
+    marker jsonb;
+    marker_sequence bigint;
+    marker_offset integer;
+    marker_time_ms bigint;
+    marker_price double precision;
+    time_index integer;
+    scalar_value double precision;
+BEGIN
+    IF TG_OP = 'INSERT' AND NEW.finalized THEN
+        RAISE EXCEPTION 'indicator chunk must be inserted open';
+    END IF;
+    IF TG_OP = 'UPDATE' AND OLD.finalized THEN
+        RAISE EXCEPTION 'finalized indicator chunk is immutable';
+    END IF;
+    IF TG_OP = 'UPDATE'
+       AND NEW.finalized
+       AND NOT OLD.finalized
+       AND ROW(
+           NEW.session_id,
+           NEW.stream_key,
+           NEW.indicator_key,
+           NEW.chunk_index,
+           NEW.start_sequence,
+           NEW.end_sequence,
+           NEW.start_time_ms,
+           NEW.end_time_ms,
+           NEW.interval_ms,
+           NEW.count,
+           NEW.times_ms,
+           NEW.scalar_values,
+           NEW.markers_json,
+           NEW.revision,
+           NEW.protocol_version,
+           NEW.created_at
+       ) IS DISTINCT FROM ROW(
+           OLD.session_id,
+           OLD.stream_key,
+           OLD.indicator_key,
+           OLD.chunk_index,
+           OLD.start_sequence,
+           OLD.end_sequence,
+           OLD.start_time_ms,
+           OLD.end_time_ms,
+           OLD.interval_ms,
+           OLD.count,
+           OLD.times_ms,
+           OLD.scalar_values,
+           OLD.markers_json,
+           OLD.revision,
+           OLD.protocol_version,
+           OLD.created_at
+       ) THEN
+        RAISE EXCEPTION 'indicator finalization cannot mutate chunk payload';
+    END IF;
+
+    SELECT type INTO definition_type
+    FROM strategy_indicator_definitions
+    WHERE session_id = NEW.session_id
+      AND stream_key = NEW.stream_key
+      AND indicator_key = NEW.indicator_key;
+
+    IF definition_type IS NULL THEN
+        RAISE EXCEPTION 'indicator definition is required before chunk';
+    END IF;
+    IF jsonb_typeof(NEW.markers_json) <> 'array' THEN
+        RAISE EXCEPTION 'markers_json must be an array';
+    END IF;
+    IF array_ndims(NEW.times_ms) <> 1
+       OR array_lower(NEW.times_ms, 1) <> 1
+       OR array_upper(NEW.times_ms, 1) <> NEW.count THEN
+        RAISE EXCEPTION 'times_ms must use one-based contiguous bounds';
+    END IF;
+    FOR time_index IN 1..cardinality(NEW.times_ms)
+    LOOP
+        IF NEW.times_ms[time_index] <= 0
+           OR (
+               time_index > 1
+               AND NEW.times_ms[time_index] <= NEW.times_ms[time_index - 1]
+           ) THEN
+            RAISE EXCEPTION 'times_ms must contain positive strictly increasing values';
+        END IF;
+    END LOOP;
+    FOREACH scalar_value IN ARRAY NEW.scalar_values
+    LOOP
+        IF scalar_value IS NOT NULL
+           AND (
+               scalar_value = 'NaN'::double precision
+               OR scalar_value = 'Infinity'::double precision
+               OR scalar_value = '-Infinity'::double precision
+           ) THEN
+            RAISE EXCEPTION 'scalar indicator values must be finite';
+        END IF;
+    END LOOP;
+    IF definition_type IN ('line', 'histogram') THEN
+        IF cardinality(NEW.scalar_values) <> NEW.count THEN
+            RAISE EXCEPTION 'scalar indicator cardinality must equal count';
+        END IF;
+        IF array_ndims(NEW.scalar_values) <> 1
+           OR array_lower(NEW.scalar_values, 1) <> 1
+           OR array_upper(NEW.scalar_values, 1) <> NEW.count THEN
+            RAISE EXCEPTION 'scalar indicator values must use one-based contiguous bounds';
+        END IF;
+        IF jsonb_array_length(NEW.markers_json) <> 0 THEN
+            RAISE EXCEPTION 'scalar indicator cannot contain markers';
+        END IF;
+    ELSIF definition_type = 'marker' THEN
+        IF cardinality(NEW.scalar_values) <> 0 THEN
+            RAISE EXCEPTION 'marker indicator cannot contain scalar values';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'unsupported indicator type: %', definition_type;
+    END IF;
+
+    FOR marker IN SELECT value FROM jsonb_array_elements(NEW.markers_json)
+    LOOP
+        IF jsonb_typeof(marker) <> 'object'
+           OR NOT (marker ? 'sequence')
+           OR NOT (marker ? 'offset')
+           OR NOT (marker ? 'time_ms')
+           OR NOT (marker ? 'text')
+           OR NOT (marker ? 'color')
+           OR NOT (marker ? 'position')
+           OR NOT (marker ? 'shape')
+           OR jsonb_typeof(marker -> 'sequence') <> 'number'
+           OR jsonb_typeof(marker -> 'offset') <> 'number'
+           OR jsonb_typeof(marker -> 'time_ms') <> 'number'
+           OR jsonb_typeof(marker -> 'text') <> 'string'
+           OR jsonb_typeof(marker -> 'color') <> 'string'
+           OR jsonb_typeof(marker -> 'position') <> 'string'
+           OR jsonb_typeof(marker -> 'shape') <> 'string'
+           OR (marker ->> 'sequence') !~ '^[0-9]+$'
+           OR (marker ->> 'offset') !~ '^[0-9]+$'
+           OR (marker ->> 'time_ms') !~ '^[0-9]+$' THEN
+            RAISE EXCEPTION 'marker fields have invalid types';
+        END IF;
+        marker_sequence := (marker ->> 'sequence')::bigint;
+        marker_offset := (marker ->> 'offset')::integer;
+        marker_time_ms := (marker ->> 'time_ms')::bigint;
+        IF marker_sequence < NEW.start_sequence
+           OR marker_sequence > NEW.end_sequence
+           OR marker_offset <> marker_sequence - NEW.start_sequence
+           OR marker_offset < 0
+           OR marker_offset >= NEW.count
+           OR marker_time_ms <> NEW.times_ms[marker_offset + 1] THEN
+            RAISE EXCEPTION 'marker sequence, offset, and time_ms do not match chunk';
+        END IF;
+        IF (marker ->> 'position') NOT IN ('', 'aboveBar', 'belowBar', 'inBar') THEN
+            RAISE EXCEPTION 'marker position is invalid';
+        END IF;
+        IF (marker ->> 'shape') NOT IN ('', 'circle', 'square', 'arrowUp', 'arrowDown') THEN
+            RAISE EXCEPTION 'marker shape is invalid';
+        END IF;
+        IF marker ? 'price' THEN
+            IF jsonb_typeof(marker -> 'price') <> 'number' THEN
+                RAISE EXCEPTION 'marker price must be numeric';
+            END IF;
+            BEGIN
+                marker_price := (marker ->> 'price')::double precision;
+            EXCEPTION
+                WHEN numeric_value_out_of_range OR invalid_text_representation THEN
+                    RAISE EXCEPTION 'marker price must be finite';
+            END;
+            IF marker_price = 'NaN'::double precision
+               OR marker_price = 'Infinity'::double precision
+               OR marker_price = '-Infinity'::double precision THEN
+                RAISE EXCEPTION 'marker price must be finite';
+            END IF;
+        END IF;
+    END LOOP;
+    RETURN NEW;
+END
+$indicator_v2$;
+
+CREATE OR REPLACE FUNCTION strategy_indicator_definitions_v2_immutable()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $indicator_v2_definition$
+BEGIN
+    RAISE EXCEPTION 'indicator definitions are immutable within a session';
+END
+$indicator_v2_definition$;
+
+DROP TRIGGER IF EXISTS strategy_indicator_definitions_v2_immutable_trigger
+    ON strategy_indicator_definitions;
+CREATE TRIGGER strategy_indicator_definitions_v2_immutable_trigger
+    BEFORE UPDATE ON strategy_indicator_definitions
+    FOR EACH ROW
+    EXECUTE FUNCTION strategy_indicator_definitions_v2_immutable();
+
+DROP TRIGGER IF EXISTS strategy_indicator_chunks_v2_validate_trigger
+    ON strategy_indicator_chunks;
+CREATE TRIGGER strategy_indicator_chunks_v2_validate_trigger
+    BEFORE INSERT OR UPDATE ON strategy_indicator_chunks
+    FOR EACH ROW
+    EXECUTE FUNCTION strategy_indicator_chunks_v2_validate();
+INSERT INTO schema_migrations (filename) VALUES ('0005_runtime_indicator_v2.sql') ON CONFLICT (filename) DO NOTHING;
 COMMIT;

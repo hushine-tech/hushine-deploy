@@ -15,6 +15,7 @@ Run `00_create_databases.psql` against the admin database, then run each SQL bun
 - `core-service/internal/storage/migrations/0002_spot_risk_facts.sql`
 - `core-service/internal/storage/migrations/0003_spot_reconciliation_repair.sql`
 - `core-service/internal/storage/migrations/0004_spot_close_reconciliation_pending.sql`
+- `core-service/internal/storage/migrations/0005_runtime_indicator_v2.sql`
 
 ### `order.sql`
 
