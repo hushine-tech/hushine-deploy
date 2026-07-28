@@ -19,7 +19,12 @@ SOURCE_SUFFIXES = {".sql", ".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".proto",
 
 def collect_db_matrix(ctx, cfg) -> dict:
     matrix = {"tables": {}, "references": []}
-    static_refs = {"imports": [], "table_references": [], "unreferenced_files": []}
+    static_refs = {
+        "imports": [],
+        "table_references": [],
+        "unreferenced_files": [],
+        "naming_suspicions": [],
+    }
     for path in iter_source_files(ctx.workspace):
         text = path.read_text(encoding="utf-8", errors="ignore")
         rel = str(path.relative_to(ctx.workspace))
@@ -33,8 +38,11 @@ def collect_db_matrix(ctx, cfg) -> dict:
             elif item["operation"] == "write":
                 add_reference(matrix, "write", table, rel)
         static_refs["imports"].extend(scan_imports(path, text, rel))
-        if any(token in rel.lower() for token in ["/legacy", "legacy", "/old", "deprecated"]):
-            static_refs["unreferenced_files"].append(rel)
+        if any(
+            token in rel.lower()
+            for token in ["/legacy", "legacy", "/old", "deprecated"]
+        ):
+            static_refs["naming_suspicions"].append(rel)
     static_refs["table_references"] = matrix["references"]
     write_json(ctx.run_dir / "inventory/db-table-matrix.json", matrix)
     write_json(ctx.run_dir / "reachability/static-references.json", static_refs)

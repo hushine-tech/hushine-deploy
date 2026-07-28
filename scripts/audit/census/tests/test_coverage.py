@@ -17,6 +17,7 @@ from census.coverage import (
     collect_hosted_runtime_coverage_outputs,
     collect_unit_coverage,
     discover_hosted_runtime_directories,
+    normalize_dynamic_coverage,
     python_runtime_script,
     start_session_collectors,
 )
@@ -104,6 +105,259 @@ def fake_success_runner(calls: list[list[str]]):
 
 
 class CoverageTests(unittest.TestCase):
+    def test_normalized_dynamic_coverage_maps_go_python_and_frontend_subjects(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            ctx = RunContext.create(
+                workspace,
+                "census-runs",
+                "session-stop",
+                "normalized-subjects",
+            )
+            core = workspace / "core-service"
+            core_file = core / "internal/live.go"
+            core_file.parent.mkdir(parents=True)
+            core_file.write_text("package internal\n", encoding="utf-8")
+            (core / "go.mod").write_text(
+                "module example.com/hushine/core\n\ngo 1.24\n",
+                encoding="utf-8",
+            )
+            go_out = ctx.run_dir / "coverage/core-service/runtime"
+            go_out.mkdir(parents=True)
+            (go_out / "runtime.cover.out").write_text(
+                "mode: atomic\n"
+                "example.com/hushine/core/internal/live.go:1.1,1.18 1 1\n",
+                encoding="utf-8",
+            )
+            (go_out / "functions.txt").write_text(
+                "example.com/hushine/core/internal/live.go:1:\tHandle\t100.0%\n"
+                "total:\t(statements)\t100.0%\n",
+                encoding="utf-8",
+            )
+
+            worker = workspace / "strategy-service"
+            worker_file = worker / "strategy_service/live.py"
+            worker_file.parent.mkdir(parents=True)
+            worker_file.write_text("def run():\n    return 1\n", encoding="utf-8")
+            python_out = ctx.run_dir / "coverage/session-worker/runtime"
+            python_out.mkdir(parents=True)
+            (python_out / "runtime-coverage.json").write_text(
+                json.dumps(
+                    {
+                        "files": {
+                            "strategy_service/live.py": {
+                                "summary": {"covered_lines": 2},
+                                "functions": {
+                                    "run": {"summary": {"covered_lines": 2}}
+                                },
+                            }
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            frontend = workspace / "gateway/quant-frontend"
+            frontend_file = frontend / "src/live.ts"
+            frontend_file.parent.mkdir(parents=True)
+            frontend_file.write_text(
+                "export function render() { return true }\n",
+                encoding="utf-8",
+            )
+            ignored_frontend_file = frontend / "src/never.ts"
+            ignored_frontend_file.write_text(
+                "export function never() { return true }\n",
+                encoding="utf-8",
+            )
+            (ctx.run_dir / "coverage/frontend-owner-waiting.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "waiting-for-browser-owner",
+                        "browser_id": "browser-1",
+                        "tab_id": "tab-1",
+                        "target_url": "http://127.0.0.1:5173/",
+                        "frontend": "quant-frontend",
+                        "ownership": "external-retained-tab",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (ctx.run_dir / "coverage/frontend-precise.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "browser_id": "browser-1",
+                        "tab_id": "tab-1",
+                        "frontend_origin": "http://127.0.0.1:5173",
+                        "application_script_count": 1,
+                        "application_function_count": 1,
+                        "application_range_count": 1,
+                        "precise_result": {
+                            "result": [
+                                {
+                                    "url": "http://127.0.0.1:5173/src/live.ts",
+                                    "functions": [
+                                        {
+                                            "functionName": "render",
+                                            "ranges": [
+                                                {
+                                                    "startOffset": 0,
+                                                    "endOffset": 40,
+                                                    "count": 1,
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                },
+                                {
+                                    "url": "https://untrusted.example/src/never.ts",
+                                    "functions": [
+                                        {
+                                            "functionName": "never",
+                                            "ranges": [
+                                                {
+                                                    "startOffset": 0,
+                                                    "endOffset": 40,
+                                                    "count": 1,
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                },
+                            ]
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            cfg = type(
+                "Cfg",
+                (),
+                {
+                    "services": [
+                        {
+                            "name": "core-service",
+                            "path": "core-service",
+                            "kind": "go-service",
+                        },
+                        {
+                            "name": "session-worker",
+                            "path": "strategy-service",
+                            "kind": "python-service",
+                        },
+                        {
+                            "name": "quant-frontend",
+                            "path": "gateway/quant-frontend",
+                            "kind": "frontend",
+                        },
+                    ]
+                },
+            )()
+
+            summary = normalize_dynamic_coverage(
+                ctx,
+                cfg,
+                require_frontend=True,
+            )
+
+            subjects = {item["subject"] for item in summary["records"]}
+
+        self.assertEqual(summary["frontend"]["status"], "ok")
+        self.assertIn("core-service/internal/live.go", subjects)
+        self.assertIn("core-service/internal/live.go::Handle", subjects)
+        self.assertIn("strategy-service/strategy_service/live.py", subjects)
+        self.assertIn("strategy-service/strategy_service/live.py::run", subjects)
+        self.assertIn("gateway/quant-frontend/src/live.ts", subjects)
+        self.assertIn("gateway/quant-frontend/src/live.ts::render", subjects)
+        self.assertNotIn("gateway/quant-frontend/src/never.ts", subjects)
+        self.assertNotIn("gateway/quant-frontend/src/never.ts::never", subjects)
+
+    def test_session_stop_requires_valid_frontend_artifact_for_retained_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            ctx = RunContext.create(
+                workspace,
+                "census-runs",
+                "session-stop",
+                "missing-frontend-coverage",
+            )
+            (ctx.run_dir / "coverage/frontend-owner-waiting.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "waiting-for-browser-owner",
+                        "browser_id": "browser-1",
+                        "tab_id": "tab-1",
+                        "target_url": "http://127.0.0.1:5173/",
+                        "frontend": "quant-frontend",
+                        "ownership": "external-retained-tab",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            cfg = type(
+                "Cfg",
+                (),
+                {
+                    "services": [
+                        {
+                            "name": "quant-frontend",
+                            "path": "gateway/quant-frontend",
+                            "kind": "frontend",
+                        }
+                    ]
+                },
+            )()
+
+            with (
+                patch.object(
+                    coverage,
+                    "collect_runtime_coverage_outputs",
+                    return_value=[],
+                ),
+                patch.object(
+                    coverage,
+                    "finalize_hosted_runtime_containers",
+                    return_value=[],
+                ),
+                patch.object(
+                    coverage,
+                    "collect_hosted_runtime_coverage_outputs",
+                    return_value=[],
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    CoverageCollectionFailed,
+                    "frontend-precise.json",
+                ):
+                    coverage.stop_session_collectors(ctx, cfg)
+
+    def test_malformed_frontend_owner_binding_is_a_coverage_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            ctx = RunContext.create(
+                workspace,
+                "census-runs",
+                "session-stop",
+                "malformed-owner-binding",
+            )
+            (ctx.run_dir / "coverage/frontend-owner-waiting.json").write_text(
+                "{not-json}\n",
+                encoding="utf-8",
+            )
+            cfg = type("Cfg", (), {"services": []})()
+
+            with self.assertRaisesRegex(
+                CoverageCollectionFailed,
+                "browser owner",
+            ):
+                normalize_dynamic_coverage(ctx, cfg, require_frontend=True)
+
     def test_atomic_evidence_append_preserves_existing_log_after_short_write(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

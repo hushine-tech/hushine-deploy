@@ -9,6 +9,7 @@ from pathlib import Path
 
 DEPLOY_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = DEPLOY_ROOT / "scripts/audit/census/start_instrumented_stack.sh"
+LAUNCHER = DEPLOY_ROOT / "scripts/audit/census/census/launch_child.py"
 COVERAGE_IMAGE = "sha256:" + "a" * 64
 SERVICE_REPOSITORIES = {
     "core-service": "core-service",
@@ -85,6 +86,155 @@ while true; do sleep 1; done
             *extra,
             "instrumented-test",
         ]
+
+    def _spawn_stop_fixture(
+        self,
+        root: Path,
+        body: str,
+    ) -> tuple[Path, int]:
+        source_root = root / "source"
+        coverage = (
+            source_root
+            / "census-runs/instrumented-test/coverage"
+        )
+        coverage.mkdir(parents=True)
+        child = root / "covered-service.sh"
+        child.write_text(
+            "#!/usr/bin/env bash\nset -e\n" + body + "\n",
+            encoding="utf-8",
+        )
+        child.chmod(0o755)
+        log = coverage / "core-service.out"
+        spawned = subprocess.run(
+            [
+                "python3",
+                str(LAUNCHER),
+                "--service",
+                "core-service",
+                "--spawn",
+                "--cwd",
+                str(root),
+                "--log",
+                str(log),
+                "--",
+                str(child),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        self.assertEqual(spawned.returncode, 0, spawned.stdout)
+        pid = int(spawned.stdout.strip())
+        # launch_child intentionally detaches; allow the child to exec its
+        # interpreter and install signal handlers before exercising stop.
+        time.sleep(0.5)
+        (coverage / "instrumented-stack-pids.tsv").write_text(
+            f"core-service\t{pid}\t{log}\n",
+            encoding="utf-8",
+        )
+        return source_root, pid
+
+    def _stop_fixture(
+        self,
+        source_root: Path,
+        *,
+        timeout: str,
+        poll_interval: str = "0.01",
+    ) -> tuple[subprocess.CompletedProcess[str], dict]:
+        env = os.environ.copy()
+        env["CODE_CENSUS_STOP_TIMEOUT_SECONDS"] = timeout
+        env["CODE_CENSUS_STOP_POLL_INTERVAL_SECONDS"] = poll_interval
+        proc = subprocess.run(
+            self._command(source_root, "--stop"),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        status_path = (
+            source_root
+            / "census-runs/instrumented-test/coverage"
+            / "instrumented-stack-stop.json"
+        )
+        status = (
+            json.loads(status_path.read_text(encoding="utf-8"))
+            if status_path.exists()
+            else {}
+        )
+        return proc, status
+
+    def test_stop_records_fast_and_delayed_graceful_exit(self) -> None:
+        cases = (
+            ("fast", "trap 'exit 0' TERM INT\nwhile true; do sleep 1; done"),
+            (
+                "delayed",
+                "trap 'sleep 0.05; exit 0' TERM INT\n"
+                "while true; do sleep 1; done",
+            ),
+        )
+        for name, body in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                source_root, pid = self._spawn_stop_fixture(Path(td), body)
+                proc, status = self._stop_fixture(source_root, timeout="0.5")
+
+                self.assertEqual(proc.returncode, 0, proc.stdout)
+                self.assertEqual(
+                    status["services"],
+                    [
+                        {
+                            "service": "core-service",
+                            "pid": pid,
+                            "status": "graceful",
+                        }
+                    ],
+                )
+
+    def test_stop_forces_only_processes_alive_after_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            source_root, pid = self._spawn_stop_fixture(
+                Path(td),
+                "exec python3 -c 'import signal, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "time.sleep(60)'",
+            )
+            proc, status = self._stop_fixture(source_root, timeout="0.05")
+
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+            self.assertEqual(
+                status["services"],
+                [
+                    {
+                        "service": "core-service",
+                        "pid": pid,
+                        "status": "forced",
+                    }
+                ],
+            )
+            self.assertIn("forced core-service", proc.stdout)
+
+    def test_stop_timeout_must_be_a_positive_bounded_number(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            source_root, pid = self._spawn_stop_fixture(
+                Path(td),
+                "trap 'exit 0' TERM INT\nwhile true; do sleep 1; done",
+            )
+            try:
+                proc, status = self._stop_fixture(
+                    source_root,
+                    timeout="not-a-number",
+                )
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertEqual(status, {})
+                self.assertIn(
+                    "CODE_CENSUS_STOP_TIMEOUT_SECONDS",
+                    proc.stdout,
+                )
+                os.kill(pid, 0)
+            finally:
+                try:
+                    os.killpg(pid, 9)
+                except ProcessLookupError:
+                    pass
 
     def test_launcher_has_no_global_export_or_builtin_credentials(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import shlex
@@ -8,6 +9,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from .writer import append_jsonl, read_json, write_json
 
@@ -15,6 +17,7 @@ from .writer import append_jsonl, read_json, write_json
 HOSTED_RUNTIME_LABEL_PREFIX = "hushine.runtime"
 HOSTED_FINALIZATION_WAIT_SECONDS = 2.0
 MAX_HOSTED_FINALIZATION_BYTES = 64 * 1024
+MAX_FRONTEND_PRECISE_BYTES = 256 * 1024 * 1024
 SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 RFC3339_NANO = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$"
@@ -63,6 +66,7 @@ def collect_unit_coverage(ctx, cfg) -> list[dict]:
     write_json(ctx.run_dir / "coverage/unit-coverage-summary.json", results)
     for item in results:
         append_jsonl(ctx.run_dir / "evidence/coverage.jsonl", item)
+    normalize_dynamic_coverage(ctx, cfg)
     failures = [item for item in results if item.get("exit_code") != 0]
     if failures:
         names = ", ".join(f"{item.get('service')} exit={item.get('exit_code')}" for item in failures)
@@ -345,12 +349,25 @@ def stop_session_collectors(ctx, cfg) -> dict:
         cfg,
         finalization_results=hosted_runtime_finalization,
     )
+    normalized_coverage_result = normalize_dynamic_coverage(
+        ctx,
+        cfg,
+        require_frontend=(
+            ctx.run_dir / "coverage/frontend-owner-waiting.json"
+        ).is_file(),
+    )
+    normalized_coverage = {
+        key: value
+        for key, value in normalized_coverage_result.items()
+        if key != "records"
+    }
     summary = {
         "stopped": stopped,
         "runtime_scripts": pids.get("runtime_scripts", []),
         "runtime_coverage": runtime_coverage,
         "hosted_runtime_finalization": hosted_runtime_finalization,
         "hosted_runtime_coverage": hosted_runtime_coverage,
+        "normalized_coverage": normalized_coverage,
     }
     _write_json_in_matching_directory(
         ctx.run_dir,
@@ -373,6 +390,654 @@ def stop_session_collectors(ctx, cfg) -> dict:
         },
     )
     return summary
+
+
+def normalize_dynamic_coverage(
+    ctx,
+    cfg,
+    *,
+    require_frontend: bool = False,
+) -> dict:
+    records = []
+    sources = []
+    services = {service["name"]: service for service in cfg.services}
+    for service in cfg.services:
+        kind = service.get("kind", "")
+        if kind.startswith("go-"):
+            for label, profile_name, functions_name in (
+                ("unit", "cover.out", "functions.txt"),
+                ("runtime", "runtime.cover.out", "functions.txt"),
+            ):
+                root = (
+                    ctx.run_dir
+                    / "coverage"
+                    / service["name"]
+                    / label
+                )
+                parsed = _normalize_go_coverage(
+                    ctx,
+                    service,
+                    root / profile_name,
+                    root / functions_name,
+                    source=f"{service['name']}:{label}",
+                )
+                if parsed:
+                    records.extend(parsed)
+                    sources.append(
+                        {
+                            "service": service["name"],
+                            "language": "go",
+                            "scope": label,
+                            "status": "ok",
+                            "record_count": len(parsed),
+                        }
+                    )
+        elif kind.startswith("python-"):
+            for label, filename in (
+                ("unit", "coverage.json"),
+                ("runtime", "runtime-coverage.json"),
+            ):
+                report = (
+                    ctx.run_dir
+                    / "coverage"
+                    / service["name"]
+                    / label
+                    / filename
+                )
+                parsed = _normalize_python_coverage(
+                    ctx,
+                    service,
+                    report,
+                    source=f"{service['name']}:{label}",
+                )
+                if parsed:
+                    records.extend(parsed)
+                    sources.append(
+                        {
+                            "service": service["name"],
+                            "language": "python",
+                            "scope": label,
+                            "status": "ok",
+                            "record_count": len(parsed),
+                        }
+                    )
+
+    runtime_agent = services.get("runtime-agent")
+    combined_root = ctx.run_dir / "coverage/runtime-agent/combined"
+    if runtime_agent is not None:
+        parsed = _normalize_go_coverage(
+            ctx,
+            runtime_agent,
+            combined_root / "go.cover.out",
+            combined_root / "go-functions.txt",
+            source="runtime-agent:hosted-combined",
+        )
+        if parsed:
+            records.extend(parsed)
+            sources.append(
+                {
+                    "service": runtime_agent["name"],
+                    "language": "go",
+                    "scope": "hosted-combined",
+                    "status": "ok",
+                    "record_count": len(parsed),
+                }
+            )
+    session_worker = services.get("session-worker")
+    if session_worker is not None:
+        parsed = _normalize_python_coverage(
+            ctx,
+            session_worker,
+            combined_root / "python-coverage.json",
+            source="session-worker:hosted-combined",
+        )
+        if parsed:
+            records.extend(parsed)
+            sources.append(
+                {
+                    "service": session_worker["name"],
+                    "language": "python",
+                    "scope": "hosted-combined",
+                    "status": "ok",
+                    "record_count": len(parsed),
+                }
+            )
+
+    frontend, frontend_records = _normalize_frontend_coverage(
+        ctx,
+        cfg,
+        required=require_frontend,
+    )
+    records.extend(frontend_records)
+    if frontend_records:
+        sources.append(
+            {
+                "service": frontend.get("service"),
+                "language": "javascript",
+                "scope": "browser-precise",
+                "status": "ok",
+                "record_count": len(frontend_records),
+            }
+        )
+    records = _dedupe_normalized_coverage_records(records)
+    summary = {
+        "schema_version": 1,
+        "record_count": len(records),
+        "sources": sources,
+        "frontend": frontend,
+        "records": records,
+    }
+    coverage_root = ctx.run_dir / "coverage"
+    evidence_root = ctx.run_dir / "evidence"
+    coverage_identity = _directory_identity(coverage_root)
+    evidence_identity = _directory_identity(evidence_root)
+    _write_json_in_matching_directory(
+        ctx.run_dir,
+        coverage_root,
+        coverage_identity,
+        "normalized-coverage-summary.json",
+        summary,
+    )
+    for record in records:
+        _append_jsonl_in_matching_directory(
+            ctx.run_dir,
+            evidence_root,
+            evidence_identity,
+            "coverage.jsonl",
+            record,
+        )
+    return summary
+
+
+def _normalize_go_coverage(
+    ctx,
+    service: dict,
+    profile_path: Path,
+    functions_path: Path,
+    *,
+    source: str,
+) -> list[dict]:
+    if not profile_path.is_file() and not functions_path.is_file():
+        return []
+    module = _go_module_path(ctx.workspace / service["path"])
+    files = {}
+    if profile_path.is_file():
+        for line in profile_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines():
+            match = re.fullmatch(
+                r"(.+):\d+\.\d+,\d+\.\d+\s+(\d+)\s+(\d+)",
+                line.strip(),
+            )
+            if match is None:
+                continue
+            statement_count = int(match.group(2))
+            execution_count = int(match.group(3))
+            rel = _normalize_source_subject(
+                ctx,
+                service,
+                match.group(1),
+                module=module,
+            )
+            if rel is None:
+                continue
+            state = files.setdefault(
+                rel,
+                {"statements": 0, "covered_statements": 0},
+            )
+            state["statements"] += statement_count
+            if execution_count > 0:
+                state["covered_statements"] += statement_count
+    records = []
+    for rel, state in sorted(files.items()):
+        if state["covered_statements"] <= 0:
+            continue
+        records.append(
+            _normalized_coverage_record(
+                "file",
+                rel,
+                service["name"],
+                source,
+                "go",
+                {
+                    "covered_statements": state["covered_statements"],
+                    "statements": state["statements"],
+                },
+            )
+        )
+    if functions_path.is_file():
+        for line in functions_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines():
+            match = re.fullmatch(
+                r"(.+):\d+:\s+(.+?)\s+([0-9]+(?:\.[0-9]+)?)%",
+                line.strip(),
+            )
+            if match is None or float(match.group(3)) <= 0:
+                continue
+            rel = _normalize_source_subject(
+                ctx,
+                service,
+                match.group(1),
+                module=module,
+            )
+            if rel is None:
+                continue
+            function_name = match.group(2).strip()
+            records.append(
+                _normalized_coverage_record(
+                    "function",
+                    f"{rel}::{function_name}",
+                    service["name"],
+                    source,
+                    "go",
+                    {
+                        "file": rel,
+                        "function": function_name,
+                        "covered_percent": float(match.group(3)),
+                    },
+                )
+            )
+    return records
+
+
+def _normalize_python_coverage(
+    ctx,
+    service: dict,
+    report_path: Path,
+    *,
+    source: str,
+) -> list[dict]:
+    if not report_path.is_file():
+        return []
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    files = report.get("files")
+    if not isinstance(files, dict):
+        return []
+    records = []
+    for raw_file, details in sorted(files.items()):
+        if not isinstance(raw_file, str) or not isinstance(details, dict):
+            continue
+        rel = _normalize_source_subject(ctx, service, raw_file)
+        if rel is None:
+            continue
+        covered_lines = _python_covered_lines(details)
+        if covered_lines > 0:
+            records.append(
+                _normalized_coverage_record(
+                    "file",
+                    rel,
+                    service["name"],
+                    source,
+                    "python",
+                    {"covered_lines": covered_lines},
+                )
+            )
+        functions = details.get("functions", {})
+        if not isinstance(functions, dict):
+            continue
+        for function_name, function in sorted(functions.items()):
+            if (
+                not isinstance(function_name, str)
+                or not isinstance(function, dict)
+                or _python_covered_lines(function) <= 0
+            ):
+                continue
+            records.append(
+                _normalized_coverage_record(
+                    "function",
+                    f"{rel}::{function_name}",
+                    service["name"],
+                    source,
+                    "python",
+                    {
+                        "file": rel,
+                        "function": function_name,
+                        "covered_lines": _python_covered_lines(function),
+                    },
+                )
+            )
+    return records
+
+
+def _normalize_frontend_coverage(
+    ctx,
+    cfg,
+    *,
+    required: bool,
+) -> tuple[dict, list[dict]]:
+    coverage_root = ctx.run_dir / "coverage"
+    waiting_path = coverage_root / "frontend-owner-waiting.json"
+    precise_path = coverage_root / "frontend-precise.json"
+    waiting = None
+    if waiting_path.is_file():
+        try:
+            waiting = _read_regular_json(
+                waiting_path,
+                MAX_FRONTEND_PRECISE_BYTES,
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            raise CoverageCollectionFailed(
+                f"FAILED_COVERAGE: invalid frontend browser owner binding: {exc}"
+            ) from exc
+        required = True
+    if not required and not precise_path.exists():
+        return (
+            {
+                "status": "not-requested",
+                "reason": "retained browser owner was not registered",
+            },
+            [],
+        )
+    if waiting is None:
+        raise CoverageCollectionFailed(
+            "FAILED_COVERAGE: frontend browser owner binding is missing"
+        )
+    if not precise_path.exists():
+        raise CoverageCollectionFailed(
+            "FAILED_COVERAGE: coverage/frontend-precise.json is missing"
+        )
+    try:
+        precise = _read_regular_json(precise_path, MAX_FRONTEND_PRECISE_BYTES)
+        _validate_frontend_binding(waiting, precise)
+    except (OSError, ValueError, TypeError) as exc:
+        raise CoverageCollectionFailed(
+            f"FAILED_COVERAGE: invalid coverage/frontend-precise.json: {exc}"
+        ) from exc
+    service = next(
+        (
+            item
+            for item in cfg.services
+            if item.get("kind") == "frontend"
+            and (
+                waiting.get("frontend") is None
+                or item.get("name") == waiting.get("frontend")
+            )
+        ),
+        None,
+    )
+    if service is None:
+        raise CoverageCollectionFailed(
+            "FAILED_COVERAGE: retained browser owner has no configured frontend"
+        )
+    records = []
+    application_scripts = 0
+    application_functions = 0
+    application_ranges = 0
+    expected_origin = urlsplit(precise["frontend_origin"])
+    for script in precise["precise_result"]["result"]:
+        if not isinstance(script, dict):
+            raise CoverageCollectionFailed(
+                "FAILED_COVERAGE: frontend precise script is malformed"
+            )
+        url = script.get("url")
+        functions = script.get("functions")
+        if not isinstance(url, str) or not isinstance(functions, list):
+            raise CoverageCollectionFailed(
+                "FAILED_COVERAGE: frontend precise script is malformed"
+            )
+        script_url = urlsplit(url)
+        if (
+            script_url.scheme != expected_origin.scheme
+            or script_url.netloc != expected_origin.netloc
+        ):
+            continue
+        rel = _frontend_source_subject(ctx, service, url)
+        if rel is None:
+            continue
+        application_scripts += 1
+        file_covered = False
+        for index, function in enumerate(functions):
+            if not isinstance(function, dict):
+                raise CoverageCollectionFailed(
+                    "FAILED_COVERAGE: frontend precise function is malformed"
+                )
+            ranges = function.get("ranges")
+            if not isinstance(ranges, list):
+                raise CoverageCollectionFailed(
+                    "FAILED_COVERAGE: frontend precise ranges are malformed"
+                )
+            application_functions += 1
+            covered_ranges = []
+            for item in ranges:
+                if not _valid_frontend_range(item):
+                    raise CoverageCollectionFailed(
+                        "FAILED_COVERAGE: frontend precise range is malformed"
+                    )
+                application_ranges += 1
+                if item["count"] > 0:
+                    covered_ranges.append(item)
+            if not covered_ranges:
+                continue
+            file_covered = True
+            name = str(function.get("functionName") or "").strip()
+            if not name:
+                first = covered_ranges[0]
+                name = (
+                    f"<anonymous@{first['startOffset']}:"
+                    f"{first['endOffset']}>"
+                )
+            records.append(
+                _normalized_coverage_record(
+                    "function",
+                    f"{rel}::{name}",
+                    service["name"],
+                    "quant-frontend:browser-precise",
+                    "javascript",
+                    {
+                        "file": rel,
+                        "function": name,
+                        "covered_ranges": len(covered_ranges),
+                        "function_index": index,
+                    },
+                )
+            )
+        if file_covered:
+            records.append(
+                _normalized_coverage_record(
+                    "file",
+                    rel,
+                    service["name"],
+                    "quant-frontend:browser-precise",
+                    "javascript",
+                    {"covered": True},
+                )
+            )
+    if not records:
+        raise CoverageCollectionFailed(
+            "FAILED_COVERAGE: frontend-precise.json has no covered workspace source"
+        )
+    return (
+        {
+            "status": "ok",
+            "service": service["name"],
+            "artifact": str(precise_path.relative_to(ctx.run_dir)),
+            "application_script_count": application_scripts,
+            "application_function_count": application_functions,
+            "application_range_count": application_ranges,
+            "record_count": len(records),
+        },
+        records,
+    )
+
+
+def _read_regular_json(path: Path, limit: int) -> dict:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("artifact is not a regular file")
+        if info.st_size > limit:
+            raise OSError("artifact exceeds size limit")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = None
+            payload = handle.read(limit + 1)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if len(payload) > limit:
+        raise OSError("artifact exceeds size limit")
+    value = json.loads(payload.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("artifact root must be an object")
+    return value
+
+
+def _validate_frontend_binding(waiting: dict, precise: dict) -> None:
+    if precise.get("schema_version") != 1:
+        raise ValueError("schema_version must be 1")
+    for field in ("browser_id", "tab_id"):
+        value = waiting.get(field)
+        if not isinstance(value, str) or not value or precise.get(field) != value:
+            raise ValueError(f"{field} binding mismatch")
+    target = waiting.get("target_url")
+    origin = precise.get("frontend_origin")
+    if not isinstance(target, str) or not isinstance(origin, str):
+        raise ValueError("frontend origin binding is missing")
+    target_url = urlsplit(target)
+    precise_url = urlsplit(origin)
+    if (
+        target_url.scheme not in {"http", "https"}
+        or precise_url.scheme != target_url.scheme
+        or precise_url.netloc != target_url.netloc
+    ):
+        raise ValueError("frontend origin binding mismatch")
+    result = precise.get("precise_result", {}).get("result")
+    if not isinstance(result, list) or not result:
+        raise ValueError("precise_result.result must be a nonempty array")
+
+
+def _valid_frontend_range(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    start = value.get("startOffset")
+    end = value.get("endOffset")
+    count = value.get("count")
+    if any(isinstance(item, bool) for item in (start, end, count)):
+        return False
+    if not all(isinstance(item, (int, float)) for item in (start, end, count)):
+        return False
+    return (
+        all(math.isfinite(float(item)) for item in (start, end, count))
+        and start >= 0
+        and end > start
+        and count >= 0
+    )
+
+
+def _frontend_source_subject(ctx, service: dict, raw_url: str) -> str | None:
+    parsed = urlsplit(raw_url)
+    path = unquote(parsed.path)
+    repo = ctx.workspace / service["path"]
+    if path.startswith("/@fs/"):
+        candidate = Path("/" + path.removeprefix("/@fs/").lstrip("/"))
+    else:
+        candidate = repo / path.lstrip("/")
+    return _workspace_source_subject(ctx.workspace, candidate)
+
+
+def _normalize_source_subject(
+    ctx,
+    service: dict,
+    raw_path: str,
+    *,
+    module: str | None = None,
+) -> str | None:
+    repo = ctx.workspace / service["path"]
+    if module and raw_path.startswith(module + "/"):
+        candidate = repo / raw_path[len(module) + 1 :]
+    else:
+        path = Path(raw_path)
+        candidate = path if path.is_absolute() else repo / path
+    return _workspace_source_subject(ctx.workspace, candidate)
+
+
+def _workspace_source_subject(workspace: Path, candidate: Path) -> str | None:
+    try:
+        resolved_workspace = workspace.resolve()
+        resolved = candidate.resolve()
+        rel = resolved.relative_to(resolved_workspace)
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    if any(part in {"node_modules", "dist", "build", ".git"} for part in rel.parts):
+        return None
+    return rel.as_posix()
+
+
+def _go_module_path(repo: Path) -> str | None:
+    go_mod = repo / "go.mod"
+    if not go_mod.is_file():
+        return None
+    for line in go_mod.read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = line.strip().split()
+        if len(parts) == 2 and parts[0] == "module":
+            return parts[1]
+    return None
+
+
+def _python_covered_lines(details: dict) -> int:
+    summary = details.get("summary", {})
+    if isinstance(summary, dict):
+        value = summary.get("covered_lines")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    executed = details.get("executed_lines")
+    if isinstance(executed, list):
+        return len(executed)
+    return 0
+
+
+def _normalized_coverage_record(
+    level: str,
+    subject: str,
+    service: str,
+    source: str,
+    language: str,
+    extra: dict,
+) -> dict:
+    file = subject.split("::", 1)[0]
+    details = {
+        "file": file,
+        "covered": True,
+        "language": language,
+        **extra,
+    }
+    return {
+        "kind": f"normalized_coverage_{level}",
+        "subject": subject,
+        "service": service,
+        "source": source,
+        "confidence": "high",
+        "details": details,
+    }
+
+
+def _dedupe_normalized_coverage_records(records: list[dict]) -> list[dict]:
+    deduped = {}
+    for record in records:
+        key = (
+            record.get("kind"),
+            record.get("subject"),
+            record.get("source"),
+        )
+        deduped[key] = record
+    return [
+        deduped[key]
+        for key in sorted(
+            deduped,
+            key=lambda value: tuple(str(item) for item in value),
+        )
+    ]
 
 
 def collect_runtime_coverage_outputs(ctx, cfg, runtime_scripts: list[dict]) -> list[dict]:

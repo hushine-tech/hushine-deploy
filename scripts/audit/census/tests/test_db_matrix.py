@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -41,6 +42,29 @@ update portfolio_snapshots set updated_at = now();
             self.assertIn("orders", matrix["tables"])
             self.assertTrue((ctx.run_dir / "inventory/db-table-matrix.json").exists())
             self.assertTrue((ctx.run_dir / "reachability/static-references.json").exists())
+
+    def test_legacy_filename_is_naming_evidence_not_static_unreachability(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            source = workspace / "core-service/internal/legacy_client.go"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                'package internal\nimport "context"\n',
+                encoding="utf-8",
+            )
+            ctx = RunContext.create(workspace, "census-runs", "static", "legacy-name")
+            cfg = type("Cfg", (), {"services": [], "raw": {}})()
+
+            collect_db_matrix(ctx, cfg)
+            reachability = json.loads(
+                (
+                    ctx.run_dir / "reachability/static-references.json"
+                ).read_text(encoding="utf-8")
+            )
+            rel = "core-service/internal/legacy_client.go"
+
+        self.assertNotIn(rel, reachability["unreferenced_files"])
+        self.assertIn(rel, reachability["naming_suspicions"])
 
 
 if __name__ == "__main__":

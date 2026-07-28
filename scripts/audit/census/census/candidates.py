@@ -74,6 +74,10 @@ def add_reachability_subjects(subjects: dict[str, dict], ctx) -> None:
         state = subjects.setdefault(rel, {"evidence": set(), "files": set()})
         state["evidence"].add("unreferenced-static")
         state["files"].add(rel)
+    for rel in reachability.get("naming_suspicions", []):
+        state = subjects.setdefault(rel, {"evidence": set(), "files": set()})
+        state["evidence"].add("legacy-like-name")
+        state["files"].add(rel)
 
 
 def add_evidence_subjects(subjects: dict[str, dict], ctx) -> None:
@@ -82,9 +86,32 @@ def add_evidence_subjects(subjects: dict[str, dict], ctx) -> None:
             subject = item.get("subject") or item.get("service") or item.get("kind")
             if not subject:
                 continue
+            details = item.get("details")
+            if isinstance(details, dict) and details.get("covered") is False:
+                continue
             state = subjects.setdefault(subject, {"evidence": set(), "files": set()})
-            state["evidence"].add(item.get("kind", path.stem))
+            evidence = item.get("kind", path.stem)
+            state["evidence"].add(evidence)
             state["active"] = True
+            covered_file = (
+                details.get("file")
+                if isinstance(details, dict)
+                else None
+            )
+            if not covered_file:
+                continue
+            state["files"].add(covered_file)
+            file_state = subjects.setdefault(
+                covered_file,
+                {"evidence": set(), "files": set()},
+            )
+            file_state["evidence"].add(evidence)
+            file_state["files"].add(covered_file)
+            file_state["active"] = True
+            for candidate in subjects.values():
+                if covered_file in candidate.get("files", set()):
+                    candidate["evidence"].add(evidence)
+                    candidate["active"] = True
 
 
 def decide_bucket(subject: str, state: dict, static_only: bool) -> str:

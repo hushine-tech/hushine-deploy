@@ -33,6 +33,51 @@ class CandidateTests(unittest.TestCase):
             active = [item for item in classification["items"] if item["subject"] == "core-service:Login"]
             self.assertEqual(active[0]["bucket"], "active")
 
+    def test_covered_file_marks_matching_static_entrypoint_active(self):
+        with tempfile.TemporaryDirectory() as td:
+            ctx = RunContext.create(
+                Path(td),
+                "census-runs",
+                "snapshot",
+                "candidate-covered-file",
+            )
+            source = "core-service/internal/http/login.go"
+            write_json(
+                ctx.run_dir / "inventory/static-entrypoints.json",
+                [
+                    {
+                        "kind": "http_route",
+                        "repo": "core-service",
+                        "name": "/api/login",
+                        "file": source,
+                    }
+                ],
+            )
+            append_jsonl(
+                ctx.run_dir / "evidence/coverage.jsonl",
+                evidence_record(
+                    "normalized_coverage_file",
+                    source,
+                    "go_runtime_coverage",
+                    "high",
+                    {"file": source, "covered": True},
+                ),
+            )
+
+            classification = classify_candidates(
+                ctx,
+                type("Cfg", (), {"raw": {}})(),
+                static_only=False,
+            )
+
+        route = next(
+            item
+            for item in classification["items"]
+            if item["subject"] == "core-service:/api/login"
+        )
+        self.assertEqual(route["bucket"], "active")
+        self.assertIn("normalized_coverage_file", route["evidence"])
+
     def test_unprotected_no_evidence_can_be_delete_candidate_in_non_static_run(self):
         with tempfile.TemporaryDirectory() as td:
             ctx = RunContext.create(Path(td), "census-runs", "snapshot", "candidate-delete")

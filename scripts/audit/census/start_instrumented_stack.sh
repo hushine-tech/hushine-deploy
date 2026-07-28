@@ -22,6 +22,8 @@ COVERAGE_IMAGE=""
 BROWSER_ID=""
 TAB_ID=""
 START_DELAY_SECONDS="${CODE_CENSUS_START_DELAY_SECONDS:-1}"
+STOP_TIMEOUT_SECONDS="${CODE_CENSUS_STOP_TIMEOUT_SECONDS:-10}"
+STOP_POLL_INTERVAL_SECONDS="${CODE_CENSUS_STOP_POLL_INTERVAL_SECONDS:-0.1}"
 
 usage() {
   printf '%s\n' \
@@ -98,6 +100,7 @@ RUN_DIR="${SOURCE_ROOT}/census-runs/${RUN_ID}"
 COVERAGE_DIR="${RUN_DIR}/coverage"
 PLAN_FILE="${COVERAGE_DIR}/instrumented-stack.json"
 PID_FILE="${COVERAGE_DIR}/instrumented-stack-pids.tsv"
+STOP_STATUS_FILE="${COVERAGE_DIR}/instrumented-stack-stop.json"
 HOSTED_COVERAGE_OUTPUT_DIR="${COVERAGE_DIR}/runtime-agent"
 
 if [ ! -d "$RUN_DIR" ]; then
@@ -115,26 +118,157 @@ terminate_process_tree() {
 }
 
 stop_stack() {
+  local service pid log state_file result_file
   if [ ! -f "$PID_FILE" ]; then
     echo "pid file not found: ${PID_FILE}" >&2
     exit 1
   fi
+  if ! python3 - "$STOP_TIMEOUT_SECONDS" "$STOP_POLL_INTERVAL_SECONDS" <<'PY'
+import math
+import sys
+
+try:
+    timeout = float(sys.argv[1])
+    poll = float(sys.argv[2])
+except ValueError:
+    raise SystemExit(1)
+if (
+    not math.isfinite(timeout)
+    or not math.isfinite(poll)
+    or timeout <= 0
+    or timeout > 600
+    or poll <= 0
+    or poll > 1
+):
+    raise SystemExit(1)
+PY
+  then
+    echo "CODE_CENSUS_STOP_TIMEOUT_SECONDS must be in (0, 600] and CODE_CENSUS_STOP_POLL_INTERVAL_SECONDS must be in (0, 1]" >&2
+    exit 2
+  fi
+
+  state_file="$(mktemp "${COVERAGE_DIR}/.instrumented-stop-state.XXXXXX")"
+  result_file="$(mktemp "${COVERAGE_DIR}/.instrumented-stop-result.XXXXXX")"
   while IFS=$'\t' read -r service pid log; do
     [ -n "$service" ] || continue
+    if [[ ! "$service" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || [[ ! "$pid" =~ ^[0-9]+$ ]] || [ "$pid" -le 1 ]; then
+      rm -f "$state_file" "$result_file"
+      echo "invalid instrumented stack pid entry" >&2
+      exit 1
+    fi
     if kill -0 "$pid" >/dev/null 2>&1; then
+      printf '%s\t%s\tpending\n' "$service" "$pid" >> "$state_file"
+    else
+      printf '%s\t%s\talready-stopped\n' "$service" "$pid" >> "$state_file"
+    fi
+    : "${log:=}"
+  done < "$PID_FILE"
+
+  while IFS=$'\t' read -r service pid status; do
+    if [ "$status" = pending ]; then
       echo "stopping ${service} pid=${pid}"
       terminate_process_tree "$pid" TERM
     fi
-    : "${log:=}"
-  done < "$PID_FILE"
-  sleep 1
-  while IFS=$'\t' read -r service pid log; do
-    [ -n "$service" ] || continue
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      terminate_process_tree "$pid" KILL
-    fi
-    : "${log:=}"
-  done < "$PID_FILE"
+  done < "$state_file"
+
+  python3 - \
+    "$state_file" "$result_file" \
+    "$STOP_TIMEOUT_SECONDS" "$STOP_POLL_INTERVAL_SECONDS" <<'PY'
+import os
+import sys
+import time
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+result_path = Path(sys.argv[2])
+timeout = float(sys.argv[3])
+poll = float(sys.argv[4])
+rows = []
+for line in state_path.read_text(encoding="utf-8").splitlines():
+    service, raw_pid, initial = line.split("\t", 2)
+    rows.append((service, int(raw_pid), initial))
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+deadline = time.monotonic() + timeout
+pending = {
+    pid
+    for _service, pid, initial in rows
+    if initial == "pending" and alive(pid)
+}
+while pending:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        break
+    time.sleep(min(poll, remaining))
+    pending = {pid for pid in pending if alive(pid)}
+
+with result_path.open("w", encoding="utf-8") as handle:
+    for service, pid, initial in rows:
+        if initial == "already-stopped":
+            status = initial
+        elif alive(pid):
+            status = "forced"
+        else:
+            status = "graceful"
+        handle.write(f"{service}\t{pid}\t{status}\n")
+PY
+
+  while IFS=$'\t' read -r service pid status; do
+    case "$status" in
+      forced)
+        echo "forced ${service} pid=${pid}"
+        terminate_process_tree "$pid" KILL
+        ;;
+      graceful)
+        echo "graceful ${service} pid=${pid}"
+        ;;
+      already-stopped)
+        echo "already stopped ${service} pid=${pid}"
+        ;;
+    esac
+  done < "$result_file"
+
+  python3 - \
+    "$result_file" "$STOP_STATUS_FILE" "$RUN_ID" \
+    "$STOP_TIMEOUT_SECONDS" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+result_path = Path(sys.argv[1])
+output = Path(sys.argv[2])
+services = []
+for line in result_path.read_text(encoding="utf-8").splitlines():
+    service, raw_pid, status = line.split("\t", 2)
+    services.append(
+        {"service": service, "pid": int(raw_pid), "status": status}
+    )
+payload = {
+    "schema_version": 1,
+    "run_id": sys.argv[3],
+    "timeout_seconds": float(sys.argv[4]),
+    "services": services,
+}
+temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
+with temporary.open("x", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary, output)
+PY
+
+  rm -f "$state_file" "$result_file"
   rm -f "$PID_FILE"
   echo "instrumented stack stopped: ${RUN_ID}"
 }
