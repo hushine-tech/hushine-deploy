@@ -75,7 +75,7 @@ fresh rebuild and review, not an Account-era in-place upgrade.
 
 | Database | Owning repository | Source |
 |---|---|---|
-| `portfolio` | `core-service` | `internal/storage/migrations/0000` through `0004`, in filename order |
+| `portfolio` | `core-service` | `internal/storage/migrations/0000` through `0005`, in filename order |
 | `order` | `core-service` | `internal/order/storage/migrations/0000` through `0003`, in filename order |
 | `control_panel` | `control-panel-service` | `internal/storage/migrations/0000_create_schema_migrations.sql` and `0001_current_schema_baseline.sql` |
 | `{exchange}_{year}` | `scraper` | `internal/storage/migrations/0001_current_schema_baseline.sql` |
@@ -89,6 +89,7 @@ Exact current order:
 3. `0002_spot_risk_facts.sql`
 4. `0003_spot_reconciliation_repair.sql`
 5. `0004_spot_close_reconciliation_pending.sql`
+6. `0005_runtime_indicator_v2.sql`
 
 `0002` adds immutable per-session Spot risk facts. `0003` adds repair source,
 status and identities to reconciliation history. `0004` adds the synchronous
@@ -97,6 +98,10 @@ status and identities to reconciliation history. `0004` adds the synchronous
 non-unique partial index on `(run_id, time DESC)`; a unique index that omits
 the partitioning column cannot be created by TimescaleDB. Application-level
 idempotency is serialized with a transaction-scoped advisory lock on `run_id`.
+`0005` installs Indicator V2 chunk persistence and finalization. A fresh
+baseline already contains the V2 tables, so ordinary one-shot bootstrap is
+non-destructive. An older database that still contains V1 `values_json`
+indicator tables remains behind the explicit acceptance/cutover guard.
 
 ### `order`
 
@@ -130,7 +135,7 @@ The current ledger counts are:
 
 | Database | Expected migration rows |
 |---|---:|
-| `portfolio` | 5 |
+| `portfolio` | 6 |
 | `order` | 4 |
 | `control_panel` | 2 |
 | one market-data year DB | 1 |
@@ -139,7 +144,7 @@ Both `0001_current_schema_baseline.sql` files are immutable compatibility
 anchors. Verify their approved SHA-256 values before a release:
 
 ```text
-portfolio 5b2bf5a34e9a65e7f2c6fca69a71553dac4c1b00f8b720e5cde3f71eaec5cafe
+portfolio bd77d355a6a22c1b8fe970d9e291780849bf55b9ee63ee75cc212761612cb970
 order     6e2d179b9ecf706de8461ca6443efacfd22cb084ef6b49a0e2c94f2e49881b60
 ```
 
