@@ -12,7 +12,8 @@
 DEPLOY_ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 SOURCE_ROOT ?= $(if $(wildcard $(DEPLOY_ROOT)/core-service),$(DEPLOY_ROOT),$(abspath $(DEPLOY_ROOT)/..))
 SERVICES := core-service control-panel-service strategy-service gateway/quant-handler gateway/quant-frontend scraper
-UV ?= $(shell if command -v uv >/dev/null 2>&1; then command -v uv; elif [ -n "$$HOME" ] && [ -x "$$HOME/.local/bin/uv" ]; then printf '%s\n' "$$HOME/.local/bin/uv"; else printf '%s\n' uv; fi)
+UV_FALLBACK = $(shell if command -v uv >/dev/null 2>&1; then command -v uv; elif [ -n "$$HOME" ] && [ -x "$$HOME/.local/bin/uv" ]; then printf '%s\n' "$$HOME/.local/bin/uv"; else printf '%s\n' uv; fi)
+override UV := $(if $(strip $(UV_BIN)),$(strip $(UV_BIN)),$(if $(strip $(UV)),$(strip $(UV)),$(UV_FALLBACK)))
 export UV
 CODE_CENSUS ?= "$(UV)" run --isolated --no-project --with-requirements $(DEPLOY_ROOT)/scripts/audit/census/requirements.txt python $(DEPLOY_ROOT)/scripts/audit/census/code_census.py
 CODE_CENSUS_ARGS := --source-root $(SOURCE_ROOT) --config $(DEPLOY_ROOT)/scripts/audit/census/config.yaml

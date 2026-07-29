@@ -73,7 +73,7 @@ def resolve_uv_executable(env: dict[str, str] | None = None) -> str:
     resolved = shutil.which("uv", path=path_value)
     if resolved:
         return str(Path(resolved).resolve())
-    home = values.get("HOME", "").strip()
+    home = (values.get("HOME") or values.get("USERPROFILE") or "").strip()
     if home:
         names = ("uv.exe", "uv") if os.name == "nt" else ("uv",)
         for name in names:
@@ -82,7 +82,7 @@ def resolve_uv_executable(env: dict[str, str] | None = None) -> str:
                 return str(candidate.resolve())
     raise CoverageCollectionFailed(
         "FAILED_COVERAGE: uv executable was not found "
-        "(set UV_BIN/UV or install it in PATH or HOME/.local/bin)"
+        "(set UV_BIN/UV or install it in PATH or the user profile .local/bin)"
     )
 
 

@@ -108,6 +108,21 @@ grep -Fq -- "\"$fallback_uv_home/.local/bin/uv\" run" <<<"$fallback_uv_command" 
   exit 1
 }
 
+explicit_uv_dir="$tmpdir/explicit uv"
+mkdir -p "$explicit_uv_dir"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$explicit_uv_dir/uv"
+chmod 0700 "$explicit_uv_dir/uv"
+explicit_uv_command="$(
+  HOME="$tmpdir/no-home-uv" PATH="/usr/bin:/bin" \
+    UV_BIN="$explicit_uv_dir/uv" UV="$tmpdir/must-not-run-uv" \
+    make -n -f "$deploy_root/Makefile" SOURCE_ROOT="$explicit" \
+      RUN_ID=source-root-test code-census-static
+)"
+grep -Fq -- "\"$explicit_uv_dir/uv\" run" <<<"$explicit_uv_command" || {
+  echo 'Makefile did not honor UV_BIN' >&2
+  exit 1
+}
+
 for target in \
   ensure-dbs db-schema-bundle local-configs local-infra-up local-infra-down \
   local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs \

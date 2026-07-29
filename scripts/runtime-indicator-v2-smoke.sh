@@ -3,28 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 DEPLOY_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+source "${DEPLOY_ROOT}/scripts/lib/runtime_coverage.sh"
 SOURCE_ROOT="${HUSHINE_SOURCE_ROOT:-$(cd "${DEPLOY_ROOT}/.." && pwd -P)}"
 
-resolve_uv_bin() {
-  local candidate="${UV_BIN:-}"
-  if [[ -n "${candidate}" ]]; then
-    if [[ "${candidate}" != */* ]]; then
-      candidate="$(command -v "${candidate}" 2>/dev/null || true)"
-    fi
-  else
-    candidate="$(command -v uv 2>/dev/null || true)"
-  fi
-  if [[ -z "${candidate}" && -n "${HOME:-}" && -x "${HOME}/.local/bin/uv" ]]; then
-    candidate="${HOME}/.local/bin/uv"
-  fi
-  [[ -n "${candidate}" && -x "${candidate}" ]] || return 1
-  printf '%s\n' "${candidate}"
-}
-
-if ! UV_BIN="$(resolve_uv_bin)"; then
+if ! UV_BIN="$(runtime_coverage_resolve_uv_bin)"; then
   echo "runtime Indicator V2 smoke requires uv" >&2
   exit 2
 fi
+export UV_BIN
 
 run_in() {
   local repository="$1"

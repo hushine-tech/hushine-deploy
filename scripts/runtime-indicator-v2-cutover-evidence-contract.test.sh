@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SCRIPT="${ROOT}/scripts/runtime-indicator-v2-cutover-evidence.test.sh"
 SMOKE_SCRIPT="${ROOT}/scripts/runtime-indicator-v2-smoke.sh"
+COVERAGE_LIB="${ROOT}/scripts/lib/runtime_coverage.sh"
 
 fail() {
   echo "runtime Indicator V2 cutover evidence contract: $*" >&2
@@ -25,8 +26,17 @@ bash -n "${SMOKE_SCRIPT}" || fail "smoke script is not valid Bash"
 if grep -Fq '/Users/xdy/.local/bin/uv' "${SMOKE_SCRIPT}"; then
   fail "smoke script contains a machine-specific uv path"
 fi
-grep -Fq '${HOME}/.local/bin/uv' "${SMOKE_SCRIPT}" \
-  || fail "smoke script does not support the portable HOME uv fallback"
+for consumer in "${SCRIPT}" "${SMOKE_SCRIPT}"; do
+  grep -Fq 'source "${DEPLOY_ROOT}/scripts/lib/runtime_coverage.sh"' "${consumer}" \
+    || fail "$(basename "${consumer}") does not use the shared runtime tooling"
+  grep -Fq 'runtime_coverage_resolve_uv_bin' "${consumer}" \
+    || fail "$(basename "${consumer}") does not use the shared uv resolver"
+  if grep -Fq 'resolve_uv_bin() {' "${consumer}"; then
+    fail "$(basename "${consumer}") duplicates the shared uv resolver"
+  fi
+done
+grep -Fq '${HOME}/.local/bin/uv' "${COVERAGE_LIB}" \
+  || fail "shared uv resolver does not support the portable HOME fallback"
 
 test_root="$(mktemp -d)"
 test_root="$(cd "${test_root}" && pwd -P)"

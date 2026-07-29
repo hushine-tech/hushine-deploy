@@ -253,10 +253,15 @@ func TestTerminalRuntimeStatusRequiresCancelled(t *testing.T) {
 
 func TestCoverageDebugExecutableHonorsUVBin(t *testing.T) {
 	t.Setenv("UV_BIN", " /portable/tools/uv ")
+	t.Setenv("UV", " /secondary/tools/uv ")
 	if got := coverageDebugExecutable(); got != "/portable/tools/uv" {
 		t.Fatalf("coverageDebugExecutable() = %q, want UV_BIN override", got)
 	}
 	t.Setenv("UV_BIN", "")
+	if got := coverageDebugExecutable(); got != "/secondary/tools/uv" {
+		t.Fatalf("coverageDebugExecutable() = %q, want UV override", got)
+	}
+	t.Setenv("UV", "")
 	if got := coverageDebugExecutable(); got != "uv" {
 		t.Fatalf("coverageDebugExecutable() = %q, want PATH fallback", got)
 	}

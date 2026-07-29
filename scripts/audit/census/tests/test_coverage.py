@@ -2091,6 +2091,20 @@ class CoverageTests(unittest.TestCase):
 
         self.assertEqual(resolved, str(uv.resolve()))
 
+    def test_resolve_uv_executable_falls_back_to_userprofile_local_bin(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            uv = home / ".local" / "bin" / ("uv.exe" if os.name == "nt" else "uv")
+            uv.parent.mkdir(parents=True)
+            uv.write_text("", encoding="utf-8")
+            uv.chmod(0o700)
+
+            resolved = coverage.resolve_uv_executable(
+                {"USERPROFILE": str(home), "PATH": str(home / "empty-path")}
+            )
+
+        self.assertEqual(resolved, str(uv.resolve()))
+
     def test_resolve_uv_executable_rejects_missing_configured_override(self):
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(CoverageCollectionFailed) as caught:

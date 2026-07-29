@@ -2,6 +2,7 @@
 set -euo pipefail
 
 DEPLOY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+source "${DEPLOY_ROOT}/scripts/lib/runtime_coverage.sh"
 SOURCE_ROOT="${HUSHINE_SOURCE_ROOT:-$(cd "${DEPLOY_ROOT}/.." && pwd -P)}"
 umask 077
 
@@ -25,23 +26,6 @@ die() {
 require_command() {
   command -v "$1" >/dev/null 2>&1 \
     || die "required command not found: $1"
-}
-
-resolve_uv_bin() {
-  local candidate="${UV_BIN:-}"
-  if [[ -n "${candidate}" ]]; then
-    if [[ "${candidate}" != */* ]]; then
-      candidate="$(command -v "${candidate}" 2>/dev/null || true)"
-    fi
-  else
-    candidate="$(command -v uv 2>/dev/null || true)"
-  fi
-  if [[ -z "${candidate}" && -n "${HOME:-}" && -x "${HOME}/.local/bin/uv" ]]; then
-    candidate="${HOME}/.local/bin/uv"
-  fi
-  [[ -n "${candidate}" && -x "${candidate}" ]] \
-    || die "required command not found: uv"
-  printf '%s\n' "${candidate}"
 }
 
 file_mode() {
@@ -193,7 +177,8 @@ coexistence_command_json() {
   local started_at finished_at status log_sha argv environment uv_bin
   started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   if [[ "${id}" == "strategy-service-worker-v1-v2" ]]; then
-    uv_bin="$(resolve_uv_bin)"
+    uv_bin="$(runtime_coverage_resolve_uv_bin)" \
+      || die "required command not found: uv"
   fi
   set +e
   case "${id}" in

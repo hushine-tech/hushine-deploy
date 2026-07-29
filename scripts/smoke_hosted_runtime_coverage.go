@@ -1165,6 +1165,9 @@ func coverageDebugExecutable() string {
 	if executable := strings.TrimSpace(os.Getenv("UV_BIN")); executable != "" {
 		return executable
 	}
+	if executable := strings.TrimSpace(os.Getenv("UV")); executable != "" {
+		return executable
+	}
 	return "uv"
 }
 
