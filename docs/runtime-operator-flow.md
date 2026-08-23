@@ -1,6 +1,13 @@
 # Runtime 操作流程
 
-最后核验：2026-07-24。
+最后核验：2026-08-24。
+
+本次核验的实现 commit：strategy-service
+`6ec6671ec4dc4de4613a56ab779b5a34acd889ca`、core-service
+`c00cdf6d8c82f67302c46b4bcd2e4d99ee1056d3`、control-panel-service
+`f9f0fcc8bcf98f06ed7119750447c7f5e207e145`。Futures 杠杆的完整声明、页面、
+持久化和故障语义见
+[`strategy-owned-futures-leverage.md`](strategy-owned-futures-leverage.md)。
 
 本文描述当前 RuntimeChannel 实现。所有策略请求和 session 路由都只使用
 `runtime_id`；runtime 名称只是展示字段，不能作为路由键。
@@ -94,6 +101,46 @@ import → 成功后才开始 session。同步错误和 download job 轮询错�
 | `RUNTIME_DEPENDENCY_PROFILE_INVALID` | runtime 本地 profile/安装闭包在 HELLO 前无效 |
 | `RUNTIME_DEPENDENCY_PROFILE_MISMATCH` | HELLO/RESUME profile 与 control-panel 期望值不一致 |
 
+## 策略主导的 Futures 杠杆启动
+
+Futures 杠杆只能来自策略声明，固定优先级为 target 的
+`ORDER_TARGETS[].leverage`、class `LEVERAGE`、平台默认 `1x`。Spot target
+声明 leverage 会在 worker 执行前失败；Spot-only 策略也不能声明全局
+`LEVERAGE`。页面没有 Demo、Backtest 或 Resume 的杠杆输入，旧 HTTP/proto
+字段仅保留兼容解码，新请求不把它当权威。
+
+Preview 和 Start 都通过 `runtime_id` 选择 Runtime：
+
+1. Preview 创建临时 one-shot worker，解析当前策略，并经 RuntimeChannel 调用
+   core-service 的只读 preflight。它只 GET 当前逐 symbol 杠杆，不取 admission、
+   不 POST Binance、不写 launch journal/outbox/Session facts，返回后 worker 退出。
+2. Start 生成新的 `launch_operation_id`，再创建 one-shot preparation worker。
+   这个 worker 重新读取当前 active strategy，返回 source SHA-256、声明、逐 target
+   有效杠杆/来源、路由和风险控制，不进入用户 callback。
+3. runtime-agent 把 typed commit 通过 RuntimeChannel 交给 control-panel。control-panel
+   用已认证 user/runtime 覆盖 route identity，只做字段校验和 relay；它不解析 Python、
+   不算优先级，也不接受 runtime payload 里的内部 endpoint。
+4. core-service 获取按
+   `(exchange, environment, credential_fingerprint, market, symbol)` 唯一的 admission，
+   按稳定 route/symbol 顺序执行 read → 必要时 set → readback。rollback obligation
+   先写 journal 再 POST；失败时对本次可能改变的 target 逆序 rollback/readback。
+5. 全部确认后才在一个 transaction 内创建 pending Session、逐 target facts、转交
+   admission holder 并提交 operation。runtime-agent readback 后构造 bootstrap，最后
+   才创建正式 session worker。
+6. 正式 worker 重新加载策略，并对 source digest、target set、有效值/来源、
+   confirmed leverage 和 wallet metadata 做一致性校验；任何 mismatch 都 fail closed。
+
+`environment=0` 使用同一 resolver 和模拟 Futures wallet，不调用 Binance、不取 live
+admission；`environment=1` 才执行上面的 Binance Demo 读写；`environment=2` 继续
+rollout guarded。strategy-debugger-cli 与 Backtest 保持 resolver/模拟钱包一致，也不
+提供 leverage override。
+
+rollback 全部确认时不创建可运行 Session，并释放 operation admission。rollback
+无法确认时返回 `LEVERAGE_ROLLBACK_FAILED`，operation/admission 保持
+`recovery_required`，按 `launch_operation_id` 去重写 durable outbox；不能把这种状态
+描述为“账户没有变化”。成功 Session 终止时释放 admission，但不自动恢复 Binance
+杠杆。
+
 ## Agent 与 worker 隔离
 
 Go runtime-agent 与每个 Python session worker 是两个进程。agent 在
@@ -183,7 +230,10 @@ core-service、core-service 承载的 order.v1、Kafka 或数据库地址。
    原 runtime 链接。
 3. 用户必须在页面选择一个当前可路由的 runtime，然后点击
    `Resume With New Session`。
-4. 新 session 会绑定到所选 runtime；旧 `recoverable` session 保留为审计历史。
+4. Futures Resume 先要求原 Session 的 strategy 仍为 active，并显示只读逐 target
+   preview；点击后重新解析当前源码，重新执行 admission、apply/readback、facts 和
+   bootstrap，不能复用旧 Session facts 或旧标量。
+5. 新 session 会绑定到所选 runtime；旧 `recoverable` session 保留为审计历史。
 
 不要直接在数据库里把 `recoverable` 改回 `running`。旧 runtime 重新连上也不应自动继续旧 session。
 

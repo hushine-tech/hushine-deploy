@@ -1,5 +1,8 @@
 # Hushine database bootstrap
 
+Last verified: 2026-08-24 against core-service
+`c00cdf6d8c82f67302c46b4bcd2e4d99ee1056d3`.
+
 This is the deployment inventory for a fresh Hushine environment. Service
 repositories own the schema source files; this repository owns orchestration,
 review bundles, and deployment instructions.
@@ -39,13 +42,18 @@ Connection variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PGHOST` | `192.168.88.10` | PostgreSQL/TimescaleDB host |
+| `PGHOST` | runner-specific; local commands export `127.0.0.1` | PostgreSQL/TimescaleDB host; set explicitly outside the local workflow |
 | `PGPORT` | `5432` | PostgreSQL port |
 | `PGUSER` | `postgres` | bootstrap user |
 | `PGPASSWORD` | `postgres` | bootstrap password |
 | `PGDATABASE_ADMIN` | `postgres` | admin database used for `CREATE DATABASE` |
 | `SCRAPER_DBS` | current Binance/OKX year DBs | explicit market-data database list |
 | `SCRAPER_EXCHANGES` / `SCRAPER_YEARS` | `binance,okx` / current year | market-data database matrix |
+
+The owner repositories retain different legacy `PGHOST` fallbacks, so
+operators must not infer a shared deployment host from an omitted variable.
+`make local-bootstrap`/`make local-ensure-dbs` set the local host explicitly;
+other environments must do the same.
 
 ## Versioned SQL bundles
 
@@ -75,7 +83,7 @@ fresh rebuild and review, not an Account-era in-place upgrade.
 
 | Database | Owning repository | Source |
 |---|---|---|
-| `portfolio` | `core-service` | `internal/storage/migrations/0000` through `0005`, in filename order |
+| `portfolio` | `core-service` | `internal/storage/migrations/0000` through `0008`, in filename order |
 | `order` | `core-service` | `internal/order/storage/migrations/0000` through `0003`, in filename order |
 | `control_panel` | `control-panel-service` | `internal/storage/migrations/0000_create_schema_migrations.sql` and `0001_current_schema_baseline.sql` |
 | `{exchange}_{year}` | `scraper` | `internal/storage/migrations/0001_current_schema_baseline.sql` |
@@ -90,6 +98,9 @@ Exact current order:
 4. `0003_spot_reconciliation_repair.sql`
 5. `0004_spot_close_reconciliation_pending.sql`
 6. `0005_runtime_indicator_v2.sql`
+7. `0006_strategy_owned_futures_leverage.sql`
+8. `0007_strategy_leverage_notification_outbox.sql`
+9. `0008_strategy_session_deprecated_leverage_zero.sql`
 
 `0002` adds immutable per-session Spot risk facts. `0003` adds repair source,
 status and identities to reconciliation history. `0004` adds the synchronous
@@ -102,6 +113,16 @@ idempotency is serialized with a transaction-scoped advisory lock on `run_id`.
 baseline already contains the V2 tables, so ordinary one-shot bootstrap is
 non-destructive. An older database that still contains V1 `values_json`
 indicator tables remains behind the explicit acceptance/cutover guard.
+
+`0006` adds the durable strategy-launch journal, per-target apply attempts,
+credential/symbol admission, and authoritative Session target leverage facts.
+`0007` adds the crash-safe rollback-failure notification outbox, deduplicated
+by launch operation. `0008` changes only the deprecated
+`strategy_sessions.leverage` check from `> 0` to `>= 0`: the default remains
+`1`, historical values are not rewritten, and zero means that a new
+coordinated Session has no truthful session-wide scalar. New Futures reads use
+target facts; historical Sessions with no facts may still expose their positive
+legacy scalar.
 
 ### `order`
 
@@ -119,13 +140,14 @@ rename, reorder or reuse an already deployed filename.
 
 ## Fresh-bundle verification
 
-Generate twice and require byte-identical output:
+Render to a temporary directory and require byte-identical output:
 
 ```bash
-make db-schema-bundle
-before="$(shasum -a 256 db/generated/*.sql db/generated/README.md)"
-make db-schema-bundle
-test "$before" = "$(shasum -a 256 db/generated/*.sql db/generated/README.md)"
+generated_check_dir="$(mktemp -d)"
+bash scripts/db/render-schema-bundle.sh "$generated_check_dir"
+diff -ru "$generated_check_dir" db/generated
+find "$generated_check_dir" -type f -delete
+rmdir "$generated_check_dir"
 ```
 
 For release acceptance, create four transient empty databases, apply the
@@ -135,7 +157,7 @@ The current ledger counts are:
 
 | Database | Expected migration rows |
 |---|---:|
-| `portfolio` | 6 |
+| `portfolio` | 9 |
 | `order` | 4 |
 | `control_panel` | 2 |
 | one market-data year DB | 1 |
@@ -144,13 +166,13 @@ Both `0001_current_schema_baseline.sql` files are immutable compatibility
 anchors. Verify their approved SHA-256 values before a release:
 
 ```text
-portfolio bd77d355a6a22c1b8fe970d9e291780849bf55b9ee63ee75cc212761612cb970
+portfolio 80ddde3a21e385dde2cdb7b292e26fa3d055997e9ddbbf99593742d199a17a8c
 order     6e2d179b9ecf706de8461ca6443efacfd22cb084ef6b49a0e2c94f2e49881b60
 ```
 
 ## Populated-upgrade checks
 
-Before applying additive Spot migrations to a current-baseline database:
+Before applying additive migrations to a current-baseline database:
 
 1. Record row counts and stable identities for `orders`, `order_fills`,
    `order_lifecycle_events`, `portfolio_snapshots`, `reconciliation_runs`,
@@ -163,8 +185,12 @@ Before applying additive Spot migrations to a current-baseline database:
 5. Compare pre/post row counts and identities. Backfill may populate new
    columns or `order_fill_identities`; it must not delete, renumber or merge
    historical order/fill/lifecycle/session/snapshot rows.
-6. Run Spot migration integration tests and the focused Futures regression
-   matrix before enabling any Spot capability.
+6. For `0006` through `0008`, inspect all launch journal, admission, target fact,
+   and outbox constraints/indexes; prove the old Session row still reads its
+   legacy scalar; prove the default remains `1`, zero is accepted, and negative
+   values are rejected.
+7. Run Spot migration integration tests and the focused Futures regression
+   matrix before enabling the corresponding capability.
 
 Rollback is capability-first: disable new Spot admission and roll consumers
 back in reverse order. Never delete order, fill, close-operation, wallet,
@@ -182,7 +208,11 @@ migration.
   `venue_events`, `portfolio_strategies`.
 - Strategy execution: `strategies`, `strategy_sessions`, `session_venues`,
   `strategy_indicator_definitions`, `strategy_indicator_chunks`,
-  `spot_session_risk_facts`.
+  `spot_session_risk_facts`, `strategy_launch_operations`,
+  `strategy_leverage_apply_attempts`, `strategy_target_admissions`, and
+  `strategy_session_target_facts`.
+- Strategy leverage recovery delivery:
+  `strategy_leverage_notification_outbox`.
 - Audit/state history: `portfolio_snapshots` and `reconciliation_runs` are
   Timescale hypertables with seven-day chunks.
 - Read model: `current_portfolio_snapshots` view.

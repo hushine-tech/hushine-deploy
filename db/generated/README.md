@@ -16,6 +16,9 @@ Run `00_create_databases.psql` against the admin database, then run each SQL bun
 - `core-service/internal/storage/migrations/0003_spot_reconciliation_repair.sql`
 - `core-service/internal/storage/migrations/0004_spot_close_reconciliation_pending.sql`
 - `core-service/internal/storage/migrations/0005_runtime_indicator_v2.sql`
+- `core-service/internal/storage/migrations/0006_strategy_owned_futures_leverage.sql`
+- `core-service/internal/storage/migrations/0007_strategy_leverage_notification_outbox.sql`
+- `core-service/internal/storage/migrations/0008_strategy_session_deprecated_leverage_zero.sql`
 
 ### `order.sql`
 

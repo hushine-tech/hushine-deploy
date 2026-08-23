@@ -1,5 +1,7 @@
 # Hushine Deploy
 
+Last verified: 2026-08-24.
+
 Deployment, database, smoke-test, and operator documentation for the Hushine
 multi-repository system.
 
@@ -122,10 +124,18 @@ make clean
 ## Databases And Infra
 
 - Schema inventory: [db/README.md](db/README.md)
+- Strategy-owned Futures leverage: [docs/strategy-owned-futures-leverage.md](docs/strategy-owned-futures-leverage.md)
 - Production deploy checklist: [docs/production-deploy-checklist.md](docs/production-deploy-checklist.md)
 - Local Docker infra: [deploy/local/docker-compose.yml](deploy/local/docker-compose.yml)
 - Tracing verification: `bash scripts/verify_tracing.sh`
 - Full local flow smoke: `bash scripts/e2e_full_flow.sh`
+
+Futures leverage is declared in strategy `ORDER_TARGETS[].leverage` or
+class-level `LEVERAGE`, with platform default `1x`. Start Demo, Backtest, and
+Resume do not have a leverage input. Preview is read-only; Demo applies and
+confirms per-symbol Binance leverage only after Start, before the final worker
+is created. Backtest/debugger use simulated wallet facts and never call
+Binance. Live (`environment=2`) remains rollout guarded.
 
 ## Runtime Smoke
 
