@@ -31,6 +31,7 @@ Run `00_create_databases.psql` against the admin database, then run each SQL bun
 
 - `control-panel-service/internal/storage/migrations/0000_create_schema_migrations.sql`
 - `control-panel-service/internal/storage/migrations/0001_current_schema_baseline.sql`
+- `control-panel-service/internal/storage/migrations/0002_runtime_session_cleanup_outbox.sql`
 
 ### `market_data_year.sql`
 

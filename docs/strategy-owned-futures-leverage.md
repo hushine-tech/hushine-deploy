@@ -148,11 +148,19 @@ describe this state as “the account was unchanged.”
 A successfully started Session does not restore Binance leverage when it
 finishes; an open position can still depend on that configuration. Terminal
 Session handling releases target admission. Runtime loss marks active Sessions
-`recoverable`. Resume creates a new Session: the user selects a routable
-runtime, the original strategy must be active for the read-only preview, and
-Start reloads current code and repeats preparation, admission, apply/readback,
-facts, and bootstrap. The old recoverable Session remains audit history and is
-never changed back to `running`.
+`recoverable` and deliberately retains their target admissions. Resume creates
+a new Session and carries the user-selected predecessor as an explicit
+`resume_session_id`; ordinary Start never infers or takes over a Session.
+core-service validates that predecessor against the same user, Portfolio,
+environment, strategy, and stopped/recoverable source status. In one database
+transaction it changes a recoverable predecessor to `stopped` with
+`SESSION_SUPERSEDED_BY_RESUME`, releases its admissions, and acquires the new
+launch admissions. Any new admission conflict rolls the whole transaction
+back, leaving the predecessor recoverable and still protected. The user still
+selects a routable runtime, the original strategy must be active for the
+read-only preview, and Start reloads current code and repeats preparation,
+apply/readback, facts, and bootstrap. The predecessor remains audit history
+and is never changed back to `running`.
 
 ## Environment and runtime boundaries
 
@@ -213,18 +221,17 @@ problem persists; after recovery, a later recurrence may warn again.
 
 ## Verification references
 
-The implementation was inspected at these exact code commits before the
-Task 12 documentation-only commits:
+The implementation was inspected at these exact code commits:
 
 | Repository | Commit |
 |---|---|
-| `strategy-library` | `b0491234f66c1e0a8d2eab193acb6ff7175efb19` |
-| `strategy-service` | `6ec6671ec4dc4de4613a56ab779b5a34acd889ca` |
-| `core-service` | `c00cdf6d8c82f67302c46b4bcd2e4d99ee1056d3` |
-| `control-panel-service` | `f9f0fcc8bcf98f06ed7119750447c7f5e207e145` |
-| `quant-handler` | `49ee14523134122b3f28f83827faabc3a16bcd23` |
-| `quant-frontend` | `414e654d506a1f8fd7ba5857f3d093373b8fd8cb` |
-| `strategy-debugger-cli` | `67e4c38c6327632b4cafa9813c9fa7ecfff61ab1` |
+| `strategy-library` | `cb89b4c3413f6cd9bba4aab2da589862c048ba76` |
+| `strategy-service` | `eb18951b7542621e69a283d24040b1dd4dd81966` |
+| `core-service` | `2f710a8c252299b11abb8626a630db79c07288cf` |
+| `control-panel-service` | `ada3ab0614fbec84e8420a0c1ded5fac11e4108b` |
+| `quant-handler` | `74575981de53f5cb4313171895718d03d2ff4d0c` |
+| `quant-frontend` | `6e59bd1a5c55e65a0041722fffae07996b90be54` |
+| `strategy-debugger-cli` | `652c09bf1aab5f1bad9fbd4a14adfeaf02731264` |
 
 These references establish the code inspected for this guide; release owners
 must update them when behavior changes.

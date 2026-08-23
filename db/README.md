@@ -1,7 +1,8 @@
 # Hushine database bootstrap
 
 Last verified: 2026-08-24 against core-service
-`c00cdf6d8c82f67302c46b4bcd2e4d99ee1056d3`.
+`2f710a8c252299b11abb8626a630db79c07288cf` and control-panel-service
+`ada3ab0614fbec84e8420a0c1ded5fac11e4108b`.
 
 This is the deployment inventory for a fresh Hushine environment. Service
 repositories own the schema source files; this repository owns orchestration,
@@ -88,7 +89,7 @@ in-place upgrade.
 |---|---|---|
 | `portfolio` | `core-service` | `internal/storage/migrations/0000` through `0008`, in filename order |
 | `order` | `core-service` | `internal/order/storage/migrations/0000` through `0003`, in filename order |
-| `control_panel` | `control-panel-service` | `internal/storage/migrations/0000_create_schema_migrations.sql` and `0001_current_schema_baseline.sql` |
+| `control_panel` | `control-panel-service` | `internal/storage/migrations/0000` through `0002`, in filename order |
 | `{exchange}_{year}` | `scraper` | `internal/storage/migrations/0001_current_schema_baseline.sql` |
 
 Exact current order:
@@ -138,6 +139,17 @@ legacy scalar.
 and route-qualified lifecycle indexes. `0003` adds durable Spot close
 operations, target state and admission leases.
 
+### `control_panel`
+
+1. `0000_create_schema_migrations.sql`
+2. `0001_current_schema_baseline.sql`
+3. `0002_runtime_session_cleanup_outbox.sql`
+
+`0002` adds the durable runtime-to-Session cleanup outbox. Every terminal
+runtime transition queues an idempotent core-service recovery request in the
+same database statement; failed delivery remains retryable across
+control-panel restarts.
+
 Future additive migrations continue with the next filename. Do not edit,
 rename, reorder or reuse an already deployed filename.
 
@@ -162,7 +174,7 @@ The current ledger counts are:
 |---|---:|
 | `portfolio` | 9 |
 | `order` | 4 |
-| `control_panel` | 2 |
+| `control_panel` | 3 |
 | one market-data year DB | 1 |
 
 Both `0001_current_schema_baseline.sql` files are immutable compatibility
@@ -243,7 +255,7 @@ semantics, risk decisions, recovery state, and lifecycle event identity.
 
 - Runtime: `runtime_registry`, `runtime_credentials`, `runtime_commands`,
   `runtime_channel_leases`, `runtime_admission_failures`,
-  `runtime_debug_datasets`.
+  `runtime_debug_datasets`, `runtime_session_cleanup_outbox`.
 - Market-data control: `market_data_streams`, `market_data_requests`,
   `market_data_history_requests`, `market_data_leases`,
   `market_data_writer_leases`, `market_data_coverage_segments`.

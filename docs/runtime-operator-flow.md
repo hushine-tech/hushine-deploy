@@ -3,9 +3,9 @@
 最后核验：2026-08-24。
 
 本次核验的实现 commit：strategy-service
-`6ec6671ec4dc4de4613a56ab779b5a34acd889ca`、core-service
-`c00cdf6d8c82f67302c46b4bcd2e4d99ee1056d3`、control-panel-service
-`f9f0fcc8bcf98f06ed7119750447c7f5e207e145`。Futures 杠杆的完整声明、页面、
+`eb18951b7542621e69a283d24040b1dd4dd81966`、core-service
+`2f710a8c252299b11abb8626a630db79c07288cf`、control-panel-service
+`ada3ab0614fbec84e8420a0c1ded5fac11e4108b`。Futures 杠杆的完整声明、页面、
 持久化和故障语义见
 [`strategy-owned-futures-leverage.md`](strategy-owned-futures-leverage.md)。
 
@@ -224,16 +224,24 @@ core-service、core-service 承载的 order.v1、Kafka 或数据库地址。
 
 ## runtime 失败后的 session 恢复
 
-1. runtime 心跳过期或被停止后，control-panel 会把该 runtime 拥有的
-   active session 标记为 `recoverable`。
+1. runtime 心跳过期或被停止时，control-panel 在同一次 terminal 状态写入中向
+   `runtime_session_cleanup_outbox` 入队，并立即尝试通知 core；失败会持久化并由
+   watchdog 周期重试，control-panel 重启不会丢失。core 会把尚未启动的 pending
+   Session 标为 failed 并释放 admission，把 running/stopping Session 标为
+   `recoverable` 并继续保留 admission。
 2. `Portfolio Detail` / `Session Detail` 会显示 `recoverable`、失败原因和
    原 runtime 链接。
 3. 用户必须在页面选择一个当前可路由的 runtime，然后点击
    `Resume With New Session`。
 4. Futures Resume 先要求原 Session 的 strategy 仍为 active，并显示只读逐 target
-   preview；点击后重新解析当前源码，重新执行 admission、apply/readback、facts 和
-   bootstrap，不能复用旧 Session facts 或旧标量。
-5. 新 session 会绑定到所选 runtime；旧 `recoverable` session 保留为审计历史。
+   preview；提交时必须显式携带原 `resume_session_id`，普通 Start 不会自动接管旧
+   Session。
+5. core 在一个 transaction 内校验旧 Session 属于同一 user、Portfolio、environment
+   和 strategy，且来源状态为 stopped/recoverable；然后把 recoverable 来源改为
+   `stopped`（`SESSION_SUPERSEDED_BY_RESUME`）、释放旧 admission 并获取新 launch 的
+   admission。任一新 admission 冲突会回滚整笔事务，旧 Session 仍为 recoverable。
+6. 新 session 绑定到所选 runtime，重新解析当前源码，重新执行 apply/readback、facts
+   和 bootstrap，不能复用旧 Session facts 或旧标量；旧 Session 继续作为审计历史。
 
 不要直接在数据库里把 `recoverable` 改回 `running`。旧 runtime 重新连上也不应自动继续旧 session。
 
