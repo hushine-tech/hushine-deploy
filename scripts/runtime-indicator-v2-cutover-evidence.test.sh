@@ -139,6 +139,279 @@ redact_log() {
     -e 's/[0-9a-f]{64}/<redacted-64-hex>/g'
 }
 
+run_no_v1_scan() {
+  require_command rg
+  local pattern roots raw status unexpected="" line path
+  pattern='(SaveStrategyIndicators(Request|Response|\()|ListStrategyIndicators(Request|Response|\()|ListStrategyIndicatorChunks(Request|Response|\()|values_json|PORTFOLIO_SAVE_STRATEGY_INDICATORS|IndicatorChunkBuffer|WorkerFrame_IndicatorFrame\b|worker_pb2\.Indicator(Frame|Value)\b|runtimeworkerv1\.Indicator(Frame|Value)\b|\bindicator_frame\b\s*=|GetIndicatorFrame\(|IndicatorFrame indicator_frame = 15)'
+  roots=(
+    core-service
+    control-panel-service
+    strategy-service
+    gateway/quant-handler
+    gateway/quant-frontend
+  )
+  for path in "${roots[@]}"; do
+    [[ -d "${SOURCE_ROOT}/${path}" ]] || die "source root is missing: ${path}"
+  done
+
+  set +e
+  raw="$(
+    cd "${SOURCE_ROOT}"
+    rg -n -P -g '!**/docs/**' "${pattern}" "${roots[@]}"
+  )"
+  status="$?"
+  set -e
+  [[ "${status}" -eq 0 || "${status}" -eq 1 ]] \
+    || die "strict no-V1 scan failed to execute"
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    path="${line%%:*}"
+    case "${path}" in
+      core-service/internal/storage/migrations/0005_runtime_indicator_v2.sql|\
+      core-service/cmd/ensure-portfolio-db/cutover_guard.go|\
+      core-service/cmd/ensure-portfolio-db/cutover_guard_test.go|\
+      core-service/internal/storage/migrations/indicator_v2_integration_test.go|\
+      core-service/internal/storage/migrations/testdata/indicator_v1_fixture.sql|\
+      core-service/internal/service/grpc_strategy_indicator_proto_test.go|\
+      strategy-service/tests/test_strategy_indicators.py|\
+      strategy-service/tests/test_platform_proxy.py|\
+      gateway/quant-handler/internal/app/session_indicators_test.go|\
+      gateway/quant-frontend/scripts/session-custom-indicators.test.mjs)
+        ;;
+      *)
+        unexpected+="${line}"$'\n'
+        ;;
+    esac
+  done <<<"${raw}"
+
+  if [[ -n "${unexpected}" ]]; then
+    printf '%s' "${unexpected}" >&2
+    die "unexpected indicator V1 source/generated surface remains"
+  fi
+  echo "runtime Indicator V2 no-V1 source/generated scan: PASS"
+}
+
+run_dependency_combined_gate() (
+  require_command diff
+  require_command go
+  require_command make
+  local strategy_root="${SOURCE_ROOT}/strategy-service"
+  local control_root="${SOURCE_ROOT}/control-panel-service"
+  local state uv_bin strategy_first strategy_second control_first control_second
+  [[ -x "${strategy_root}/generate_proto.sh" ]] \
+    || die "strategy-service proto generator is missing"
+  [[ -d "${control_root}/gen/controlpanelv1" ]] \
+    || die "control-panel generated protobuf directory is missing"
+  uv_bin="$(runtime_coverage_resolve_uv_bin)" \
+    || die "required command not found: uv"
+  state="$(mktemp -d "${TMPDIR:-/tmp}/hushine-indicator-post-contract.XXXXXX")"
+  trap 'rm -rf -- "${state}"' EXIT
+
+  (
+    cd "${strategy_root}"
+    PYTHON="${strategy_root}/.venv/bin/python" ./generate_proto.sh
+    find strategy_service/gen gen -type f \( -name '*.py' -o -name '*.go' \) -print \
+      | LC_ALL=C sort \
+      | while IFS= read -r file; do sha256_file "${file}" | awk -v file="${file}" '{print $1 "  " file}'; done \
+      >"${state}/strategy.first"
+    PYTHON="${strategy_root}/.venv/bin/python" ./generate_proto.sh
+    find strategy_service/gen gen -type f \( -name '*.py' -o -name '*.go' \) -print \
+      | LC_ALL=C sort \
+      | while IFS= read -r file; do sha256_file "${file}" | awk -v file="${file}" '{print $1 "  " file}'; done \
+      >"${state}/strategy.second"
+  )
+  diff -u "${state}/strategy.first" "${state}/strategy.second"
+  strategy_first="$(sha256_file "${state}/strategy.first")"
+  strategy_second="$(sha256_file "${state}/strategy.second")"
+  printf '%s\n' "strategy-service generated checksum first: ${strategy_first}"
+  printf '%s\n' "strategy-service generated checksum second: ${strategy_second}"
+  printf '%s\n' 'strategy-service generated file checksums:'
+  cat "${state}/strategy.second"
+
+  (
+    cd "${control_root}"
+    make proto
+    find gen/controlpanelv1 -type f -name '*.go' -print \
+      | LC_ALL=C sort \
+      | while IFS= read -r file; do sha256_file "${file}" | awk -v file="${file}" '{print $1 "  " file}'; done \
+      >"${state}/control.first"
+    make proto
+    find gen/controlpanelv1 -type f -name '*.go' -print \
+      | LC_ALL=C sort \
+      | while IFS= read -r file; do sha256_file "${file}" | awk -v file="${file}" '{print $1 "  " file}'; done \
+      >"${state}/control.second"
+  )
+  diff -u "${state}/control.first" "${state}/control.second"
+  control_first="$(sha256_file "${state}/control.first")"
+  control_second="$(sha256_file "${state}/control.second")"
+  printf '%s\n' "control-panel-service generated checksum first: ${control_first}"
+  printf '%s\n' "control-panel-service generated checksum second: ${control_second}"
+  printf '%s\n' 'control-panel-service generated file checksums:'
+  cat "${state}/control.second"
+
+  cmp \
+    "${strategy_root}/gen/controlpanelv1/control_panel_service.pb.go" \
+    "${control_root}/gen/controlpanelv1/control_panel_service.pb.go"
+  cmp \
+    "${strategy_root}/gen/controlpanelv1/control_panel_service_grpc.pb.go" \
+    "${control_root}/gen/controlpanelv1/control_panel_service_grpc.pb.go"
+  echo "control-panel generated copies byte-identical: PASS"
+
+  (
+    cd "${strategy_root}"
+    PYTHONPATH=.:../strategy-library "${uv_bin}" run --frozen --extra dev \
+      pytest tests/test_runtime_dependency_proto.py tests/test_runtime_worker_proto.py \
+      -vv --color=no
+    go test ./internal/runtimeagent \
+      -run '^TestRuntimeDependencyChannelProto$' -count=1 -v
+  )
+  (
+    cd "${control_root}"
+    go test ./internal/runtimechannel \
+      -run '^TestRuntimeDependencyFrameContract$' -count=1 -v
+  )
+  echo "runtime dependency combined descriptor/checksum: PASS"
+)
+
+validate_post_contract_log_proof() {
+  local id="$1" log="$2" first second
+  if [[ "${id}" == "indicator-v1-removed-source-generated" ]]; then
+    grep -Fxq 'runtime Indicator V2 no-V1 source/generated scan: PASS' "${log}" \
+      || die "post-contract log does not prove strict V1 absence: ${id}"
+    return
+  fi
+  [[ "${id}" == "runtime-dependency-combined-descriptor-checksum" ]] \
+    || die "unknown post-contract command ID: ${id}"
+  grep -Fq \
+    'tests/test_runtime_dependency_proto.py::test_worker_dependency_fields_and_indicator_evolution_are_exact PASSED' \
+    "${log}" \
+    && grep -Fq \
+      'tests/test_runtime_worker_proto.py::test_worker_frame_reserves_removed_v1_tag_and_name PASSED' \
+      "${log}" \
+    && grep -Fq '=== RUN   TestRuntimeDependencyChannelProto' "${log}" \
+    && grep -Fq -- '--- PASS: TestRuntimeDependencyChannelProto' "${log}" \
+    && grep -Fq '=== RUN   TestRuntimeDependencyFrameContract' "${log}" \
+    && grep -Fq -- '--- PASS: TestRuntimeDependencyFrameContract' "${log}" \
+    && grep -Fxq 'control-panel generated copies byte-identical: PASS' "${log}" \
+    && grep -Fxq 'runtime dependency combined descriptor/checksum: PASS' "${log}" \
+    || die "post-contract log does not prove the combined dependency gate: ${id}"
+  first="$(sed -n 's/^strategy-service generated checksum first: //p' "${log}")"
+  second="$(sed -n 's/^strategy-service generated checksum second: //p' "${log}")"
+  [[ "${first}" =~ ^[0-9a-f]{64}$ && "${first}" == "${second}" ]] \
+    || die "strategy-service generated checksum evidence is invalid"
+  first="$(sed -n 's/^control-panel-service generated checksum first: //p' "${log}")"
+  second="$(sed -n 's/^control-panel-service generated checksum second: //p' "${log}")"
+  [[ "${first}" =~ ^[0-9a-f]{64}$ && "${first}" == "${second}" ]] \
+    || die "control-panel generated checksum evidence is invalid"
+}
+
+post_contract_command_json() {
+  local id="$1" state_dir="$2"
+  local log_dir="${state_dir}/post-contracts"
+  local log="${log_dir}/${id}.log"
+  local raw="${log}.raw.$$"
+  local started_at finished_at status log_sha argv
+  started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  set +e
+  case "${id}" in
+    indicator-v1-removed-source-generated)
+      (
+        cd "${DEPLOY_ROOT}"
+        HUSHINE_SOURCE_ROOT="${SOURCE_ROOT}" \
+          bash scripts/runtime-indicator-v2-cutover-evidence.test.sh scan-no-v1
+      ) >"${raw}" 2>&1
+      status="$?"
+      argv='["bash","scripts/runtime-indicator-v2-cutover-evidence.test.sh","scan-no-v1"]'
+      ;;
+    runtime-dependency-combined-descriptor-checksum)
+      (
+        cd "${DEPLOY_ROOT}"
+        HUSHINE_SOURCE_ROOT="${SOURCE_ROOT}" \
+          bash scripts/runtime-indicator-v2-cutover-evidence.test.sh check-dependency-combined
+      ) >"${raw}" 2>&1
+      status="$?"
+      argv='["bash","scripts/runtime-indicator-v2-cutover-evidence.test.sh","check-dependency-combined"]'
+      ;;
+    *)
+      rm -f -- "${raw}"
+      set -e
+      die "unknown post-contract command ID: ${id}"
+      ;;
+  esac
+  set -e
+  finished_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  mv -- "${raw}" "${log}"
+  chmod 0600 "${log}"
+  [[ "${status}" -eq 0 ]] \
+    || die "post-contract command failed: ${id}; see ${log}"
+  [[ -s "${log}" ]] || die "post-contract command produced an empty log: ${id}"
+  validate_post_contract_log_proof "${id}" "${log}"
+  log_sha="$(sha256_file "${log}")"
+  jq -nc \
+    --arg id "${id}" \
+    --arg cwd "hushine-deploy" \
+    --argjson argv "${argv}" \
+    --argjson exit_code "${status}" \
+    --arg started_at "${started_at}" \
+    --arg finished_at "${finished_at}" \
+    --arg log_path "post-contracts/${id}.log" \
+    --arg log_sha256 "${log_sha}" \
+    '{
+      id:$id,
+      cwd:$cwd,
+      argv:$argv,
+      exit_code:$exit_code,
+      started_at:$started_at,
+      finished_at:$finished_at,
+      log_path:$log_path,
+      log_sha256:$log_sha256
+    }'
+}
+
+capture_post_contracts() {
+  local state_dir="$1" expected_shas="$2" out="$3"
+  local expected_sources current_sources expected_hash commands='[]' id record
+  state_dir="$(canonical_directory "${state_dir}")"
+  [[ "${expected_shas}" == "${state_dir}/final-shas.json" ]] \
+    || die "expected SHA manifest must be <state-dir>/final-shas.json"
+  [[ "${out}" == "${state_dir}/post-contracts.json" ]] \
+    || die "post-contract output must be <state-dir>/post-contracts.json"
+  [[ ! -e "${out}" && ! -e "${state_dir}/post-contracts" ]] \
+    || die "post-contract evidence already exists"
+  expected_sources="$(validate_expected_shas_manifest "${expected_shas}")"
+  current_sources="$(source_sha_json true)"
+  json_objects_equal "${expected_sources}" "${current_sources}" \
+    || die "current clean repository SHAs do not match expected post-cutover SHAs"
+  expected_hash="$(sha256_file "${expected_shas}")"
+  mkdir -m 0700 "${state_dir}/post-contracts"
+
+  for id in \
+    indicator-v1-removed-source-generated \
+    runtime-dependency-combined-descriptor-checksum; do
+    record="$(post_contract_command_json "${id}" "${state_dir}")"
+    commands="$(jq -c --argjson record "${record}" '. + [$record]' <<<"${commands}")"
+    current_sources="$(source_sha_json true)"
+    json_objects_equal "${expected_sources}" "${current_sources}" \
+      || die "post-contract command changed the expected clean source tree: ${id}"
+  done
+
+  atomic_json "${out}" -nc \
+    --arg phase "post" \
+    --arg expected_shas_manifest_sha256 "${expected_hash}" \
+    --argjson source_shas "${expected_sources}" \
+    --argjson commands "${commands}" \
+    '{
+      schema:1,
+      phase:$phase,
+      expected_shas_manifest_sha256:$expected_shas_manifest_sha256,
+      source_shas:$source_shas,
+      commands:$commands,
+      created_at:(now|todateiso8601)
+    }'
+  echo "runtime Indicator V2 cutover evidence: post-contract manifest written: ${out}"
+}
+
 validate_coexistence_log_proof() {
   local id="$1" log="$2" expected_test
   if [[ "${id}" == "strategy-service-worker-v1-v2" ]]; then
@@ -658,11 +931,77 @@ validate_expected_shas_manifest() {
   printf '%s\n' "${expected_sources}"
 }
 
+validate_post_contract_evidence() {
+  local manifest="$1" expected_shas="$2"
+  local state_dir expected_hash expected_sources manifest_sources commands='[]'
+  local id log_path log expected_log_hash actual_log_hash
+  validate_mode_0600_file "${manifest}" "post-contract manifest"
+  state_dir="$(canonical_directory "$(dirname "${manifest}")")"
+  [[ "${manifest}" == "${state_dir}/post-contracts.json" ]] \
+    || die "post-contract manifest path must be <state-dir>/post-contracts.json"
+  [[ "${expected_shas}" == "${state_dir}/final-shas.json" ]] \
+    || die "post-contract expected SHA manifest must share its state directory"
+  expected_hash="$(sha256_file "${expected_shas}")"
+  jq -e --arg expected_hash "${expected_hash}" '
+    type == "object"
+    and .schema == 1
+    and .phase == "post"
+    and .expected_shas_manifest_sha256 == $expected_hash
+    and (.source_shas | type == "object")
+    and [.commands[].id] == [
+      "indicator-v1-removed-source-generated",
+      "runtime-dependency-combined-descriptor-checksum"
+    ]
+    and (.commands | length) == 2
+    and all(.commands[];
+      .cwd == "hushine-deploy"
+      and .exit_code == 0
+      and (.started_at | type == "string" and length > 0)
+      and (.finished_at | type == "string" and length > 0)
+      and (.log_sha256 | test("^[0-9a-f]{64}$"))
+    )
+    and .commands[0].argv == [
+      "bash", "scripts/runtime-indicator-v2-cutover-evidence.test.sh", "scan-no-v1"
+    ]
+    and .commands[0].log_path ==
+      "post-contracts/indicator-v1-removed-source-generated.log"
+    and .commands[1].argv == [
+      "bash", "scripts/runtime-indicator-v2-cutover-evidence.test.sh",
+      "check-dependency-combined"
+    ]
+    and .commands[1].log_path ==
+      "post-contracts/runtime-dependency-combined-descriptor-checksum.log"
+  ' "${manifest}" >/dev/null \
+    || die "post-contract manifest command table is invalid"
+  expected_sources="$(validate_expected_shas_manifest "${expected_shas}")"
+  manifest_sources="$(jq -c .source_shas "${manifest}")"
+  json_objects_equal "${manifest_sources}" "${expected_sources}" \
+    || die "post-contract source SHA map does not match expected SHAs"
+
+  while IFS=$'\t' read -r id log_path expected_log_hash; do
+    [[ "${log_path}" == "post-contracts/${id}.log" ]] \
+      || die "post-contract log path is not fixed for ${id}"
+    log="${state_dir}/${log_path}"
+    validate_mode_0600_file "${log}" "post-contract log"
+    [[ -s "${log}" ]] || die "post-contract log is empty: ${id}"
+    actual_log_hash="$(sha256_file "${log}")"
+    [[ "${actual_log_hash}" == "${expected_log_hash}" ]] \
+      || die "post-contract log hash mismatch: ${id}"
+    validate_post_contract_log_proof "${id}" "${log}"
+    commands="$(jq -c \
+      --arg id "${id}" \
+      --arg log_sha256 "${actual_log_hash}" \
+      '. + [{id:$id,log_sha256:$log_sha256}]' <<<"${commands}")"
+  done < <(jq -r '.commands[] | [.id,.log_path,.log_sha256] | @tsv' "${manifest}")
+  printf '%s\n' "${commands}"
+}
+
 build_seal_payload() {
-  local phase="$1" chain="$2" browser="$3" coexistence="$4" expected_shas="$5"
+  local phase="$1" chain="$2" browser="$3" coexistence="$4" expected_shas="$5" post_contracts="$6"
   local state_dir chain_sources current_sources screenshots coexistence_commands='[]'
   local assertions finalization chain_hash assertions_hash finalization_hash browser_hash
   local coexistence_hash="" expected_hash="" expected_sources=""
+  local post_contract_hash="" post_contract_commands='[]'
   state_dir="$(canonical_directory "$(dirname "${chain}")")"
   validate_chain_evidence "${chain}" "${phase}"
   chain_sources="$(jq -c .source_shas "${chain}")"
@@ -677,6 +1016,8 @@ build_seal_payload() {
     coexistence_hash="$(sha256_file "${coexistence}")"
     [[ -z "${expected_shas}" ]] \
       || die "pre phase does not accept an expected SHA manifest"
+    [[ -z "${post_contracts}" ]] \
+      || die "pre phase does not accept post-contract evidence"
   else
     [[ -z "${coexistence}" ]] \
       || die "post phase does not accept coexistence evidence"
@@ -685,6 +1026,10 @@ build_seal_payload() {
     json_objects_equal "${chain_sources}" "${expected_sources}" \
       || die "expected SHA manifest does not match post chain"
     expected_hash="$(sha256_file "${expected_shas}")"
+    [[ -n "${post_contracts}" ]] || die "post phase requires post-contract evidence"
+    post_contract_commands="$(validate_post_contract_evidence \
+      "${post_contracts}" "${expected_shas}")"
+    post_contract_hash="$(sha256_file "${post_contracts}")"
   fi
 
   assertions="${state_dir}/assertions.json"
@@ -715,6 +1060,8 @@ build_seal_payload() {
     --arg coexistence_manifest_sha256 "${coexistence_hash}" \
     --argjson coexistence_commands "${coexistence_commands}" \
     --arg expected_shas_manifest_sha256 "${expected_hash}" \
+    --arg post_contract_manifest_sha256 "${post_contract_hash}" \
+    --argjson post_contract_commands "${post_contract_commands}" \
     '{
       source_shas:$source_shas,
       owner_token:$owner_token,
@@ -737,15 +1084,19 @@ build_seal_payload() {
       coexistence_commands:
         (if $phase == "pre" then $coexistence_commands else [] end),
       expected_shas_manifest_sha256:
-        (if $phase == "post" then $expected_shas_manifest_sha256 else null end)
+        (if $phase == "post" then $expected_shas_manifest_sha256 else null end),
+      post_contract_manifest_sha256:
+        (if $phase == "post" then $post_contract_manifest_sha256 else null end),
+      post_contract_commands:
+        (if $phase == "post" then $post_contract_commands else [] end)
     }'
 }
 
 seal_evidence() {
-  local phase="$1" chain="$2" browser="$3" coexistence="$4" expected_shas="$5" seal="$6"
+  local phase="$1" chain="$2" browser="$3" coexistence="$4" expected_shas="$5" post_contracts="$6" seal="$7"
   local payload payload_canonical payload_hash existing_payload existing_hash
   payload="$(build_seal_payload \
-    "${phase}" "${chain}" "${browser}" "${coexistence}" "${expected_shas}")"
+    "${phase}" "${chain}" "${browser}" "${coexistence}" "${expected_shas}" "${post_contracts}")"
   payload_canonical="$(canonical_json <<<"${payload}")"
   payload_hash="$(
     if command -v shasum >/dev/null 2>&1; then
@@ -794,7 +1145,7 @@ seal_evidence() {
 run_seal_command() {
   local phase="$1"
   shift
-  local chain="" browser="" coexistence="" expected_shas="" seal=""
+  local chain="" browser="" coexistence="" expected_shas="" post_contracts="" seal=""
   local check_current=false require_clean=false state_dir
   while (( $# )); do
     case "$1" in
@@ -802,6 +1153,7 @@ run_seal_command() {
       --browser) browser="${2:-}"; shift 2 ;;
       --coexistence) coexistence="${2:-}"; shift 2 ;;
       --expected-shas) expected_shas="${2:-}"; shift 2 ;;
+      --post-contracts) post_contracts="${2:-}"; shift 2 ;;
       --seal) seal="${2:-}"; shift 2 ;;
       --check-current-shas) check_current=true; shift ;;
       --require-clean) require_clean=true; shift ;;
@@ -824,6 +1176,9 @@ run_seal_command() {
       coexistence="${state_dir}/coexistence.json"
     fi
   fi
+  if [[ "${phase}" == "post" && -z "${post_contracts}" ]]; then
+    post_contracts="${state_dir}/post-contracts.json"
+  fi
   [[ -n "${chain}" && -n "${browser}" ]] || usage
   [[ "${chain}" == "${state_dir}/chain.json" ]] \
     || die "chain and seal must share one state directory"
@@ -836,21 +1191,27 @@ run_seal_command() {
     [[ "${expected_shas}" == /* ]] \
       || die "--expected-shas must be absolute"
   fi
+  if [[ -n "${post_contracts}" && "${post_contracts}" != "${state_dir}/post-contracts.json" ]]; then
+    die "post-contract evidence and seal must share one state directory"
+  fi
   # Clean repositories are mandatory for both creation and revalidation.
   # --require-clean remains accepted for the explicit final revalidation command.
   : "${require_clean}"
   seal_evidence \
-    "${phase}" "${chain}" "${browser}" "${coexistence}" "${expected_shas}" "${seal}"
+    "${phase}" "${chain}" "${browser}" "${coexistence}" "${expected_shas}" "${post_contracts}" "${seal}"
 }
 
 usage() {
   cat >&2 <<'EOF'
 usage:
   runtime-indicator-v2-cutover-evidence.test.sh --write-current-shas /absolute/current-shas.json [--require-clean]
+  runtime-indicator-v2-cutover-evidence.test.sh scan-no-v1
+  runtime-indicator-v2-cutover-evidence.test.sh check-dependency-combined
   runtime-indicator-v2-cutover-evidence.test.sh capture-coexistence --state-dir /absolute/state --chain /absolute/state/chain.json --out /absolute/state/coexistence.json
+  runtime-indicator-v2-cutover-evidence.test.sh capture-post-contracts --state-dir /absolute/state --expected-shas /absolute/state/final-shas.json --out /absolute/state/post-contracts.json
   runtime-indicator-v2-cutover-evidence.test.sh --phase pre --chain /absolute/state/chain.json --browser /absolute/state/browser.json --coexistence /absolute/state/coexistence.json --seal /absolute/state/seal.json --check-current-shas
-  runtime-indicator-v2-cutover-evidence.test.sh --phase post --expected-shas /absolute/state/final-shas.json --chain /absolute/state/chain.json --browser /absolute/state/browser.json --seal /absolute/state/seal.json --check-current-shas
-  runtime-indicator-v2-cutover-evidence.test.sh --phase pre|post --seal /absolute/state/seal.json [--expected-shas /absolute/state/final-shas.json] --check-current-shas --require-clean
+  runtime-indicator-v2-cutover-evidence.test.sh --phase post --expected-shas /absolute/state/final-shas.json --post-contracts /absolute/state/post-contracts.json --chain /absolute/state/chain.json --browser /absolute/state/browser.json --seal /absolute/state/seal.json --check-current-shas
+  runtime-indicator-v2-cutover-evidence.test.sh --phase pre|post --seal /absolute/state/seal.json [--expected-shas /absolute/state/final-shas.json] [--post-contracts /absolute/state/post-contracts.json] --check-current-shas --require-clean
 EOF
   exit 2
 }
@@ -859,6 +1220,14 @@ require_command git
 require_command jq
 
 case "${1:-}" in
+  scan-no-v1)
+    [[ "$#" -eq 1 ]] || usage
+    run_no_v1_scan
+    ;;
+  check-dependency-combined)
+    [[ "$#" -eq 1 ]] || usage
+    run_dependency_combined_gate
+    ;;
   --phase)
     [[ -n "${2:-}" ]] || usage
     phase="$2"
@@ -891,6 +1260,22 @@ case "${1:-}" in
     done
     [[ -n "${state_dir}" && -n "${chain}" && -n "${out}" ]] || usage
     capture_coexistence "${state_dir}" "${chain}" "${out}"
+    ;;
+  capture-post-contracts)
+    shift
+    state_dir=""
+    expected_shas=""
+    out=""
+    while (( $# )); do
+      case "$1" in
+        --state-dir) state_dir="${2:-}"; shift 2 ;;
+        --expected-shas) expected_shas="${2:-}"; shift 2 ;;
+        --out) out="${2:-}"; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ -n "${state_dir}" && -n "${expected_shas}" && -n "${out}" ]] || usage
+    capture_post_contracts "${state_dir}" "${expected_shas}" "${out}"
     ;;
   *)
     usage

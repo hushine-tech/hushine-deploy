@@ -25,16 +25,16 @@ echo "→ Runtime Indicator V2 database gate"
 HUSHINE_SOURCE_ROOT="${SOURCE_ROOT}" \
   "${SCRIPT_DIR}/runtime-indicator-v2-db-smoke.sh"
 
-echo "→ Core V1/V2 coexistence and V2 service contracts"
+echo "→ Core V1 removed and V2-only service contracts"
 run_in core-service \
   go test ./internal/service ./internal/repository \
-  -run 'IndicatorProtoV1CoexistsWithV2|StrategyIndicator.*V2|Indicator.*V2' \
+  -run 'IndicatorProtoV1Removed|StrategyIndicator.*V2|Indicator.*V2' \
   -count=1 -v
 
-echo "→ Authenticated RuntimeChannel V2 proxy"
+echo "→ Authenticated RuntimeChannel V1 removed and V2-only proxy"
 run_in control-panel-service \
   go test ./internal/runtimechannel \
-  -run 'IndicatorProtoV1CoexistsWithV2|Indicator.*V2|SessionFinalizationPending' \
+  -run 'IndicatorProtoV1Removed|Indicator.*V2|SessionFinalizationPending' \
   -count=1 -v
 
 echo "→ Agent chunk/lifecycle/retry integration"
@@ -66,10 +66,10 @@ echo "→ Bare/Windows-compatible Runtime boundaries"
 run_in strategy-service bash scripts/start-bare-runtime-debugpy.test.sh
 run_in strategy-service bash scripts/runtime-agent-platform.test.sh
 
-echo "→ Handler V1/V2 coexistence and field-preserving V2 JSON"
+echo "→ Handler V1 removed and field-preserving V2-only JSON"
 run_in gateway/quant-handler \
   go test ./internal/app \
-  -run 'StrategyIndicatorV1CoexistsWithV2|StrategyIndicator.*V2|Session.*FinalizationPending' \
+  -run 'StrategyIndicatorV1Removed|StrategyIndicator.*V2|Session.*FinalizationPending' \
   -count=1 -v
 
 echo "→ Portal V2 cache/time/marker/status contracts"

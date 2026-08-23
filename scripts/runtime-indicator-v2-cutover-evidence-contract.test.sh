@@ -26,6 +26,21 @@ bash -n "${SMOKE_SCRIPT}" || fail "smoke script is not valid Bash"
 if grep -Fq '/Users/xdy/.local/bin/uv' "${SMOKE_SCRIPT}"; then
   fail "smoke script contains a machine-specific uv path"
 fi
+grep -Fq 'Core V1 removed and V2-only service contracts' "${SMOKE_SCRIPT}" \
+  || fail "smoke script does not label the core gate as V2-only"
+grep -Fq -- "-run 'IndicatorProtoV1Removed|StrategyIndicator.*V2|Indicator.*V2'" "${SMOKE_SCRIPT}" \
+  || fail "smoke script does not select the core V1-removal contract"
+grep -Fq 'Authenticated RuntimeChannel V1 removed and V2-only proxy' "${SMOKE_SCRIPT}" \
+  || fail "smoke script does not label the control gate as V2-only"
+grep -Fq -- "-run 'IndicatorProtoV1Removed|Indicator.*V2|SessionFinalizationPending'" "${SMOKE_SCRIPT}" \
+  || fail "smoke script does not select the control V1-removal contract"
+grep -Fq 'Handler V1 removed and field-preserving V2-only JSON' "${SMOKE_SCRIPT}" \
+  || fail "smoke script does not label the handler gate as V2-only"
+grep -Fq -- "-run 'StrategyIndicatorV1Removed|StrategyIndicator.*V2|Session.*FinalizationPending'" "${SMOKE_SCRIPT}" \
+  || fail "smoke script does not select the handler V1-removal contract"
+if grep -Fq 'V1CoexistsWithV2' "${SMOKE_SCRIPT}" || grep -Fq 'V1/V2 coexistence' "${SMOKE_SCRIPT}"; then
+  fail "post-cutover smoke script still selects or labels V1/V2 coexistence"
+fi
 for consumer in "${SCRIPT}" "${SMOKE_SCRIPT}"; do
   grep -Fq 'source "${DEPLOY_ROOT}/scripts/lib/runtime_coverage.sh"' "${consumer}" \
     || fail "$(basename "${consumer}") does not use the shared runtime tooling"
@@ -44,6 +59,71 @@ trap 'rm -rf -- "${test_root}"' EXIT
 chmod 0700 "${test_root}"
 source_root="${test_root}/source"
 mkdir -p "${source_root}/gateway"
+
+scan_source_root="${test_root}/scan-source"
+mkdir -p \
+  "${scan_source_root}/core-service/internal/storage/migrations/testdata" \
+  "${scan_source_root}/core-service/cmd/ensure-portfolio-db" \
+  "${scan_source_root}/core-service/internal/service" \
+  "${scan_source_root}/control-panel-service" \
+  "${scan_source_root}/strategy-service/gen/runtimeworkerv1" \
+  "${scan_source_root}/strategy-service/tests" \
+  "${scan_source_root}/gateway/quant-handler" \
+  "${scan_source_root}/gateway/quant-frontend"
+printf '%s\n' 'type WorkerFrame_IndicatorFrameV2 struct{}' \
+  >"${scan_source_root}/strategy-service/gen/runtimeworkerv1/runtime_worker.pb.go"
+printf '%s\n' "SELECT 'values_json';" \
+  >"${scan_source_root}/core-service/internal/storage/migrations/0005_runtime_indicator_v2.sql"
+printf '%s\n' 'const legacyColumn = "values_json"' \
+  >"${scan_source_root}/core-service/cmd/ensure-portfolio-db/cutover_guard.go"
+printf '%s\n' 'const legacyColumn = "values_json"' \
+  >"${scan_source_root}/core-service/cmd/ensure-portfolio-db/cutover_guard_test.go"
+printf '%s\n' 'const legacyColumn = "values_json"' \
+  >"${scan_source_root}/core-service/internal/storage/migrations/indicator_v2_integration_test.go"
+printf '%s\n' 'values_json jsonb NOT NULL' \
+  >"${scan_source_root}/core-service/internal/storage/migrations/testdata/indicator_v1_fixture.sql"
+
+scan_output="${test_root}/scan.log"
+HUSHINE_SOURCE_ROOT="${scan_source_root}" "${SCRIPT}" scan-no-v1 >"${scan_output}"
+grep -Fxq 'runtime Indicator V2 no-V1 source/generated scan: PASS' "${scan_output}" \
+  || fail "strict no-V1 scan did not accept V2 generated wrappers and the compatibility allowlist"
+
+printf '%s\n' 'type WorkerFrame_IndicatorFrame struct{}' \
+  >"${scan_source_root}/strategy-service/gen/runtimeworkerv1/runtime_worker.pb.go"
+set +e
+exact_v1_output="$(HUSHINE_SOURCE_ROOT="${scan_source_root}" "${SCRIPT}" scan-no-v1 2>&1)"
+exact_v1_status="$?"
+set -e
+[[ "${exact_v1_status}" -ne 0 ]] \
+  || fail "strict no-V1 scan accepted the exact generated V1 wrapper"
+grep -Fq 'strategy-service/gen/runtimeworkerv1/runtime_worker.pb.go' <<<"${exact_v1_output}" \
+  || fail "exact generated V1 wrapper failure did not identify its path"
+
+printf '%s\n' 'type WorkerFrame_IndicatorFrameV2 struct{}' \
+  >"${scan_source_root}/strategy-service/gen/runtimeworkerv1/runtime_worker.pb.go"
+printf '%s\n' 'frame = worker_pb2.IndicatorFrame(session_id="legacy")' \
+  >"${scan_source_root}/strategy-service/tests/test_worker_agent_client.py"
+set +e
+python_v1_output="$(HUSHINE_SOURCE_ROOT="${scan_source_root}" "${SCRIPT}" scan-no-v1 2>&1)"
+python_v1_status="$?"
+set -e
+[[ "${python_v1_status}" -ne 0 ]] \
+  || fail "strict no-V1 scan accepted Python construction of a worker V1 frame"
+grep -Fq 'strategy-service/tests/test_worker_agent_client.py' <<<"${python_v1_output}" \
+  || fail "Python worker V1 frame failure did not identify its path"
+rm -f -- "${scan_source_root}/strategy-service/tests/test_worker_agent_client.py"
+
+printf '%s\n' 'const executableLegacyColumn = "values_json"' \
+  >"${scan_source_root}/core-service/internal/service/legacy_indicator.go"
+set +e
+unexpected_compat_output="$(HUSHINE_SOURCE_ROOT="${scan_source_root}" "${SCRIPT}" scan-no-v1 2>&1)"
+unexpected_compat_status="$?"
+set -e
+[[ "${unexpected_compat_status}" -ne 0 ]] \
+  || fail "strict no-V1 scan accepted values_json outside the compatibility allowlist"
+grep -Fq 'core-service/internal/service/legacy_indicator.go' <<<"${unexpected_compat_output}" \
+  || fail "unexpected compatibility surface failure did not identify its path"
+rm -f -- "${scan_source_root}/core-service/internal/service/legacy_indicator.go"
 
 repositories=(
   core-service
@@ -68,12 +148,39 @@ for repository in "${repositories[@]}"; do
   git -C "${repo_root}" commit -q -m "test fixture"
 done
 
+mkdir -p \
+  "${source_root}/strategy-service/strategy_service/gen" \
+  "${source_root}/strategy-service/gen/controlpanelv1" \
+  "${source_root}/control-panel-service/gen/controlpanelv1"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'printf "%s\n" "generated fixture stubs"' \
+  >"${source_root}/strategy-service/generate_proto.sh"
+chmod 0755 "${source_root}/strategy-service/generate_proto.sh"
+printf '%s\n' '# generated Python fixture' \
+  >"${source_root}/strategy-service/strategy_service/gen/runtime_worker_pb2.py"
+for generated in control_panel_service.pb.go control_panel_service_grpc.pb.go; do
+  printf '%s\n' '// generated Go fixture' \
+    >"${source_root}/strategy-service/gen/controlpanelv1/${generated}"
+  cp \
+    "${source_root}/strategy-service/gen/controlpanelv1/${generated}" \
+    "${source_root}/control-panel-service/gen/controlpanelv1/${generated}"
+done
+git -C "${source_root}/strategy-service" add \
+  generate_proto.sh strategy_service/gen/runtime_worker_pb2.py gen/controlpanelv1
+git -C "${source_root}/strategy-service" commit -q -m "generated fixture"
+git -C "${source_root}/control-panel-service" add gen/controlpanelv1
+git -C "${source_root}/control-panel-service" commit -q -m "generated fixture"
+
 fake_bin="${test_root}/fake-bin"
 mkdir -p "${fake_bin}"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
   'case "$*" in' \
+  '  *TestRuntimeDependencyChannelProto*) test_name=TestRuntimeDependencyChannelProto ;;' \
+  '  *TestRuntimeDependencyFrameContract*) test_name=TestRuntimeDependencyFrameContract ;;' \
   '  *StrategyIndicatorV1CoexistsWithV2*) test_name=TestStrategyIndicatorV1CoexistsWithV2 ;;' \
   '  *) test_name=TestIndicatorProtoV1CoexistsWithV2 ;;' \
   'esac' \
@@ -83,11 +190,18 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
   'printf "%s\n" \' \
+  '  "tests/test_runtime_dependency_proto.py::test_worker_dependency_fields_and_indicator_evolution_are_exact PASSED [ 25%]" \' \
+  '  "tests/test_runtime_worker_proto.py::test_worker_frame_reserves_removed_v1_tag_and_name PASSED [ 50%]" \' \
   '  "tests/test_runtime_worker_proto.py::test_worker_frame_keeps_v1_tag_during_additive_v2_gate PASSED [ 50%]" \' \
   '  "tests/test_grpc_server.py::test_proxy_only_backtest_flushes_custom_indicator_chunks PASSED [100%]" \' \
   '  "2 passed in 0.01s"' \
   >"${fake_bin}/uv"
-chmod 0700 "${fake_bin}/go" "${fake_bin}/uv"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'printf "%s\n" "generated control fixture stubs"' \
+  >"${fake_bin}/make"
+chmod 0700 "${fake_bin}/go" "${fake_bin}/uv" "${fake_bin}/make"
 
 current_shas="${test_root}/current-shas.json"
 HUSHINE_SOURCE_ROOT="${source_root}" \
@@ -486,6 +600,8 @@ jq -e '
     "control-indicator-v1-v2",
     "handler-indicator-v1-v2"
   ]
+  and .payload.post_contract_manifest_sha256 == null
+  and .payload.post_contract_commands == []
   and (.payload.screenshots | length) == 1
 ' "${seal}" >/dev/null \
   || fail "pre-cutover seal payload is invalid"
@@ -520,6 +636,64 @@ jq '.phase = "post"' "${browser}" >"${post_state}/browser.json"
 chmod 0600 "${post_state}/browser.json"
 cp "${current_shas}" "${post_state}/final-shas.json"
 chmod 0600 "${post_state}/final-shas.json"
+post_contracts="${post_state}/post-contracts.json"
+PATH="${fake_bin}:${PATH}" HUSHINE_SOURCE_ROOT="${source_root}" \
+  "${SCRIPT}" capture-post-contracts \
+  --state-dir "${post_state}" \
+  --expected-shas "${post_state}/final-shas.json" \
+  --out "${post_contracts}"
+[[ -f "${post_contracts}" && ! -L "${post_contracts}" ]] \
+  || fail "post-contract manifest is missing or unsafe"
+[[ "$(file_mode "${post_contracts}")" == "600" ]] \
+  || fail "post-contract manifest mode is not 600"
+jq -e '
+  .schema == 1
+  and .phase == "post"
+  and (.expected_shas_manifest_sha256 | test("^[0-9a-f]{64}$"))
+  and [.commands[].id] == [
+    "indicator-v1-removed-source-generated",
+    "runtime-dependency-combined-descriptor-checksum"
+  ]
+  and (.commands | length) == 2
+  and all(.commands[];
+    .exit_code == 0
+    and (.log_sha256 | test("^[0-9a-f]{64}$"))
+    and (.started_at | type == "string" and length > 0)
+    and (.finished_at | type == "string" and length > 0)
+  )
+  and .commands[0].cwd == "hushine-deploy"
+  and .commands[0].argv == [
+    "bash", "scripts/runtime-indicator-v2-cutover-evidence.test.sh", "scan-no-v1"
+  ]
+  and .commands[0].log_path ==
+    "post-contracts/indicator-v1-removed-source-generated.log"
+  and .commands[1].cwd == "hushine-deploy"
+  and .commands[1].argv == [
+    "bash", "scripts/runtime-indicator-v2-cutover-evidence.test.sh",
+    "check-dependency-combined"
+  ]
+  and .commands[1].log_path ==
+    "post-contracts/runtime-dependency-combined-descriptor-checksum.log"
+' "${post_contracts}" >/dev/null \
+  || fail "post-contract manifest contract is invalid"
+for id in \
+  indicator-v1-removed-source-generated \
+  runtime-dependency-combined-descriptor-checksum; do
+  log="${post_state}/post-contracts/${id}.log"
+  [[ -s "${log}" && ! -L "${log}" ]] \
+    || fail "post-contract log is missing or empty: ${id}"
+  expected_hash="$(jq -r --arg id "${id}" \
+    '.commands[] | select(.id == $id) | .log_sha256' "${post_contracts}")"
+  actual_hash="$(shasum -a 256 "${log}" | awk '{print $1}')"
+  [[ "${actual_hash}" == "${expected_hash}" ]] \
+    || fail "post-contract log hash mismatch: ${id}"
+done
+grep -Fxq 'runtime Indicator V2 no-V1 source/generated scan: PASS' \
+  "${post_state}/post-contracts/indicator-v1-removed-source-generated.log" \
+  || fail "post-contract scan log does not prove strict V1 absence"
+grep -Fxq 'runtime dependency combined descriptor/checksum: PASS' \
+  "${post_state}/post-contracts/runtime-dependency-combined-descriptor-checksum.log" \
+  || fail "post-contract dependency log does not prove the combined gate"
 post_seal="${post_state}/seal.json"
 PATH="${fake_bin}:${PATH}" HUSHINE_SOURCE_ROOT="${source_root}" \
   "${SCRIPT}" --phase post \
@@ -534,6 +708,14 @@ jq -e '
   and .payload.coexistence_manifest_sha256 == null
   and .payload.coexistence_commands == []
   and (.payload.expected_shas_manifest_sha256 | test("^[0-9a-f]{64}$"))
+  and (.payload.post_contract_manifest_sha256 | test("^[0-9a-f]{64}$"))
+  and [.payload.post_contract_commands[].id] == [
+    "indicator-v1-removed-source-generated",
+    "runtime-dependency-combined-descriptor-checksum"
+  ]
+  and all(.payload.post_contract_commands[];
+    .log_sha256 | test("^[0-9a-f]{64}$")
+  )
 ' "${post_seal}" >/dev/null \
   || fail "post-cutover seal payload is invalid"
 PATH="${fake_bin}:${PATH}" HUSHINE_SOURCE_ROOT="${source_root}" \
@@ -542,6 +724,24 @@ PATH="${fake_bin}:${PATH}" HUSHINE_SOURCE_ROOT="${source_root}" \
   --seal "${post_seal}" \
   --check-current-shas \
   --require-clean
+
+printf '%s\n' 'tampered post-contract evidence' \
+  >>"${post_state}/post-contracts/runtime-dependency-combined-descriptor-checksum.log"
+set +e
+post_contract_tamper_output="$(
+  PATH="${fake_bin}:${PATH}" HUSHINE_SOURCE_ROOT="${source_root}" \
+    "${SCRIPT}" --phase post \
+    --expected-shas "${post_state}/final-shas.json" \
+    --seal "${post_seal}" \
+    --check-current-shas \
+    --require-clean 2>&1
+)"
+post_contract_tamper_status="$?"
+set -e
+[[ "${post_contract_tamper_status}" -ne 0 ]] \
+  || fail "post seal revalidation accepted post-contract log hash drift"
+grep -Fq 'post-contract log hash mismatch' <<<"${post_contract_tamper_output}" \
+  || fail "post-contract log drift failed at the wrong boundary"
 
 printf '%s\n' 'tampered screenshot' >>"${screenshot}"
 set +e
