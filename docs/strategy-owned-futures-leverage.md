@@ -3,8 +3,9 @@
 Last verified: 2026-08-24.
 
 This is the current repository guide for strategy-declared Futures leverage.
-The current Notion pages named `System Architecture`, `Runtime Management`, and
-`User Manual` remain the product/operator source of truth. Dated Superpowers
+The current product/operator source of truth is the `量化交易系统文档` tree,
+specifically `1 基础运维`, `2 代码结构和逻辑`, and `3 用户手册`. The archived
+`B.4 Runtime Management` page is not current authority. Dated Superpowers
 specifications and plans, archived OpenSpec changes, and Account-era documents
 are historical records, not current operating instructions.
 

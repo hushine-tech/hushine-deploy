@@ -73,11 +73,14 @@ The deterministic output is stored under `db/generated/`:
 | `control_panel.sql` | `control_panel` |
 | `market_data_year.sql` | every `{exchange}_{year}` database |
 
-Each schema bundle is transactional, idempotent, and maintains the same
-`schema_migrations` ledger used by service bootstrap commands. One bundle run
-on an empty database creates the complete current schema; running the same
-bundle again is a no-op at the object and ledger level. The bundles are for
-fresh rebuild and review, not an Account-era in-place upgrade.
+Each schema bundle is transactional, end-state/catalog idempotent, and
+maintains the same `schema_migrations` ledger used by service bootstrap
+commands. One bundle run on an empty database creates the complete current
+schema. A rerun must produce the same catalog inventory and fingerprint, with
+no duplicate objects or ledger rows; forward migrations may idempotently
+replace functions, triggers, or constraints while reaching that same end
+state. The bundles are for fresh rebuild and review, not an Account-era
+in-place upgrade.
 
 ## Schema sources
 
