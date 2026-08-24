@@ -1,7 +1,7 @@
 # Clean-Slate Compatibility Removal Design
 
-**Date:** 2026-08-24  
-**Status:** Approved in conversation  
+**Date:** 2026-08-24
+**Status:** Approved in conversation
 **Scope:** All first-party repositories in the Hushine workspace
 
 ## Context
