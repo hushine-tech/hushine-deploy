@@ -5,6 +5,9 @@ Last verified: 2026-08-24.
 Deployment, database, smoke-test, and operator documentation for the Hushine
 multi-repository system.
 
+Documentation entry point: [docs/README.md](docs/README.md), organized as
+基础运维、代码结构和逻辑、用户手册.
+
 This repository does not contain service source code. Clone it beside the
 service repositories and keep the directory names below.
 

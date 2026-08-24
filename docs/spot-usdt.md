@@ -1,6 +1,6 @@
 # Binance Spot USDT
 
-最后核验：2026-07-23。
+最后核验：2026-08-25。
 
 本文描述当前分支的 Binance Spot USDT 代码契约。它是实现与运维说明，
 不是“已完成真实交易所发布验收”的证明。Backtest、离线、UI、过滤器、停止与
@@ -162,15 +162,14 @@ bash scripts/acceptance/observe_spot_demo.test.sh
 外部 Demo。`release` 会先运行 `all-local`，再要求 absolute coverage root、run-owned
 Demo Venue 和 observer evidence；缺任何前置条件都以稳定 blocked reason 非零退出。
 
-## 部署与回滚
+## 部署
 
-兼容部署顺序：core-service → control-panel-service → instrumented Runtime image →
-quant-handler → quant-frontend。先保持四个 capability 关闭，完成每层 smoke 后再分别
-开启 Backtest、Demo、offline；Live 不开启。
+从空数据库按 core-service → control-panel-service → instrumented Runtime image →
+quant-handler → quant-frontend 启动。先保持四个 capability 关闭，完成每层 smoke 后
+再分别开启 Backtest、Demo、offline；Live 不开启。
 
-回滚按 UI 到 core 的逆序进行，并优先关闭对应 capability。不得删除新增 protobuf
-字段或 order/fill/wallet/snapshot/close-operation/reconciliation 历史，也不得回退已经
-应用的 migration filename；用新的修正 migration 处理数据库问题。
+当前 baseline 不提供旧数据库升级或 schema 回滚。开发/测试环境需要换用当前 schema
+时重建数据库；需要保留的数据必须先导出并走独立、显式的数据迁移流程。
 
 ## 诊断
 

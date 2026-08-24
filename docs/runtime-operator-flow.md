@@ -1,12 +1,8 @@
 # Runtime 操作流程
 
-最后核验：2026-08-24。
+最后核验：2026-08-25。
 
-本次核验的实现 commit：strategy-service
-`eb18951b7542621e69a283d24040b1dd4dd81966`、core-service
-`2f710a8c252299b11abb8626a630db79c07288cf`、control-panel-service
-`ada3ab0614fbec84e8420a0c1ded5fac11e4108b`。Futures 杠杆的完整声明、页面、
-持久化和故障语义见
+Futures 杠杆的完整声明、页面、持久化和故障语义见
 [`strategy-owned-futures-leverage.md`](strategy-owned-futures-leverage.md)。
 
 本文描述当前 RuntimeChannel 实现。所有策略请求和 session 路由都只使用
@@ -106,8 +102,8 @@ import → 成功后才开始 session。同步错误和 download job 轮询错�
 Futures 杠杆只能来自策略声明，固定优先级为 target 的
 `ORDER_TARGETS[].leverage`、class `LEVERAGE`、平台默认 `1x`。Spot target
 声明 leverage 会在 worker 执行前失败；Spot-only 策略也不能声明全局
-`LEVERAGE`。页面没有 Demo、Backtest 或 Resume 的杠杆输入，旧 HTTP/proto
-字段仅保留兼容解码，新请求不把它当权威。
+`LEVERAGE`。页面没有 Demo、Backtest 或 Resume 的杠杆输入，Start 请求也不
+携带杠杆权威值。
 
 Preview 和 Start 都通过 `runtime_id` 选择 Runtime：
 
@@ -164,27 +160,6 @@ control-panel 停机时先把 readiness 置为 false、关闭全部 RuntimeChann
 再对 RuntimeChannel 与内部 gRPC server 执行同一个 10 秒有界
 `GracefulStop`。如果连接仍卡在 HELLO/认证前或 handler 未返回，超时后会调用
 `Stop` 并等待 server 退出，不能让 pre-auth stream 无限阻塞整个服务停机。
-
-## 已保存 Strategy 的只读兼容扫描
-
-上线前可扫描现有未归档策略：
-
-```bash
-env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV \
-  strategy-service/.venv/bin/python -I \
-  hushine-deploy/scripts/scan-saved-strategy-imports.py \
-  --dsn-env PORTFOLIO_READONLY_DSN \
-  --output /tmp/hushine-runtime-dependency-scan.json
-```
-
-命令行只接收保存 DSN 的环境变量名称，绝不接收或输出 DSN 值。扫描器设置
-read-only transaction，只执行一条按 `strategy_id` 排序的 SELECT，以 100 条为
-一批读取，并在成功或失败时都 rollback/close。数据库端不会把超过 1 MiB 的
-source 返回客户端；客户端只做 `ast.parse`，不会 import/exec 用户源码。
-
-报告将迁移影响分为 `platform_safety`、`dynamic_safety`、`dependency` 三类；
-坏行、语法错误、超限源码和单行扫描异常单独记为 `scan_error`，不会中断后续行。
-退出码 `0/1/2` 分别表示无 finding、有 finding、扫描报告无法安全完成。
 
 ## 替换 hosted runtime
 
@@ -306,10 +281,10 @@ Python worker 随每根 bar 发送 indicator frame；Go agent 按
 Spot 的完整 ownership、过滤器、订单、停止与 reconciliation 见
 [`spot-usdt.md`](spot-usdt.md)。
 
-## legacy unbound session
+## Session 路由约束
 
-历史上没有 `runtime_id` 的 session 不能再走默认 runtime 兜底。状态、停止、
-恢复相关 API 会返回显式的 unbound-session 错误，避免多 runtime 场景误伤。
+所有 Session 必须持有非空 `runtime_id`。状态、停止和恢复 API 对缺少绑定的请求
+fail closed，不能在多 Runtime 场景选择默认 Runtime。
 
 ## Debugger 与 AGENTS.md rollout handoff
 

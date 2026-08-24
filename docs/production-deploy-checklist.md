@@ -1,247 +1,145 @@
-# 生产部署 Checklist
+# 基础运维与部署 Checklist
 
-最后核验：2026-07-23。
+最后核验：2026-08-25。
 
-本文档用于从 GitHub 多仓库重新部署 Hushine。目标是让部署步骤可重复、可回滚，并在上线前明确验证数据库、Kafka、ELK、Jaeger、runtime 和核心交易链路。
+本文覆盖数据库、Kafka、ELK、Jaeger、服务和 Runtime 镜像的当前启动路径。数据库只
+支持从空库创建当前 baseline；Live trading 仍受 rollout guard 保护。
 
-## 1. 代码拉取
+## 1. 目录和组件
 
-在目标机器上保持如下目录结构。`core-service` 仓库需要 clone 到本地目录 `core-service`。
+所有仓库按 `hushine-deploy/README.md` 的 sibling 结构放置。运行环境需要：
 
-```bash
-mkdir -p hushine
-cd hushine
+| 组件 | 默认本机端口 | 用途 |
+|---|---:|---|
+| PostgreSQL/TimescaleDB | `5432` | portfolio、order、control_panel、行情年库 |
+| Kafka | `19092` | finalized live K-line 与平台日志/通知 |
+| Elasticsearch | `9200` | 日志检索 |
+| Kibana | `5601` | 日志界面 |
+| Jaeger | `16686` | trace 查询 |
+| OTLP HTTP | `4318` | trace 接收 |
+| core-service | `50051` | `portfolio.v1`、`order.v1` |
+| control-panel-service | `50054` / `50055` | 管理 RPC / RuntimeChannel |
+| quant-handler | `8090` | 前端唯一 HTTP API |
+| quant-frontend | `5173` | Web UI |
 
-git clone git@github.com:hushine-tech/hushine-deploy.git .
-git clone git@github.com:hushine-tech/core-service.git core-service
-git clone git@github.com:hushine-tech/control-panel-service.git control-panel-service
-git clone git@github.com:hushine-tech/quant-handler.git gateway/quant-handler
-git clone git@github.com:hushine-tech/quant-frontend.git gateway/quant-frontend
-git clone git@github.com:hushine-tech/scraper.git scraper
-git clone git@github.com:hushine-tech/strategy-service.git strategy-service
-git clone git@github.com:hushine-tech/strategy-library.git strategy-library
-git clone git@github.com:hushine-tech/golang-lib.git golang-lib
-```
-
-## 2. 基础设施
-
-生产或共享开发环境至少需要以下组件可达：
-
-| 组件 | 示例地址 | 验收命令 |
-|---|---|---|
-| TimescaleDB/PostgreSQL | `${INFRA_HOST}:5432` | `pg_isready -h "$INFRA_HOST" -p 5432 -U "$PGUSER"` |
-| Kafka | `${INFRA_HOST}:19092` | `kafka-broker-api-versions --bootstrap-server "$INFRA_HOST:19092"` |
-| Elasticsearch | `http://${INFRA_HOST}:9200` | `curl -fsS "http://$INFRA_HOST:9200"` |
-| Kibana | `http://${INFRA_HOST}:5601` | `curl -fsS "http://$INFRA_HOST:5601/api/status"` |
-| Jaeger | `http://${INFRA_HOST}:16686` | `curl -fsS "http://$INFRA_HOST:16686/api/services"` |
-| OTLP HTTP | `http://${INFRA_HOST}:4318` | 通过 `scripts/verify_tracing.sh` 验证 |
-
-不要把曾经的共享开发机 `192.168.88.10` 当成部署前提；当前无法访问该机器时，
-必须使用下面的本机隔离栈，并让所有生成的 `config.local.yaml` 指向本机。
-
-如果使用本机隔离环境：
+## 2. 本机从空环境启动
 
 ```bash
+make local-stop
+make local-infra-reset
 IMAGE_TAG=dev make runtime-image
-make local-bootstrap
+make runtime-images-verify
+make local-configs
+make local-infra-up
+make local-infra-ps
+make local-ensure-dbs
+make local-ensure-dbs
 make local-start
 ```
 
-`local-bootstrap` 会生成并覆盖 git-ignored 的本地服务配置；本地 hosted runtime
-默认使用 coverage 镜像，采样文件写入工作区 `.coverage/runtime-agent`。
+`local-infra-reset` 会删除本机 Hushine 的数据库/消息/可观测性 volumes，只能用于可丢弃
+环境。`local-configs` 每次重建忽略跟踪的 `config.local.yaml`，不要把机器地址或 secret
+提交到仓库。
 
-## 3. 配置检查
+覆盖率版 hosted runtime 由 `runtime-image` 同时构建。启动 coverage 采集时设置当前
+Makefile/脚本使用的 coverage 开关，输出统一写入 `.coverage/`，不写进用户策略目录。
 
-上线前逐个确认：
-
-- `core-service/config.yaml`
-  - `database` 指向 portfolio DB
-  - `order_database` 或 order module DSN 指向 order DB
-  - `notification.kafka.brokers` 指向 Kafka
-  - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_BOT_USERNAME` 通过环境变量注入，不提交到仓库
-- `control-panel-service/config.yaml`
-  - `provisioning.backend` 为 `docker`
-  - Mac / Docker Desktop 场景使用 `network_mode: bridge` 和 `runtime_channel_dial_addr: host.docker.internal:50055`
-  - Linux 单机可评估 `network_mode: host`，但必须验证容器内能连到 control-panel
-  - `runtime_platform` / `runtime_plans` 满足目标环境限额
-- `gateway/quant-handler/config.yaml`
-  - `control_panel_service_grpc` 指向 control-panel gRPC；strategy RPC routing 不再支持 handler 直连 strategy-service
-  - `jwt_secret` 通过环境变量覆盖默认值
-- `strategy-service/config.yaml`
-  - 只允许 `dependencies.runtime_channel_grpc` 指向 control-panel
-    RuntimeChannel（通常 `:50055`）
-  - 不得包含 control-panel 普通 gRPC、core/order、数据库、Kafka、account、
-    notification 或 tracing endpoint；Hosted/Self-hosted/Bare 都通过
-    RuntimeChannel platform call 访问平台能力
-- `scraper/config.yaml`
-  - market-data DB 指向 `{exchange}_{year}` 年库族
-  - Kafka 只用于 scraper/live delivery 需要的路径
-
-### 3.1 Runtime Python 依赖 release gate
-
-依赖契约的唯一手写源是
-`strategy-library/hushine_strategy/runtime_dependencies.toml`。上线人必须显式
-选择一个已部署、不可变且本地可解析的 40 位 strategy-library commit：
-
-```bash
-export RUNTIME_DEPENDENCY_BASE_SHA=<deployed-strategy-library-commit>
-test "${#RUNTIME_DEPENDENCY_BASE_SHA}" -eq 40
-git -C strategy-library cat-file -e \
-  "${RUNTIME_DEPENDENCY_BASE_SHA}^{commit}"
-make runtime-dependency-contract \
-  RUNTIME_DEPENDENCY_BASE_SHA="$RUNTIME_DEPENDENCY_BASE_SHA"
-```
-
-禁止把 `main`、`origin/main`、`HEAD` 或 Makefile 默认值当 baseline。首次发布时
-checker 应报告 `baseline.state=introduced`，且唯一 notice 是
-`BASELINE_MANIFEST_ABSENT`；之后以已发布 commit 为 baseline 时必须报告
-`present`。check 模式不得改写 projection。
-
-`strategy-service` 与 `strategy-debugger-cli` 必须各自把 manifest 的公开依赖
-作为 direct dependency 固定在 lock 中。`strategy-library` 不应生成 `uv.lock`。
-
-## 4. 数据库初始化
+## 3. 数据库
 
 ```bash
 make ensure-dbs
+make db-schema-bundle
 ```
 
-成功标准：
+每个 owner 仓库只保留当前 baseline。第一次运行创建完整 schema，第二次必须无副作用。
+对象清单和手工 bundle 见 [`../db/README.md`](../db/README.md)。不得把包含其他 schema
+版本的数据库直接交给当前启动脚本。
 
-- `portfolio` 依次应用 `0000..0004`，ledger 共 5 条
-- `order` 依次应用 `0000..0003`，ledger 共 4 条
-- `control_panel` 依次应用 `0000..0001`，ledger 共 2 条
-- 每个 `binance_YYYY` / `okx_YYYY` 年库应用 `0001`，ledger 共 1 条
-- 对同一空库连续执行两次，第二次全部 skipped，schema 和 ledger hash 不变
-- Spot repair/close、exact decimal、runtime dependency admission 和 indicator chunk
-  相关新增表、约束、索引均存在；已有业务行和 identity/sequence 不被重置
+## 4. 配置边界
 
-数据库清单见 [db/README.md](../db/README.md)。
+- core-service：portfolio/order DB、交易所 endpoint、Kafka notification、Telegram。
+- control-panel-service：control DB、Runtime provisioning、RuntimeChannel、market-data
+  control；Hosted 容器只得到 RuntimeChannel 地址和 sealed runtime identity。
+- quant-handler：只连接 core-service 和 control-panel-service；前端不直连后端服务。
+- scraper：行情年库、Binance REST/WS、finalized live K-line Kafka。
+- runtime-agent/worker：不接收数据库、Kafka、core/order、账户 credential、notification
+  或 tracing endpoint；所有平台调用经过 RuntimeChannel。
 
-## 5. 构建与启动
+`CREDENTIAL_ENCRYPTION_KEY` 和 JWT/Telegram/交易所 secret 必须由 credential manager 或
+环境注入，不能出现在 YAML、命令行、日志、截图或 coverage 产物中。
 
-先从 clean commits 构建 normal/coverage 两个最终 Runtime 镜像并执行闭包验收：
+## 5. Runtime 依赖和镜像
+
+公开 Python 依赖唯一手写源为
+`strategy-library/hushine_strategy/runtime_dependencies.toml`。修改后重新生成
+strategy-service/debugger 投影和 lock，并验证 normal/coverage 镜像具有相同 profile、
+version、digest 和源码 commit，但不同 build ID。
 
 ```bash
-test -z "$(git -C strategy-library status --porcelain)"
-test -z "$(git -C strategy-service status --porcelain)"
-test -z "$(git -C golang-lib status --porcelain)"
-test -z "$(git -C strategy-debugger-cli status --porcelain)"
+export RUNTIME_DEPENDENCY_BASE_SHA=<immutable-40-char-commit>
+make runtime-dependency-contract \
+  RUNTIME_DEPENDENCY_BASE_SHA="$RUNTIME_DEPENDENCY_BASE_SHA"
 make runtime-dependency-acceptance \
   RUNTIME_DEPENDENCY_BASE_SHA="$RUNTIME_DEPENDENCY_BASE_SHA"
 ```
 
-该命令无缓存构建并验证
-`hushine/strategy-runtime:executor-contract` 和
-`hushine/strategy-runtime:executor-coverage-contract`，对每个镜像都运行 verifier
-和真实 one-shot worker smoke；还检查 profile/digest 相等、build ID 不同、
-`source-dirty=false`、coverage 不公开，以及缺失公开 distribution 时 build/startup
-都 fail closed。
+Release 构建必须来自 clean worktree，且 image label
+`org.hushine.runtime.source-dirty=false`。coverage 包只存在于 coverage image，不能成为
+用户策略公开 import。
+
+## 6. 启动与健康检查
 
 ```bash
 make build
 make start
-```
 
-启动后检查监听端口：
-
-```bash
-lsof -nP \
-  -iTCP:50051 -iTCP:50054 -iTCP:50055 \
-  -iTCP:8090 -iTCP:5173 -iTCP:18080 -iTCP:8082 \
-  -sTCP:LISTEN
-```
-
-预期：
-
-- `core-service`: `:50051`，`restart.sh` 启动时为 `:18080`
-- `control-panel-service`: `:50054`, `:50055`, `:8082`
-- `quant-handler`: `:8090`
-- `quant-frontend`: `:5173`
-
-## 6. 核心 Smoke
-
-UI smoke must cover the current Portfolio flow: login, Portfolio and Venue creation/binding, Strategy activation, executor Runtime selection, backtest start, Session Detail, Orders, Reconciliation, Market Data, and Notification Management. Record IDs and trace evidence using the current code-census session runbook; the command probes below are prerequisites, not a substitute for UI smoke.
-
-### 6.1 前端/API
-
-```bash
-curl -fsS http://127.0.0.1:5173/ >/tmp/hushine_frontend_probe.html
 curl -fsS http://127.0.0.1:8090/healthz
+curl -fsS http://127.0.0.1:5173/ >/dev/null
+curl -fsS http://127.0.0.1:9200/ >/dev/null
+curl -fsS http://127.0.0.1:5601/api/status >/dev/null
+curl -fsS http://127.0.0.1:16686/api/services >/dev/null
 ```
 
-登录验证：
+同时确认 `50051`、`50054`、`50055`、`8090` 和 `5173` 在监听。scraper 必须能写入
+目标 `{exchange}_{year}` 年库，并只把 finalized live K-line 发布到当前 Kafka topic。
 
-```bash
-curl -fsS -X POST http://127.0.0.1:8090/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"test-user","password":"123qwe"}'
-```
-
-### 6.2 Hosted Runtime
+Hosted Runtime smoke：
 
 ```bash
 USER_ID=<users.id> PROFILE=small IMAGE_TAG=dev make smoke-hosted-runtime
 ```
 
-成功标准：
-
-- `EnsureHostedRuntime` 返回 `provisioned=true`
-- runtime status 为 `active`
-- `ValidateCallerToken` 成功
-- 结束 runtime 后 Docker 容器被清理
-
-### 6.3 全链路 E2E
+Self-hosted Runtime smoke：
 
 ```bash
-bash scripts/e2e_full_flow.sh
+CREDENTIAL_FILE=$HOME/.hushine/runtime.cred \
+RUNTIME_CHANNEL_ADDR=host.docker.internal:50055 \
+make smoke-self-hosted-runtime
 ```
 
-该脚本会启动独立端口的 portfolio/control-panel/runtime/handler，创建 Portfolio 和 Venue、创建 hosted runtime、运行 backtest 回测，并检查：
+## 7. 功能门禁
 
-- session 终态为 `finished` 或 `completed`
-- `bars_processed = 200`
-- `order_fills` 有订单
-- `strategy_id` / `portfolio_id` / `user_id` / `session_id` 归属正确
-- `portfolio_snapshots` 写入成功
-
-### 6.4 Binance Spot USDT 分层门禁
-
-Spot 的四个能力由 core-service 单独控制，默认全部关闭：
-
-```yaml
-product_capabilities:
-  spot_usdt:
-    backtest_spot_usdt: false
-    demo_spot_usdt: false
-    offline_spot_usdt: false
-    live_spot_usdt: false
-```
-
-等价环境变量是 `BACKTEST_SPOT_USDT_ENABLED`、`DEMO_SPOT_USDT_ENABLED`、
-`OFFLINE_SPOT_USDT_ENABLED`、`LIVE_SPOT_USDT_ENABLED`。一次只打开已通过验收的
-能力；即使配置 Live 为 true，当前实现仍必须以 `SPOT_LIVE_ROLLOUT_GUARD`
-fail closed。能力发现失败时，handler/frontend 不得猜测为可用。
-
-不带真实凭据的本地契约验收：
+提交发布前至少执行：
 
 ```bash
+make test
+make test-runtime-indicator-v2
 bash scripts/verify_spot_usdt.sh all-local
-bash scripts/smoke_spot_demo.test.sh
-bash scripts/acceptance/observe_spot_demo.test.sh
+bash scripts/e2e_full_flow.sh
+bash scripts/verify_tracing.sh
 ```
 
-真实 Demo 验收只能使用 run-owned Venue 和继承的 credential FD；key/secret 不得
-出现在环境变量、argv、日志、coverage 或 evidence。完整操作见
-[`spot-usdt.md`](spot-usdt.md) 和
-[`acceptance/2026-07-14-binance-spot-demo.md`](acceptance/2026-07-14-binance-spot-demo.md)。
+页面验收必须覆盖：登录、Portfolio/Venue、Market Data streams、Strategy 激活、Runtime
+选择、Preview、Backtest、Demo、Session history/detail、order/fill、wallet、reconciliation、
+Indicator 图表和标签、Telegram、Stop/Resume/worker restart。Spot 只展示资产和低买高卖
+语义；Futures 验证 cross/isolated、当前支持的 position mode、逐 target leverage 和
+BTC/ETH/ZEC 多输入。
 
-浏览器验收至少覆盖：Spot Venue 绑定、钱包 asset 展示、Backtest、Demo、Local
-Debug package v2、订单 exact decimal、stop-only、stop-and-close、reconciliation、
-Live guard；还要覆盖 Futures 正常回归、同币种多 interval、不同币种以及
-Spot/Futures 混合输入。只跑 shell/proto 测试不能替代真实页面验收。
+Mock Binance 验收必须覆盖 Spot 与 Futures 的 MARKET/LIMIT、GTC/IOC/FOK（Futures 还
+包括当前 GTX/GTD 支持）、full/partial/expired/rejected/rate-limit，以及 exact decimal、
+fees、risk filter、recovery 和 liquidation lifecycle。
 
-## 7. Tracing / ELK 验收
+## 8. ELK 与 Jaeger
 
 ```bash
 HANDLER_URL=http://127.0.0.1:8090 \
@@ -250,159 +148,17 @@ ES_URL=http://127.0.0.1:9200 \
 bash scripts/verify_tracing.sh
 ```
 
-成功标准：
+至少要看到 quant-handler → core-service/control-panel 的当前调用链；日志中使用
+`trace_id`、`user_id`、`portfolio_id`、`venue_id`、`session_id`、`runtime_id` 等业务
+标识，但不得出现 key、secret、signature、credential 明文或用户源码。
 
-- Jaeger API 可达
-- 能找到最新 `quant-handler` trace
-- trace 中至少包含 `quant-handler,core-service`
-- ES `app-logs-*` 可以查到对应 `trace_id` 的日志
-
-如果 ES 为 0：
-
-- 先检查 Kafka topic 是否存在并有消费：
-  `app-logs-system`、`app-logs-access`、`app-logs-root`、`app-logs-grpc_access`、`app-logs-grpc_ext`
-- 再检查 `kafka-es-bridge` 是否运行、是否有消费错误
-- 最后检查服务 `log.kafka.enabled` 和 Kafka broker 地址
-
-## 8. Runtime 清理检查
-
-每次 smoke 或异常退出后确认没有旧 runtime 容器残留：
-
-```bash
-docker ps -a --format '{{.ID}} {{.Names}} {{.Status}}' \
-  | rg 'hushine-runtime|hushine-debug|rt-' || true
-```
-
-如果 control-panel 页面显示 runtime 已取消，但 Docker 还残留，需要优先查：
-
-- `runtime_registry.cleanup_status`
-- `runtime_registry.cleanup_reason`
-- control-panel 日志里的 `docker rm -f`
-
-## 9. 停止与回滚
-
-停止服务：
+## 9. 停止与故障处理
 
 ```bash
 make stop
+make local-stop
 ```
 
-确认端口释放：
-
-```bash
-lsof -nP \
-  -iTCP:50051 -iTCP:50054 -iTCP:50055 \
-  -iTCP:8090 -iTCP:5173 -iTCP:18080 -iTCP:8082 \
-  -sTCP:LISTEN || true
-```
-
-回滚策略：
-
-- 代码回滚：每个服务 repo 独立回滚到上一 commit/tag
-- DB 回滚：默认不做 destructive rollback；新增 migration 需要用新的 migration 修正
-- runtime 回滚：先停止所有 active runtime，再把 normal/coverage 镜像、
-  control-panel 期望 profile、strategy-service、strategy-library、debugger pin、
-  handler/frontend 一起回到同一组已验证版本；禁止只回滚一个镜像
-
-本次 Runtime dependency contract 不包含数据库 migration。不要为该功能执行
-DDL 或 destructive rollback。
-
-### 9.1 已保存 Strategy 的只读预检
-
-使用只读 Portfolio 用户和只通过环境变量注入的 DSN：
-
-```bash
-env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV \
-  strategy-service/.venv/bin/python -I \
-  scripts/scan-saved-strategy-imports.py \
-  --dsn-env PORTFOLIO_READONLY_DSN \
-  --output /tmp/hushine-runtime-dependency-scan.json
-```
-
-退出 `1` 表示报告中存在兼容性 finding，不表示扫描器写过数据库；按
-`platform_safety`、`dynamic_safety`、`dependency` 分组评估迁移，`scan_error`
-必须逐条处理。退出 `2` 表示配置、连接、transaction、profile 或输出失败，禁止
-继续发布。报告和日志不得包含 DSN、源码、异常文本、文件路径或 traceback。
-
-### 9.2 协调上线顺序
-
-1. 冻结新 Runtime provisioning，完成所有仓库 commit；不要先单独 push/publish
-   strategy-library。
-2. 在同一个协调发布中推送 library、service、debugger pin、control-panel、
-   handler 和 frontend，并确认 debugger pin 等于最终 library commit。
-3. 先部署理解 dependency profile 字段的 control-panel/proto consumer，再配置
-   exact expected profile；随后部署 handler/frontend 的结构化错误支持。
-4. 构建并发布 normal/coverage 成对镜像，更新 Hosted provisioning tag，然后
-   重启/替换 Runtime；旧 Runtime 不允许在 mismatch 后继续路由。
-5. Dependency protocol descriptor gate 通过后，才按单独计划上线 Indicator V2。
-   Dependency-only 阶段保留旧 indicator field 15；Indicator V2 最终把 frame 放到
-   field 21 并 reserve 15。两次变更前后都要运行 descriptor checksum/proto tests。
-6. 执行只读 saved-strategy scan、真实 Preview/Run/download job 和 UI smoke，再
-   解除 provisioning 冻结。
-
-pre-push 可以用 `with-local-strategy-library-git.sh` 建立临时 bare mirror，但该
-transport 不得进入 project/lock/用户指令。所有仓库协调 push 后，必须在新的
-目录、HOME 和 uv cache 中清除 Git URL rewrite、没有 sibling checkout，并用
-canonical GitHub URL 重跑 debugger Python 3.12/3.13/3.14 bootstrap。该 no-mirror
-network gate 通过前 release 仍为 blocked。
-
-协调 push 后执行（ref 必须是不可变 release branch/tag，不能是移动默认分支）：
-
-```bash
-test -n "$DEBUGGER_PUBLISHED_REF"
-test -n "$LIBRARY_PUBLISHED_REF"
-test "${#DEBUGGER_COMMIT}" -eq 40
-test "${#LIBRARY_COMMIT}" -eq 40
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/home"
-
-env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
-  -u GIT_ALLOW_PROTOCOL HOME="$TMP/home" \
-  git clone --branch "$LIBRARY_PUBLISHED_REF" \
-  https://github.com/hushine-tech/strategy-library.git "$TMP/library"
-test "$(git -C "$TMP/library" rev-parse HEAD)" = "$LIBRARY_COMMIT"
-env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
-  -u GIT_ALLOW_PROTOCOL HOME="$TMP/home" \
-  UV_CACHE_DIR="$TMP/library-cache" \
-  uv run --directory "$TMP/library" --isolated --no-project \
-  --with-editable '.[test]' \
-  python scripts/check_runtime_dependency_contract.py \
-  --baseline-only --baseline-ref "$LIBRARY_COMMIT" --json \
-  >"$TMP/library-baseline.json"
-jq -e '.ok == true and .baseline.state == "present"' \
-  "$TMP/library-baseline.json"
-
-env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
-  -u GIT_ALLOW_PROTOCOL HOME="$TMP/home" \
-  git clone --branch "$DEBUGGER_PUBLISHED_REF" \
-  https://github.com/hushine-tech/strategy-debugger-cli.git "$TMP/debugger"
-test "$(git -C "$TMP/debugger" rev-parse HEAD)" = "$DEBUGGER_COMMIT"
-cd "$TMP/debugger"
-INDEX_TREE="$(git write-tree)" \
-  env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 \
-  -u GIT_ALLOW_PROTOCOL HOME="$TMP/home" UV_CACHE_DIR="$TMP/debugger-cache" \
-  bash scripts/bootstrap-standalone.test.sh --network \
-  --expected-library-commit "$LIBRARY_COMMIT"
-```
-
-## 10. 上线阻断条件
-
-出现以下任一情况，不应继续上线：
-
-- `make ensure-dbs` 失败
-- `make build` 失败
-- `runtime-dependency-contract` 或成对镜像 acceptance 失败
-- checker baseline 使用移动 ref、projection 需要改写，或 installed check 依赖
-  `PYTHONPATH`/sibling source shadowing 才能通过
-- normal/coverage profile、digest 或源码 commit 不同，build ID 相同，或任一
-  release image 标记为 dirty
-- saved-strategy scanner 退出 2，或 scan finding 未完成迁移决策
-- debugger 最终 pin 不等于 strategy-library 最终 commit，或协调 push 后的
-  no-mirror network bootstrap 未通过
-- `scripts/e2e_full_flow.sh` 失败
-- hosted runtime 不能创建或不能清理
-- `quant-handler` 不能通过 control-panel route resolution 跑 session
-- Jaeger trace 缺少 `quant-handler` 或 `core-service`
-- ES 无法写入服务日志，且 Kafka/bridge 原因未定位
-- Docker 上存在无法解释的旧 runtime 容器
+停止后确认没有残留 `hushine-runtime` / `rt-*` 容器。Runtime 失联时 Session 应进入
+`recoverable`，不得手工改回 `running`；用户选择可路由 Runtime 后通过 Resume 创建
+新 Session。数据库 schema 不支持原地回滚；测试环境重建，需保留的数据使用单独迁移。

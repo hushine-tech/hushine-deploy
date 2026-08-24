@@ -1,237 +1,127 @@
-# Strategy-owned Futures leverage
+# 策略主导的 Futures 杠杆
 
-Last verified: 2026-08-24.
+最后核验：2026-08-25。
 
-This is the current repository guide for strategy-declared Futures leverage.
-The current product/operator source of truth is the `量化交易系统文档` tree,
-specifically `1 基础运维`, `2 代码结构和逻辑`, and `3 用户手册`. The archived
-`B.4 Runtime Management` page is not current authority. Dated Superpowers
-specifications and plans, archived OpenSpec changes, and Account-era documents
-are historical records, not current operating instructions.
+## 用户声明
 
-## Authority and declaration contract
+杠杆只来自策略源码，优先级固定为：
 
-The strategy source is the only leverage-intent authority. Start Demo,
-Backtest, and Resume have no editable leverage field. Legacy HTTP and protobuf
-request fields remain decodable for compatibility, but the gateway and new
-runtime path send/consume zero and do not let those fields override the
-strategy.
+1. `ORDER_TARGETS[]` 当前 target 的 `leverage`
+2. Strategy class 的 `LEVERAGE`
+3. 平台默认 `1x`
 
-For each Futures `ORDER_TARGETS` entry, precedence is:
-
-1. `ORDER_TARGETS[].leverage`;
-2. class-level `LEVERAGE`;
-3. platform default `1x`.
-
-Both declaration forms must be Python literal positive integers. Booleans,
-zero, negatives, floats, strings, non-finite values, and dynamic expressions
-are rejected during strategy validation. A Spot target cannot declare
-`leverage`. A Spot-only strategy cannot declare class-level `LEVERAGE`; a
-mixed Spot/Futures strategy may declare it, and it applies only to the Futures
-targets.
+值必须是正整数。Spot target 不能声明 `leverage`，Spot-only Strategy 不能声明
+class-level `LEVERAGE`。Demo、Backtest 和 Resume 页面没有杠杆输入；Start 请求也不
+携带杠杆权威值。
 
 ```python
-class MyStrategy:
+class MyStrategy(Strategy):
     LEVERAGE = 5
-
     ORDER_TARGETS = [
         {
-            "exchange": Exchange.BINANCE,
-            "market": Market.PERPETUAL_FUTURES,
+            "exchange": "binance",
+            "market": "perpetual_futures",
             "symbol": "BTCUSDT",
+            "leverage": 3,
         },
         {
-            "exchange": Exchange.BINANCE,
-            "market": Market.PERPETUAL_FUTURES,
+            "exchange": "binance",
+            "market": "perpetual_futures",
             "symbol": "ETHUSDT",
-            "leverage": 10,
-        },
-        {
-            "exchange": Exchange.BINANCE,
-            "market": Market.PERPETUAL_FUTURES,
-            "symbol": "ZECUSDT",
         },
     ]
 ```
 
-The resolved facts are:
+上例中 BTC 使用 `3x`，ETH 使用 class-level `5x`。同一 Strategy 可以为 BTC、ETH、
+ZEC 等多个 target 声明不同值。
 
-| Symbol | Effective leverage | Source |
-|---|---:|---|
-| `BTCUSDT` | `5x` | `strategy_default` |
-| `ETHUSDT` | `10x` | `order_target` |
-| `ZECUSDT` | `5x` | `strategy_default` |
+## Preview
 
-If both declarations are absent, a Futures target resolves to `1x` with
-source `platform_default`. Downstream services consume the validator's
-`effective_leverage` and `leverage_source`; they do not recompute precedence.
+Preview 通过所选 `runtime_id` 创建一次性 worker，解析当前 active Strategy，计算每个
+target 的有效杠杆和来源，并经 RuntimeChannel 请求 core-service 读取 Binance 当前
+配置。Preview 是只读操作：
 
-## Read-only Preview
+- 不调用 Binance 设置接口
+- 不获取 target admission
+- 不创建 launch journal、Session、target facts 或 notification outbox
+- worker 返回后即销毁
 
-Preview runs in a temporary one-shot Python worker. The worker loads and
-validates the current active strategy, resolves declarations, and asks
-core-service for preflight facts through the authenticated RuntimeChannel
-proxy. It exits after the response and never becomes a strategy session
-worker.
+页面应展示每个 symbol 将使用的倍数、来源以及当前交易所读值。读取失败时明确阻止
+Start，不能猜测为 `1x`。
 
-For every Futures target the page shows the effective value, source, current
-exchange value, and whether Start needs a change, for example:
+## Start 的原子边界
 
-```text
-BTCUSDT  5x   Strategy default   Current: 3x   Will change on start
-ETHUSDT 10x   Target override    Current: 10x  No change
-ZECUSDT  5x   Strategy default   Current: 2x   Will change on start
+Start 使用 preparation worker 和正式 session worker 两个阶段：
+
+1. runtime-agent 创建新的 `session_id` 和 `launch_operation_id`。
+2. preparation worker 重新读取 active Strategy，返回 source digest、INPUTS、
+   ORDER_TARGETS、逐 target 有效杠杆/来源、Venue 路由和风险事实；不执行用户 callback。
+3. agent 通过 RuntimeChannel 提交 typed manifest。control-panel 使用已认证的 user 和
+   runtime 身份覆盖路由事实，只做校验和代理，不解析 Python。
+4. core-service 按
+   `(exchange, environment, credential_fingerprint, market, symbol)` 获取唯一 admission，
+   并按稳定的 route/symbol 顺序执行 read → 必要时 set → readback。
+5. 每次可能改变 Binance 前先持久化 rollback obligation。全部 target 确认后，
+   core-service 在一个数据库 transaction 中创建 `pending` Session、逐 target facts，
+   转交 admission holder 并提交 launch operation。
+6. agent 读回已提交绑定，构造 typed bootstrap，之后才创建正式 worker。
+7. 正式 worker 再次解析当前源码，核对 source digest、target 集合、有效杠杆/来源、
+   confirmed leverage、Venue/environment 和 wallet metadata；任何不一致都 fail closed。
+
+因此 worker 开始运行时，每个 Futures target 都已有不可歧义的 committed fact；Session
+不会从一个全局标量推断多币种杠杆。
+
+## 环境语义
+
+- `environment=0` Backtest：使用相同 resolver 和模拟 wallet metadata，不调用 Binance，
+  不占用 live admission。
+- `environment=1` Demo：Preview 只读；用户确认 Start 后才允许设置并 readback Binance。
+- `environment=2` Live：仍受 rollout guard 保护。
+- strategy-debugger-cli：使用相同 resolver 和模拟 Futures wallet，不提供额外 override。
+
+Hosted、Self-hosted 和 Bare worker 都只通过 RuntimeChannel 访问平台；不会收到 Binance
+credential、数据库、Kafka、core/order 或 notification endpoint。
+
+## 失败与回滚
+
+若 read、set 或 readback 任一步失败，core-service 对本次可能改变的 target 按逆序
+rollback 并再次 readback：
+
+- 全部恢复确认：不创建可运行 Session，释放 operation admission。
+- 无法确认恢复：返回 `LEVERAGE_ROLLBACK_FAILED`，launch operation 和 admission 保持
+  `recovery_required`，阻止同一 credential/symbol 被新启动绕过。
+- recovery 事件按 `launch_operation_id` 写入 durable notification outbox 并去重；
+  Telegram 发送失败不会丢掉待处理事实。
+
+成功 Session 终止时释放 admission，但不会自动把 Binance 杠杆恢复为 Start 前的值。
+
+## Resume
+
+Resume 总是创建新的 Session，并显式携带 `resume_session_id`。core-service 在同一个
+transaction 内校验来源 Session 的 user、Portfolio、environment、Strategy 和状态，
+将可恢复来源标记为 `stopped` 并释放旧 admission，再为新 launch 获取 admission。
+任一新 target 冲突会回滚整笔操作，旧 Session 保持 `recoverable`。
+
+新 Session 重新读取当前源码、重新执行 leverage apply/readback 并写入自己的逐 target
+facts；旧 Session 只作为审计历史，不会改回 `running`。
+
+## 持久化与检查
+
+当前 `portfolio` baseline 一次性创建：
+
+- `strategy_launch_operations`
+- `strategy_leverage_apply_attempts`
+- `strategy_target_admissions`
+- `strategy_session_target_facts`
+- `strategy_leverage_notification_outbox`
+
+关键验证：
+
+```bash
+cd core-service
+go test ./internal/service ./internal/repository ./internal/exchange/binance -count=1
+go test ./internal/notification -count=1
 ```
 
-Spot targets show no leverage row. Preview is strictly read-only: it performs
-no Binance leverage POST, acquires no target admission, writes no launch
-journal or outbox row, creates no Session, and writes no Session target facts.
-A failed target read blocks Start and remains visible with its structured code,
-route, source, and retryability.
-
-## Start: prepare, commit, then final worker
-
-Start does not trust an earlier preview. It uses this order:
-
-1. runtime-agent creates a canonical `session_id` and independent
-   `launch_operation_id`.
-2. A temporary one-shot preparation worker reloads the current active strategy,
-   repeats validation and preflight, and returns an immutable manifest with the
-   strategy source SHA-256, declarations, target leverage intents, routes,
-   symbols, Session metadata, and risk controls. It does not enter user strategy
-   execution.
-3. runtime-agent sends a typed `CommitStrategySessionStart` platform call over
-   RuntimeChannel. control-panel-service authenticates the runtime/user,
-   overwrites runtime identity from the authenticated route, and relays the
-   typed request. It does not calculate precedence or receive a caller-selected
-   internal endpoint.
-4. core-service re-resolves Portfolio/Venue facts and validates the target
-   manifest. For Demo Futures it acquires admission on
-   `(exchange, environment, credential_fingerprint, market, symbol)` before any
-   exchange change. Reusing the same credential through another Venue does not
-   bypass the conflict key.
-5. Targets are processed in stable route/symbol order. core-service reads the
-   current leverage, durably journals the rollback obligation before a POST,
-   changes only mismatched symbols, and reads back every target. An unchanged
-   target is still read back and confirmed.
-6. Only after every target is confirmed, one database transaction inserts the
-   pending Session with deprecated scalar `0`, inserts per-target facts,
-   transfers admission holders from the operation to `session_id`, and marks
-   the launch operation committed.
-7. runtime-agent reads the committed Session back, verifies its identity and
-   facts, constructs a typed bootstrap, and only then creates the final Python
-   session worker.
-8. The final worker reloads the strategy and fails closed unless its source
-   digest, target set, effective values/sources, Venue/environment bindings,
-   confirmed leverage, and canonical wallet risk metadata all match the
-   bootstrap. It publishes `running` only after startup succeeds.
-
-The final worker therefore never starts on preview facts, an uncommitted
-Session, or a collapsed session-wide leverage value.
-
-## Failure, rollback, and recovery
-
-`LEVERAGE_ADMISSION_CONFLICT`, `LEVERAGE_QUERY_FAILED`,
-`LEVERAGE_SET_FAILED`, and `LEVERAGE_CONFIRMATION_FAILED` stop the launch. If
-an earlier symbol may have changed, core-service rolls changed targets back in
-reverse order and reads each one back. A confirmed rollback releases the
-operation's admissions; no runnable Session is created.
-
-If any rollback cannot be confirmed, the returned code is
-`LEVERAGE_ROLLBACK_FAILED`. The launch and admissions remain
-`recovery_required`, affected symbols remain visible, and a
-`strategy.leverage_rollback_failed` notification is placed in the durable
-outbox. The outbox dedupe key is the `launch_operation_id`, so retrying delivery
-cannot fan out duplicate warnings for the same operation. Operators must not
-describe this state as “the account was unchanged.”
-
-A successfully started Session does not restore Binance leverage when it
-finishes; an open position can still depend on that configuration. Terminal
-Session handling releases target admission. Runtime loss marks active Sessions
-`recoverable` and deliberately retains their target admissions. Resume creates
-a new Session and carries the user-selected predecessor as an explicit
-`resume_session_id`; ordinary Start never infers or takes over a Session.
-core-service validates that predecessor against the same user, Portfolio,
-environment, strategy, and stopped/recoverable source status. In one database
-transaction it changes a recoverable predecessor to `stopped` with
-`SESSION_SUPERSEDED_BY_RESUME`, releases its admissions, and acquires the new
-launch admissions. Any new admission conflict rolls the whole transaction
-back, leaving the predecessor recoverable and still protected. The user still
-selects a routable runtime, the original strategy must be active for the
-read-only preview, and Start reloads current code and repeats preparation,
-apply/readback, facts, and bootstrap. The predecessor remains audit history
-and is never changed back to `running`.
-
-## Environment and runtime boundaries
-
-| Environment/path | Leverage behavior |
-|---|---|
-| Backtest (`environment=0`) | Uses the same declaration resolver and simulated Futures wallet metadata. It performs no Binance call and acquires no live admission; committed facts are simulated as confirmed. |
-| Demo (`environment=1`) | Reads and, on Start only, changes Binance Futures leverage per declared symbol. |
-| Live (`environment=2`) | Remains rollout guarded and fails closed. |
-| Spot | Has no leverage intent, preview row, Binance leverage call, or Session leverage fact. |
-| strategy-debugger-cli | Reuses the same offline replay/declaration resolution and simulated wallet semantics. It has no leverage override and makes no Binance call. |
-
-Session routing uses only `runtime_id`. Hosted, self-hosted, and guarded bare
-runtimes call typed platform methods through RuntimeChannel. They do not
-receive core-service, order, PostgreSQL, Kafka, credential, or internal endpoint
-addresses. Venue credential resolution and Binance calls remain in
-core-service.
-
-## Durable schema and historical reads
-
-The portfolio schema owns these additive objects:
-
-| Migration | Objects/meaning |
-|---|---|
-| `0006_strategy_owned_futures_leverage.sql` | `strategy_launch_operations`, per-target `strategy_leverage_apply_attempts`, credential/symbol `strategy_target_admissions`, and authoritative `strategy_session_target_facts`. |
-| `0007_strategy_leverage_notification_outbox.sql` | Crash-safe, operation-deduplicated rollback-failure delivery. |
-| `0008_strategy_session_deprecated_leverage_zero.sql` | Relaxes `chk_strategy_sessions_leverage` from `> 0` to `>= 0`; it does not change the column default or rewrite history. |
-
-`strategy_sessions.leverage` remains wire/schema-compatible with default `1`
-for historical readers. Zero has a narrow meaning: a new coordinated Session
-does not claim one session-wide leverage. New Futures Sessions read
-`strategy_session_target_facts`; mixed targets must never be flattened to the
-scalar. New Spot-only coordinated Sessions also store zero and expose no
-Futures leverage. Only a historical Session with no target facts may display a
-positive legacy scalar. Negative values remain invalid.
-
-Generate deployment SQL only with
-`hushine-deploy/scripts/db/render-schema-bundle.sh`. Do not hand-edit
-`db/generated/portfolio.sql`, remove applied ledger entries, or delete launch,
-fact, admission, or outbox history to recover an operation.
-
-## UI and test-strategy behavior
-
-Start Demo, Backtest, Portfolio Resume, and Session-detail Resume contain no
-leverage input and do not send leverage in new requests. The Preview list is
-the user's notice of changes that Start may make; clicking Start is the
-confirmation. Apply is single-flight and the result keeps per-target status,
-previous/current/confirmed values, structured errors, and rollback state.
-Session detail prefers durable target facts and labels the old scalar only as
-`Historical session / Legacy session value` when facts are absent.
-
-The current BTC/ETH/ZEC functional template
-`strategy-service/strategy_templates/btc_eth_zec_cross_momentum.py` declares
-standard `LEVERAGE = 10`. It sizes each target from the canonical confirmed
-metadata and `wallet_balance * 1%`, accepts only canonical margin mode `cross`,
-and has no `REQUIRED_LEVERAGE` or raw `CROSSED` compatibility branch. Its
-active-issue set emits a warning once while the same account, symbol, or sizing
-problem persists; after recovery, a later recurrence may warn again.
-
-## Verification references
-
-The implementation was inspected at these exact code commits:
-
-| Repository | Commit |
-|---|---|
-| `strategy-library` | `cb89b4c3413f6cd9bba4aab2da589862c048ba76` |
-| `strategy-service` | `eb18951b7542621e69a283d24040b1dd4dd81966` |
-| `core-service` | `2f710a8c252299b11abb8626a630db79c07288cf` |
-| `control-panel-service` | `ada3ab0614fbec84e8420a0c1ded5fac11e4108b` |
-| `quant-handler` | `74575981de53f5cb4313171895718d03d2ff4d0c` |
-| `quant-frontend` | `6e59bd1a5c55e65a0041722fffae07996b90be54` |
-| `strategy-debugger-cli` | `652c09bf1aab5f1bad9fbd4a14adfeaf02731264` |
-
-These references establish the code inspected for this guide; release owners
-must update them when behavior changes.
+页面和 API 读取 Session 杠杆时必须展示 `strategy_session_target_facts` 的逐 target 结果，
+Spot Session 返回空的 Futures facts。
