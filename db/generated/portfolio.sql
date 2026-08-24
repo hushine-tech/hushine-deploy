@@ -237,7 +237,12 @@ CREATE TABLE IF NOT EXISTS reconciliation_runs (
     hard_pass boolean NOT NULL,
     soft_pass boolean NOT NULL,
     portfolio_diff_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-    venue_diffs_json jsonb DEFAULT '{}'::jsonb NOT NULL
+    venue_diffs_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    repair_source text DEFAULT ''::text NOT NULL,
+    repair_status text DEFAULT 'compare_only'::text NOT NULL,
+    repaired_identities_json jsonb DEFAULT '[]'::jsonb NOT NULL,
+    CONSTRAINT chk_reconciliation_runs_repair_source CHECK (repair_source IN ('', 'user_stream_reconnect', 'order_event', 'periodic', 'accepted_timeout', 'stop_close')),
+    CONSTRAINT chk_reconciliation_runs_repair_status CHECK (repair_status IN ('compare_only', 'pending', 'succeeded', 'failed'))
 );
 
 
@@ -389,13 +394,11 @@ CREATE TABLE IF NOT EXISTS strategy_sessions (
     session_type text DEFAULT ''::text NOT NULL,
     runtime_version text DEFAULT ''::text NOT NULL,
     session_name text DEFAULT ''::text NOT NULL,
-    leverage double precision DEFAULT 1 NOT NULL,
     indicator_finalization_pending boolean DEFAULT false NOT NULL,
     started_at timestamp with time zone,
     completed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT chk_strategy_sessions_environment CHECK ((environment = ANY (ARRAY[0, 1, 2]))),
-    CONSTRAINT chk_strategy_sessions_leverage CHECK ((leverage >= (0)::double precision)),
     CONSTRAINT chk_strategy_sessions_status CHECK ((status = ANY (ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])))
 );
 
@@ -1183,6 +1186,261 @@ END IF;
 END
 $baseline$;
 
+
+--
+-- Name: spot_session_risk_facts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS spot_session_risk_facts (
+    snapshot_id text PRIMARY KEY,
+    session_id text NOT NULL,
+    portfolio_id bigint NOT NULL,
+    venue_id bigint NOT NULL,
+    user_id bigint NOT NULL,
+    exchange smallint NOT NULL,
+    environment smallint NOT NULL,
+    market smallint NOT NULL,
+    symbol text NOT NULL,
+    captured_at timestamp with time zone NOT NULL,
+    facts_json jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_spot_session_risk_facts_environment CHECK (environment = ANY (ARRAY[0, 1, 2])),
+    CONSTRAINT chk_spot_session_risk_facts_market CHECK (market = 1),
+    CONSTRAINT uq_spot_session_risk_facts_route UNIQUE (session_id, venue_id, exchange, market, symbol)
+);
+
+
+--
+-- Name: strategy_launch_operations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS strategy_launch_operations (
+    operation_id text PRIMARY KEY,
+    user_id bigint NOT NULL,
+    portfolio_id bigint NOT NULL,
+    strategy_id bigint,
+    session_id text DEFAULT ''::text NOT NULL,
+    environment smallint NOT NULL,
+    runtime_id text DEFAULT ''::text NOT NULL,
+    state text DEFAULT 'applying'::text NOT NULL,
+    primary_error_code text DEFAULT ''::text NOT NULL,
+    primary_error_message text DEFAULT ''::text NOT NULL,
+    primary_error_detail_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT strategy_launch_operations_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT strategy_launch_operations_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES portfolios(portfolio_id) ON DELETE RESTRICT,
+    CONSTRAINT chk_strategy_launch_operations_identity CHECK (btrim(operation_id) <> ''),
+    CONSTRAINT chk_strategy_launch_operations_environment CHECK (environment IN (0, 1, 2)),
+    CONSTRAINT chk_strategy_launch_operations_state CHECK (state IN ('applying', 'committed', 'failed', 'recovery_required')),
+    CONSTRAINT chk_strategy_launch_operations_error_detail CHECK (jsonb_typeof(primary_error_detail_json) = 'object')
+);
+
+
+--
+-- Name: strategy_leverage_apply_attempts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS strategy_leverage_apply_attempts (
+    operation_id text NOT NULL,
+    ordinal integer NOT NULL,
+    venue_id bigint NOT NULL,
+    exchange smallint NOT NULL,
+    environment smallint NOT NULL,
+    market smallint NOT NULL,
+    symbol text NOT NULL,
+    previous_leverage integer,
+    target_leverage integer NOT NULL,
+    confirmed_leverage integer,
+    apply_status text DEFAULT 'pending'::text NOT NULL,
+    apply_error_code text DEFAULT ''::text NOT NULL,
+    apply_error_message text DEFAULT ''::text NOT NULL,
+    apply_retryable boolean DEFAULT false NOT NULL,
+    rollback_status text DEFAULT 'not_required'::text NOT NULL,
+    rollback_error_code text DEFAULT ''::text NOT NULL,
+    rollback_error_message text DEFAULT ''::text NOT NULL,
+    rollback_retryable boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (operation_id, ordinal),
+    CONSTRAINT strategy_leverage_apply_attempts_operation_id_fkey FOREIGN KEY (operation_id) REFERENCES strategy_launch_operations(operation_id) ON DELETE CASCADE,
+    CONSTRAINT strategy_leverage_apply_attempts_venue_id_fkey FOREIGN KEY (venue_id) REFERENCES venues(venue_id) ON DELETE RESTRICT,
+    CONSTRAINT uq_strategy_leverage_apply_attempts_target UNIQUE (operation_id, venue_id, market, symbol),
+    CONSTRAINT chk_strategy_leverage_apply_attempts_ordinal CHECK (ordinal >= 0),
+    CONSTRAINT chk_strategy_leverage_apply_attempts_route CHECK (
+        exchange IN (1, 2)
+        AND environment IN (0, 1, 2)
+        AND market IN (2, 3)
+        AND symbol = upper(btrim(symbol))
+        AND symbol <> ''
+    ),
+    CONSTRAINT chk_strategy_leverage_apply_attempts_values CHECK (
+        target_leverage > 0
+        AND (previous_leverage IS NULL OR previous_leverage > 0)
+        AND (confirmed_leverage IS NULL OR confirmed_leverage > 0)
+    ),
+    CONSTRAINT chk_strategy_leverage_apply_attempts_apply_status CHECK (apply_status IN (
+        'pending', 'unchanged', 'confirmed', 'set_failed', 'confirm_failed', 'unknown'
+    )),
+    CONSTRAINT chk_strategy_leverage_apply_attempts_rollback_status CHECK (rollback_status IN (
+        'not_required', 'pending', 'rolled_back', 'rollback_failed', 'unknown'
+    ))
+);
+
+
+--
+-- Name: strategy_target_admissions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS strategy_target_admissions (
+    operation_id text NOT NULL,
+    exchange smallint NOT NULL,
+    environment smallint NOT NULL,
+    credential_fingerprint text NOT NULL,
+    market smallint NOT NULL,
+    symbol text NOT NULL,
+    venue_id bigint NOT NULL,
+    session_id text,
+    state text DEFAULT 'active'::text NOT NULL,
+    lease_expires_at timestamp with time zone,
+    recovery_error_code text DEFAULT ''::text NOT NULL,
+    recovery_error_message text DEFAULT ''::text NOT NULL,
+    acquired_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    released_at timestamp with time zone,
+    PRIMARY KEY (operation_id, exchange, environment, credential_fingerprint, market, symbol),
+    CONSTRAINT strategy_target_admissions_operation_id_fkey FOREIGN KEY (operation_id) REFERENCES strategy_launch_operations(operation_id) ON DELETE CASCADE,
+    CONSTRAINT strategy_target_admissions_venue_id_fkey FOREIGN KEY (venue_id) REFERENCES venues(venue_id) ON DELETE RESTRICT,
+    CONSTRAINT strategy_target_admissions_session_id_fkey FOREIGN KEY (session_id) REFERENCES strategy_sessions(session_id) ON DELETE SET NULL,
+    CONSTRAINT chk_strategy_target_admissions_route CHECK (
+        exchange IN (1, 2)
+        AND environment IN (1, 2)
+        AND market IN (2, 3)
+        AND btrim(credential_fingerprint) <> ''
+        AND symbol = upper(btrim(symbol))
+        AND symbol <> ''
+    ),
+    CONSTRAINT chk_strategy_target_admissions_state CHECK (state IN ('active', 'recovery_required', 'released')),
+    CONSTRAINT chk_strategy_target_admissions_release CHECK (
+        (state = 'released' AND released_at IS NOT NULL)
+        OR (state <> 'released' AND released_at IS NULL)
+    ),
+    CONSTRAINT chk_strategy_target_admissions_lease CHECK (
+        (state = 'active' AND (
+            (session_id IS NULL AND lease_expires_at IS NOT NULL)
+            OR (session_id IS NOT NULL AND lease_expires_at IS NULL)
+        ))
+        OR (state <> 'active' AND lease_expires_at IS NULL)
+    )
+);
+
+
+--
+-- Name: strategy_session_target_facts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS strategy_session_target_facts (
+    session_id text NOT NULL,
+    venue_id bigint NOT NULL,
+    exchange smallint NOT NULL,
+    environment smallint NOT NULL,
+    market smallint NOT NULL,
+    symbol text NOT NULL,
+    effective_leverage integer NOT NULL,
+    leverage_source text NOT NULL,
+    previous_leverage integer,
+    confirmed_leverage integer NOT NULL,
+    confirmed_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (session_id, venue_id, market, symbol),
+    CONSTRAINT strategy_session_target_facts_session_id_fkey FOREIGN KEY (session_id) REFERENCES strategy_sessions(session_id) ON DELETE CASCADE,
+    CONSTRAINT strategy_session_target_facts_session_venue_fkey FOREIGN KEY (session_id, venue_id) REFERENCES session_venues(session_id, venue_id) ON DELETE CASCADE,
+    CONSTRAINT chk_strategy_session_target_facts_route CHECK (
+        exchange IN (1, 2)
+        AND environment IN (0, 1, 2)
+        AND market IN (2, 3)
+        AND symbol = upper(btrim(symbol))
+        AND symbol <> ''
+    ),
+    CONSTRAINT chk_strategy_session_target_facts_values CHECK (
+        effective_leverage > 0
+        AND confirmed_leverage > 0
+        AND (previous_leverage IS NULL OR previous_leverage > 0)
+    ),
+    CONSTRAINT chk_strategy_session_target_facts_source CHECK (leverage_source IN (
+        'order_target', 'strategy_default', 'platform_default'
+    ))
+);
+
+
+--
+-- Name: strategy_leverage_notification_outbox; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS strategy_leverage_notification_outbox (
+    dedupe_key text PRIMARY KEY,
+    operation_id text NOT NULL UNIQUE,
+    user_id bigint NOT NULL,
+    portfolio_id bigint NOT NULL,
+    event_type text NOT NULL,
+    affected_symbols text[] NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    claim_token text DEFAULT ''::text NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_error text DEFAULT ''::text NOT NULL,
+    claimed_at timestamp with time zone,
+    delivered_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT strategy_leverage_notification_outbox_operation_id_fkey FOREIGN KEY (operation_id) REFERENCES strategy_launch_operations(operation_id) ON DELETE RESTRICT,
+    CONSTRAINT strategy_leverage_notification_outbox_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT strategy_leverage_notification_outbox_portfolio_id_fkey FOREIGN KEY (portfolio_id) REFERENCES portfolios(portfolio_id) ON DELETE RESTRICT,
+    CONSTRAINT chk_strategy_leverage_notification_outbox_identity CHECK (
+        btrim(dedupe_key) <> ''
+        AND operation_id = dedupe_key
+        AND event_type = 'strategy.leverage_rollback_failed'
+    ),
+    CONSTRAINT chk_strategy_leverage_notification_outbox_symbols CHECK (
+        cardinality(affected_symbols) > 0
+        AND array_position(affected_symbols, NULL) IS NULL
+    ),
+    CONSTRAINT chk_strategy_leverage_notification_outbox_status CHECK (status IN ('pending', 'delivering', 'retry', 'delivered')),
+    CONSTRAINT chk_strategy_leverage_notification_outbox_attempts CHECK (attempt_count >= 0),
+    CONSTRAINT chk_strategy_leverage_notification_outbox_delivery CHECK (
+        (status = 'delivering' AND btrim(claim_token) <> '' AND claimed_at IS NOT NULL)
+        OR (status = 'delivered' AND btrim(claim_token) = '' AND delivered_at IS NOT NULL)
+        OR (status IN ('pending', 'retry') AND btrim(claim_token) = '' AND delivered_at IS NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_spot_session_risk_facts_session
+    ON spot_session_risk_facts (session_id, user_id, captured_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_run_id
+    ON reconciliation_runs (run_id, "time" DESC);
+
+CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_pending_run_id
+    ON reconciliation_runs (run_id, "time" DESC)
+    WHERE repair_status = 'pending';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uidx_strategy_target_admissions_holder
+    ON strategy_target_admissions
+    (exchange, environment, credential_fingerprint, market, symbol)
+    WHERE state IN ('active', 'recovery_required');
+
+CREATE INDEX IF NOT EXISTS idx_strategy_target_admissions_session
+    ON strategy_target_admissions (session_id, state)
+    WHERE session_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_strategy_session_target_facts_session
+    ON strategy_session_target_facts (session_id, venue_id, symbol);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_leverage_notification_outbox_drain
+    ON strategy_leverage_notification_outbox (next_attempt_at, created_at)
+    WHERE status IN ('pending', 'retry', 'delivering');
+
 CREATE OR REPLACE FUNCTION strategy_indicator_chunks_v2_validate()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1424,693 +1682,4 @@ ON CONFLICT (plan_code) DO UPDATE SET
     custom_rate_limit_burst = EXCLUDED.custom_rate_limit_burst,
     updated_at = NOW();
 INSERT INTO schema_migrations (filename) VALUES ('0001_current_schema_baseline.sql') ON CONFLICT (filename) DO NOTHING;
-
--- Source: core-service/internal/storage/migrations/0002_spot_risk_facts.sql
-CREATE TABLE IF NOT EXISTS spot_session_risk_facts (
-    snapshot_id text PRIMARY KEY,
-    session_id text NOT NULL,
-    portfolio_id bigint NOT NULL,
-    venue_id bigint NOT NULL,
-    user_id bigint NOT NULL,
-    exchange smallint NOT NULL,
-    environment smallint NOT NULL,
-    market smallint NOT NULL,
-    symbol text NOT NULL,
-    captured_at timestamp with time zone NOT NULL,
-    facts_json jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT chk_spot_session_risk_facts_environment CHECK (environment = ANY (ARRAY[0, 1, 2])),
-    CONSTRAINT chk_spot_session_risk_facts_market CHECK (market = 1),
-    CONSTRAINT uq_spot_session_risk_facts_route UNIQUE (session_id, venue_id, exchange, market, symbol)
-);
-
-CREATE INDEX IF NOT EXISTS idx_spot_session_risk_facts_session
-    ON spot_session_risk_facts (session_id, user_id, captured_at DESC);
-INSERT INTO schema_migrations (filename) VALUES ('0002_spot_risk_facts.sql') ON CONFLICT (filename) DO NOTHING;
-
--- Source: core-service/internal/storage/migrations/0003_spot_reconciliation_repair.sql
-ALTER TABLE reconciliation_runs
-    ADD COLUMN IF NOT EXISTS repair_source text DEFAULT ''::text NOT NULL,
-    ADD COLUMN IF NOT EXISTS repair_status text DEFAULT 'compare_only'::text NOT NULL,
-    ADD COLUMN IF NOT EXISTS repaired_identities_json jsonb DEFAULT '[]'::jsonb NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_run_id
-    ON reconciliation_runs (run_id, "time" DESC);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conrelid = 'reconciliation_runs'::regclass
-          AND conname = 'chk_reconciliation_runs_repair_source'
-    ) THEN
-        ALTER TABLE reconciliation_runs
-            ADD CONSTRAINT chk_reconciliation_runs_repair_source
-            CHECK (repair_source IN ('', 'user_stream_reconnect', 'order_event', 'periodic', 'accepted_timeout', 'stop_close'))
-            NOT VALID;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conrelid = 'reconciliation_runs'::regclass
-          AND conname = 'chk_reconciliation_runs_repair_status'
-    ) THEN
-        ALTER TABLE reconciliation_runs
-            ADD CONSTRAINT chk_reconciliation_runs_repair_status
-            CHECK (repair_status IN ('compare_only', 'succeeded', 'failed'))
-            NOT VALID;
-    END IF;
-END
-$$;
-INSERT INTO schema_migrations (filename) VALUES ('0003_spot_reconciliation_repair.sql') ON CONFLICT (filename) DO NOTHING;
-
--- Source: core-service/internal/storage/migrations/0004_spot_close_reconciliation_pending.sql
--- Spot close must persist a reconciliation tombstone before returning a
--- failure response. Keep the historical terminal rows and add a pending state
--- without changing the 0001 baseline.
-
-ALTER TABLE reconciliation_runs
-    DROP CONSTRAINT IF EXISTS chk_reconciliation_runs_repair_status;
-
-ALTER TABLE reconciliation_runs
-    ADD CONSTRAINT chk_reconciliation_runs_repair_status
-    CHECK (repair_status IN ('compare_only', 'pending', 'succeeded', 'failed'))
-    NOT VALID;
-
-CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_pending_run_id
-    ON reconciliation_runs (run_id, "time" DESC)
-    WHERE repair_status = 'pending';
-INSERT INTO schema_migrations (filename) VALUES ('0004_spot_close_reconciliation_pending.sql') ON CONFLICT (filename) DO NOTHING;
-
--- Source: core-service/internal/storage/migrations/0005_runtime_indicator_v2.sql
-ALTER TABLE strategy_sessions
-    ADD COLUMN IF NOT EXISTS indicator_finalization_pending boolean
-    DEFAULT false NOT NULL;
-
-DO $indicator_v2_cutover$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'strategy_indicator_chunks'
-          AND column_name = 'values_json'
-    ) THEN
-        IF current_setting('hushine.indicator_v2_cutover', true)
-           IS DISTINCT FROM 'approved' THEN
-            RAISE EXCEPTION
-                'INDICATOR_V2_CUTOVER_AUTHORIZATION_REQUIRED: legacy indicator tables were not changed';
-        END IF;
-        DROP TABLE strategy_indicator_chunks;
-        DROP TABLE strategy_indicator_definitions;
-    END IF;
-END
-$indicator_v2_cutover$;
-
-CREATE TABLE IF NOT EXISTS strategy_indicator_definitions (
-    session_id text NOT NULL,
-    strategy_id bigint DEFAULT 0 NOT NULL,
-    stream_key text NOT NULL,
-    indicator_key text NOT NULL,
-    name text DEFAULT '' NOT NULL,
-    type text NOT NULL,
-    pane text NOT NULL,
-    color text DEFAULT '' NOT NULL,
-    unit text DEFAULT '' NOT NULL,
-    description text DEFAULT '' NOT NULL,
-    config_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-    protocol_version smallint DEFAULT 2 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    PRIMARY KEY (session_id, stream_key, indicator_key),
-    CONSTRAINT strategy_indicator_definitions_session_id_fkey
-        FOREIGN KEY (session_id)
-        REFERENCES strategy_sessions(session_id)
-        ON DELETE CASCADE,
-    CONSTRAINT chk_strategy_indicator_definitions_type
-        CHECK (type IN ('line', 'histogram', 'marker')),
-    CONSTRAINT chk_strategy_indicator_definitions_config_object
-        CHECK (jsonb_typeof(config_json) = 'object'),
-    CONSTRAINT chk_strategy_indicator_definitions_protocol
-        CHECK (protocol_version = 2)
-);
-
-CREATE TABLE IF NOT EXISTS strategy_indicator_chunks (
-    session_id text NOT NULL,
-    stream_key text NOT NULL,
-    indicator_key text NOT NULL,
-    chunk_index integer NOT NULL,
-    start_sequence bigint NOT NULL,
-    end_sequence bigint NOT NULL,
-    start_time_ms bigint NOT NULL,
-    end_time_ms bigint NOT NULL,
-    interval_ms bigint NOT NULL,
-    count integer NOT NULL,
-    times_ms bigint[] NOT NULL,
-    scalar_values double precision[] DEFAULT '{}'::double precision[] NOT NULL,
-    markers_json jsonb DEFAULT '[]'::jsonb NOT NULL,
-    revision bigint NOT NULL,
-    finalized boolean DEFAULT false NOT NULL,
-    protocol_version smallint DEFAULT 2 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    PRIMARY KEY (session_id, stream_key, indicator_key, chunk_index),
-    CONSTRAINT strategy_indicator_chunks_definition_fkey
-        FOREIGN KEY (session_id, stream_key, indicator_key)
-        REFERENCES strategy_indicator_definitions(session_id, stream_key, indicator_key)
-        ON DELETE CASCADE,
-    CONSTRAINT chk_strategy_indicator_chunks_chunk_index
-        CHECK (chunk_index >= 0),
-    CONSTRAINT chk_strategy_indicator_chunks_start_sequence_nonnegative
-        CHECK (start_sequence >= 0),
-    CONSTRAINT chk_strategy_indicator_chunks_end_sequence_order
-        CHECK (end_sequence >= start_sequence),
-    CONSTRAINT chk_strategy_indicator_chunks_start_time_positive
-        CHECK (start_time_ms > 0),
-    CONSTRAINT chk_strategy_indicator_chunks_end_time_positive
-        CHECK (end_time_ms > 0),
-    CONSTRAINT chk_strategy_indicator_chunks_interval_positive
-        CHECK (interval_ms > 0),
-    CONSTRAINT chk_strategy_indicator_chunks_revision_positive
-        CHECK (revision > 0),
-    CONSTRAINT chk_strategy_indicator_chunks_count
-        CHECK (count > 0 AND count <= 1024),
-    CONSTRAINT chk_strategy_indicator_chunks_sequence
-        CHECK (
-            start_sequence = chunk_index::bigint * 1024
-            AND end_sequence = start_sequence + count - 1
-        ),
-    CONSTRAINT chk_strategy_indicator_chunks_times
-        CHECK (
-            cardinality(times_ms) = count
-            AND array_ndims(times_ms) = 1
-            AND array_lower(times_ms, 1) = 1
-            AND array_upper(times_ms, 1) = count
-            AND start_time_ms = times_ms[1]
-            AND end_time_ms = times_ms[count]
-        ),
-    CONSTRAINT chk_strategy_indicator_chunks_revision
-        CHECK (revision = count),
-    CONSTRAINT chk_strategy_indicator_chunks_markers_array
-        CHECK (jsonb_typeof(markers_json) = 'array'),
-    CONSTRAINT chk_strategy_indicator_chunks_protocol
-        CHECK (protocol_version = 2)
-);
-
-CREATE INDEX IF NOT EXISTS idx_strategy_indicator_definitions_session
-    ON strategy_indicator_definitions (session_id, stream_key);
-CREATE INDEX IF NOT EXISTS idx_strategy_indicator_chunks_window
-    ON strategy_indicator_chunks (
-        session_id,
-        stream_key,
-        indicator_key,
-        start_time_ms,
-        end_time_ms
-    );
-CREATE INDEX IF NOT EXISTS idx_strategy_indicator_chunks_finalized
-    ON strategy_indicator_chunks (
-        session_id,
-        stream_key,
-        indicator_key,
-        finalized
-    );
-
-CREATE OR REPLACE FUNCTION strategy_indicator_chunks_v2_validate()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $indicator_v2$
-DECLARE
-    definition_type text;
-    marker jsonb;
-    marker_sequence bigint;
-    marker_offset integer;
-    marker_time_ms bigint;
-    marker_price double precision;
-    time_index integer;
-    scalar_value double precision;
-BEGIN
-    IF TG_OP = 'INSERT' AND NEW.finalized THEN
-        RAISE EXCEPTION 'indicator chunk must be inserted open';
-    END IF;
-    IF TG_OP = 'UPDATE' AND OLD.finalized THEN
-        RAISE EXCEPTION 'finalized indicator chunk is immutable';
-    END IF;
-    IF TG_OP = 'UPDATE'
-       AND NEW.finalized
-       AND NOT OLD.finalized
-       AND ROW(
-           NEW.session_id,
-           NEW.stream_key,
-           NEW.indicator_key,
-           NEW.chunk_index,
-           NEW.start_sequence,
-           NEW.end_sequence,
-           NEW.start_time_ms,
-           NEW.end_time_ms,
-           NEW.interval_ms,
-           NEW.count,
-           NEW.times_ms,
-           NEW.scalar_values,
-           NEW.markers_json,
-           NEW.revision,
-           NEW.protocol_version,
-           NEW.created_at
-       ) IS DISTINCT FROM ROW(
-           OLD.session_id,
-           OLD.stream_key,
-           OLD.indicator_key,
-           OLD.chunk_index,
-           OLD.start_sequence,
-           OLD.end_sequence,
-           OLD.start_time_ms,
-           OLD.end_time_ms,
-           OLD.interval_ms,
-           OLD.count,
-           OLD.times_ms,
-           OLD.scalar_values,
-           OLD.markers_json,
-           OLD.revision,
-           OLD.protocol_version,
-           OLD.created_at
-       ) THEN
-        RAISE EXCEPTION 'indicator finalization cannot mutate chunk payload';
-    END IF;
-
-    SELECT type INTO definition_type
-    FROM strategy_indicator_definitions
-    WHERE session_id = NEW.session_id
-      AND stream_key = NEW.stream_key
-      AND indicator_key = NEW.indicator_key;
-
-    IF definition_type IS NULL THEN
-        RAISE EXCEPTION 'indicator definition is required before chunk';
-    END IF;
-    IF jsonb_typeof(NEW.markers_json) <> 'array' THEN
-        RAISE EXCEPTION 'markers_json must be an array';
-    END IF;
-    IF array_ndims(NEW.times_ms) <> 1
-       OR array_lower(NEW.times_ms, 1) <> 1
-       OR array_upper(NEW.times_ms, 1) <> NEW.count THEN
-        RAISE EXCEPTION 'times_ms must use one-based contiguous bounds';
-    END IF;
-    FOR time_index IN 1..cardinality(NEW.times_ms)
-    LOOP
-        IF NEW.times_ms[time_index] <= 0
-           OR (
-               time_index > 1
-               AND NEW.times_ms[time_index] <= NEW.times_ms[time_index - 1]
-           ) THEN
-            RAISE EXCEPTION 'times_ms must contain positive strictly increasing values';
-        END IF;
-    END LOOP;
-    FOREACH scalar_value IN ARRAY NEW.scalar_values
-    LOOP
-        IF scalar_value IS NOT NULL
-           AND (
-               scalar_value = 'NaN'::double precision
-               OR scalar_value = 'Infinity'::double precision
-               OR scalar_value = '-Infinity'::double precision
-           ) THEN
-            RAISE EXCEPTION 'scalar indicator values must be finite';
-        END IF;
-    END LOOP;
-    IF definition_type IN ('line', 'histogram') THEN
-        IF cardinality(NEW.scalar_values) <> NEW.count THEN
-            RAISE EXCEPTION 'scalar indicator cardinality must equal count';
-        END IF;
-        IF array_ndims(NEW.scalar_values) <> 1
-           OR array_lower(NEW.scalar_values, 1) <> 1
-           OR array_upper(NEW.scalar_values, 1) <> NEW.count THEN
-            RAISE EXCEPTION 'scalar indicator values must use one-based contiguous bounds';
-        END IF;
-        IF jsonb_array_length(NEW.markers_json) <> 0 THEN
-            RAISE EXCEPTION 'scalar indicator cannot contain markers';
-        END IF;
-    ELSIF definition_type = 'marker' THEN
-        IF cardinality(NEW.scalar_values) <> 0 THEN
-            RAISE EXCEPTION 'marker indicator cannot contain scalar values';
-        END IF;
-    ELSE
-        RAISE EXCEPTION 'unsupported indicator type: %', definition_type;
-    END IF;
-
-    FOR marker IN SELECT value FROM jsonb_array_elements(NEW.markers_json)
-    LOOP
-        IF jsonb_typeof(marker) <> 'object'
-           OR NOT (marker ? 'sequence')
-           OR NOT (marker ? 'offset')
-           OR NOT (marker ? 'time_ms')
-           OR NOT (marker ? 'text')
-           OR NOT (marker ? 'color')
-           OR NOT (marker ? 'position')
-           OR NOT (marker ? 'shape')
-           OR jsonb_typeof(marker -> 'sequence') <> 'number'
-           OR jsonb_typeof(marker -> 'offset') <> 'number'
-           OR jsonb_typeof(marker -> 'time_ms') <> 'number'
-           OR jsonb_typeof(marker -> 'text') <> 'string'
-           OR jsonb_typeof(marker -> 'color') <> 'string'
-           OR jsonb_typeof(marker -> 'position') <> 'string'
-           OR jsonb_typeof(marker -> 'shape') <> 'string'
-           OR (marker ->> 'sequence') !~ '^[0-9]+$'
-           OR (marker ->> 'offset') !~ '^[0-9]+$'
-           OR (marker ->> 'time_ms') !~ '^[0-9]+$' THEN
-            RAISE EXCEPTION 'marker fields have invalid types';
-        END IF;
-        marker_sequence := (marker ->> 'sequence')::bigint;
-        marker_offset := (marker ->> 'offset')::integer;
-        marker_time_ms := (marker ->> 'time_ms')::bigint;
-        IF marker_sequence < NEW.start_sequence
-           OR marker_sequence > NEW.end_sequence
-           OR marker_offset <> marker_sequence - NEW.start_sequence
-           OR marker_offset < 0
-           OR marker_offset >= NEW.count
-           OR marker_time_ms <> NEW.times_ms[marker_offset + 1] THEN
-            RAISE EXCEPTION 'marker sequence, offset, and time_ms do not match chunk';
-        END IF;
-        IF (marker ->> 'position') NOT IN ('', 'aboveBar', 'belowBar', 'inBar') THEN
-            RAISE EXCEPTION 'marker position is invalid';
-        END IF;
-        IF (marker ->> 'shape') NOT IN ('', 'circle', 'square', 'arrowUp', 'arrowDown') THEN
-            RAISE EXCEPTION 'marker shape is invalid';
-        END IF;
-        IF marker ? 'price' THEN
-            IF jsonb_typeof(marker -> 'price') <> 'number' THEN
-                RAISE EXCEPTION 'marker price must be numeric';
-            END IF;
-            BEGIN
-                marker_price := (marker ->> 'price')::double precision;
-            EXCEPTION
-                WHEN numeric_value_out_of_range OR invalid_text_representation THEN
-                    RAISE EXCEPTION 'marker price must be finite';
-            END;
-            IF marker_price = 'NaN'::double precision
-               OR marker_price = 'Infinity'::double precision
-               OR marker_price = '-Infinity'::double precision THEN
-                RAISE EXCEPTION 'marker price must be finite';
-            END IF;
-        END IF;
-    END LOOP;
-    RETURN NEW;
-END
-$indicator_v2$;
-
-CREATE OR REPLACE FUNCTION strategy_indicator_definitions_v2_immutable()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $indicator_v2_definition$
-BEGIN
-    RAISE EXCEPTION 'indicator definitions are immutable within a session';
-END
-$indicator_v2_definition$;
-
-DROP TRIGGER IF EXISTS strategy_indicator_definitions_v2_immutable_trigger
-    ON strategy_indicator_definitions;
-CREATE TRIGGER strategy_indicator_definitions_v2_immutable_trigger
-    BEFORE UPDATE ON strategy_indicator_definitions
-    FOR EACH ROW
-    EXECUTE FUNCTION strategy_indicator_definitions_v2_immutable();
-
-DROP TRIGGER IF EXISTS strategy_indicator_chunks_v2_validate_trigger
-    ON strategy_indicator_chunks;
-CREATE TRIGGER strategy_indicator_chunks_v2_validate_trigger
-    BEFORE INSERT OR UPDATE ON strategy_indicator_chunks
-    FOR EACH ROW
-    EXECUTE FUNCTION strategy_indicator_chunks_v2_validate();
-INSERT INTO schema_migrations (filename) VALUES ('0005_runtime_indicator_v2.sql') ON CONFLICT (filename) DO NOTHING;
-
--- Source: core-service/internal/storage/migrations/0006_strategy_owned_futures_leverage.sql
-CREATE TABLE IF NOT EXISTS strategy_launch_operations (
-    operation_id text PRIMARY KEY,
-    user_id bigint NOT NULL,
-    portfolio_id bigint NOT NULL,
-    strategy_id bigint,
-    session_id text DEFAULT ''::text NOT NULL,
-    environment smallint NOT NULL,
-    runtime_id text DEFAULT ''::text NOT NULL,
-    state text DEFAULT 'applying'::text NOT NULL,
-    primary_error_code text DEFAULT ''::text NOT NULL,
-    primary_error_message text DEFAULT ''::text NOT NULL,
-    primary_error_detail_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    completed_at timestamp with time zone,
-    CONSTRAINT strategy_launch_operations_user_id_fkey
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
-    CONSTRAINT strategy_launch_operations_portfolio_id_fkey
-        FOREIGN KEY (portfolio_id) REFERENCES portfolios(portfolio_id) ON DELETE RESTRICT,
-    CONSTRAINT chk_strategy_launch_operations_identity
-        CHECK (btrim(operation_id) <> ''),
-    CONSTRAINT chk_strategy_launch_operations_environment
-        CHECK (environment IN (0, 1, 2)),
-    CONSTRAINT chk_strategy_launch_operations_state
-        CHECK (state IN ('applying', 'committed', 'failed', 'recovery_required')),
-    CONSTRAINT chk_strategy_launch_operations_error_detail
-        CHECK (jsonb_typeof(primary_error_detail_json) = 'object')
-);
-
-CREATE TABLE IF NOT EXISTS strategy_leverage_apply_attempts (
-    operation_id text NOT NULL,
-    ordinal integer NOT NULL,
-    venue_id bigint NOT NULL,
-    exchange smallint NOT NULL,
-    environment smallint NOT NULL,
-    market smallint NOT NULL,
-    symbol text NOT NULL,
-    previous_leverage integer,
-    target_leverage integer NOT NULL,
-    confirmed_leverage integer,
-    apply_status text DEFAULT 'pending'::text NOT NULL,
-    apply_error_code text DEFAULT ''::text NOT NULL,
-    apply_error_message text DEFAULT ''::text NOT NULL,
-    apply_retryable boolean DEFAULT false NOT NULL,
-    rollback_status text DEFAULT 'not_required'::text NOT NULL,
-    rollback_error_code text DEFAULT ''::text NOT NULL,
-    rollback_error_message text DEFAULT ''::text NOT NULL,
-    rollback_retryable boolean DEFAULT false NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    PRIMARY KEY (operation_id, ordinal),
-    CONSTRAINT strategy_leverage_apply_attempts_operation_id_fkey
-        FOREIGN KEY (operation_id)
-        REFERENCES strategy_launch_operations(operation_id)
-        ON DELETE CASCADE,
-    CONSTRAINT strategy_leverage_apply_attempts_venue_id_fkey
-        FOREIGN KEY (venue_id) REFERENCES venues(venue_id) ON DELETE RESTRICT,
-    CONSTRAINT uq_strategy_leverage_apply_attempts_target
-        UNIQUE (operation_id, venue_id, market, symbol),
-    CONSTRAINT chk_strategy_leverage_apply_attempts_ordinal
-        CHECK (ordinal >= 0),
-    CONSTRAINT chk_strategy_leverage_apply_attempts_route
-        CHECK (
-            exchange IN (1, 2)
-            AND environment IN (0, 1, 2)
-            AND market IN (2, 3)
-            AND symbol = upper(btrim(symbol))
-            AND symbol <> ''
-        ),
-    CONSTRAINT chk_strategy_leverage_apply_attempts_values
-        CHECK (
-            target_leverage > 0
-            AND (previous_leverage IS NULL OR previous_leverage > 0)
-            AND (confirmed_leverage IS NULL OR confirmed_leverage > 0)
-        ),
-    CONSTRAINT chk_strategy_leverage_apply_attempts_apply_status
-        CHECK (apply_status IN (
-            'pending', 'unchanged', 'confirmed', 'set_failed',
-            'confirm_failed', 'unknown'
-        )),
-    CONSTRAINT chk_strategy_leverage_apply_attempts_rollback_status
-        CHECK (rollback_status IN (
-            'not_required', 'pending', 'rolled_back', 'rollback_failed', 'unknown'
-        ))
-);
-
-CREATE TABLE IF NOT EXISTS strategy_target_admissions (
-    operation_id text NOT NULL,
-    exchange smallint NOT NULL,
-    environment smallint NOT NULL,
-    credential_fingerprint text NOT NULL,
-    market smallint NOT NULL,
-    symbol text NOT NULL,
-    venue_id bigint NOT NULL,
-    session_id text,
-    state text DEFAULT 'active'::text NOT NULL,
-    lease_expires_at timestamp with time zone,
-    recovery_error_code text DEFAULT ''::text NOT NULL,
-    recovery_error_message text DEFAULT ''::text NOT NULL,
-    acquired_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    released_at timestamp with time zone,
-    PRIMARY KEY (
-        operation_id, exchange, environment, credential_fingerprint, market, symbol
-    ),
-    CONSTRAINT strategy_target_admissions_operation_id_fkey
-        FOREIGN KEY (operation_id)
-        REFERENCES strategy_launch_operations(operation_id)
-        ON DELETE CASCADE,
-    CONSTRAINT strategy_target_admissions_venue_id_fkey
-        FOREIGN KEY (venue_id) REFERENCES venues(venue_id) ON DELETE RESTRICT,
-    CONSTRAINT strategy_target_admissions_session_id_fkey
-        FOREIGN KEY (session_id)
-        REFERENCES strategy_sessions(session_id)
-        ON DELETE SET NULL,
-    CONSTRAINT chk_strategy_target_admissions_route
-        CHECK (
-            exchange IN (1, 2)
-            AND environment IN (1, 2)
-            AND market IN (2, 3)
-            AND btrim(credential_fingerprint) <> ''
-            AND symbol = upper(btrim(symbol))
-            AND symbol <> ''
-        ),
-    CONSTRAINT chk_strategy_target_admissions_state
-        CHECK (state IN ('active', 'recovery_required', 'released')),
-    CONSTRAINT chk_strategy_target_admissions_release
-        CHECK (
-            (state = 'released' AND released_at IS NOT NULL)
-            OR (state <> 'released' AND released_at IS NULL)
-        )
-);
-
-ALTER TABLE strategy_target_admissions
-    ADD COLUMN IF NOT EXISTS lease_expires_at timestamp with time zone;
-
-DO $strategy_leverage_admission$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conrelid = to_regclass('strategy_target_admissions')
-          AND conname = 'chk_strategy_target_admissions_lease'
-    ) THEN
-        ALTER TABLE strategy_target_admissions
-            ADD CONSTRAINT chk_strategy_target_admissions_lease
-            CHECK (
-                (state = 'active' AND (
-                    (session_id IS NULL AND lease_expires_at IS NOT NULL)
-                    OR (session_id IS NOT NULL AND lease_expires_at IS NULL)
-                ))
-                OR (state <> 'active' AND lease_expires_at IS NULL)
-            );
-    END IF;
-END
-$strategy_leverage_admission$;
-
-CREATE UNIQUE INDEX IF NOT EXISTS uidx_strategy_target_admissions_holder
-    ON strategy_target_admissions
-    (exchange, environment, credential_fingerprint, market, symbol)
-    WHERE state IN ('active', 'recovery_required');
-
-CREATE INDEX IF NOT EXISTS idx_strategy_target_admissions_session
-    ON strategy_target_admissions (session_id, state)
-    WHERE session_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS strategy_session_target_facts (
-    session_id text NOT NULL,
-    venue_id bigint NOT NULL,
-    exchange smallint NOT NULL,
-    environment smallint NOT NULL,
-    market smallint NOT NULL,
-    symbol text NOT NULL,
-    effective_leverage integer NOT NULL,
-    leverage_source text NOT NULL,
-    previous_leverage integer,
-    confirmed_leverage integer NOT NULL,
-    confirmed_at timestamp with time zone NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    PRIMARY KEY (session_id, venue_id, market, symbol),
-    CONSTRAINT strategy_session_target_facts_session_id_fkey
-        FOREIGN KEY (session_id)
-        REFERENCES strategy_sessions(session_id)
-        ON DELETE CASCADE,
-    CONSTRAINT strategy_session_target_facts_session_venue_fkey
-        FOREIGN KEY (session_id, venue_id)
-        REFERENCES session_venues(session_id, venue_id)
-        ON DELETE CASCADE,
-    CONSTRAINT chk_strategy_session_target_facts_route
-        CHECK (
-            exchange IN (1, 2)
-            AND environment IN (0, 1, 2)
-            AND market IN (2, 3)
-            AND symbol = upper(btrim(symbol))
-            AND symbol <> ''
-        ),
-    CONSTRAINT chk_strategy_session_target_facts_values
-        CHECK (
-            effective_leverage > 0
-            AND confirmed_leverage > 0
-            AND (previous_leverage IS NULL OR previous_leverage > 0)
-        ),
-    CONSTRAINT chk_strategy_session_target_facts_source
-        CHECK (leverage_source IN (
-            'order_target', 'strategy_default', 'platform_default'
-        ))
-);
-
-CREATE INDEX IF NOT EXISTS idx_strategy_session_target_facts_session
-    ON strategy_session_target_facts (session_id, venue_id, symbol);
-INSERT INTO schema_migrations (filename) VALUES ('0006_strategy_owned_futures_leverage.sql') ON CONFLICT (filename) DO NOTHING;
-
--- Source: core-service/internal/storage/migrations/0007_strategy_leverage_notification_outbox.sql
-CREATE TABLE IF NOT EXISTS strategy_leverage_notification_outbox (
-    dedupe_key text PRIMARY KEY,
-    operation_id text NOT NULL UNIQUE,
-    user_id bigint NOT NULL,
-    portfolio_id bigint NOT NULL,
-    event_type text NOT NULL,
-    affected_symbols text[] NOT NULL,
-    status text DEFAULT 'pending'::text NOT NULL,
-    claim_token text DEFAULT ''::text NOT NULL,
-    attempt_count integer DEFAULT 0 NOT NULL,
-    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
-    last_error text DEFAULT ''::text NOT NULL,
-    claimed_at timestamp with time zone,
-    delivered_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT strategy_leverage_notification_outbox_operation_id_fkey
-        FOREIGN KEY (operation_id)
-        REFERENCES strategy_launch_operations(operation_id)
-        ON DELETE RESTRICT,
-    CONSTRAINT strategy_leverage_notification_outbox_user_id_fkey
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
-    CONSTRAINT strategy_leverage_notification_outbox_portfolio_id_fkey
-        FOREIGN KEY (portfolio_id) REFERENCES portfolios(portfolio_id) ON DELETE RESTRICT,
-    CONSTRAINT chk_strategy_leverage_notification_outbox_identity
-        CHECK (
-            btrim(dedupe_key) <> ''
-            AND operation_id = dedupe_key
-            AND event_type = 'strategy.leverage_rollback_failed'
-        ),
-    CONSTRAINT chk_strategy_leverage_notification_outbox_symbols
-        CHECK (
-            cardinality(affected_symbols) > 0
-            AND array_position(affected_symbols, NULL) IS NULL
-        ),
-    CONSTRAINT chk_strategy_leverage_notification_outbox_status
-        CHECK (status IN ('pending', 'delivering', 'retry', 'delivered')),
-    CONSTRAINT chk_strategy_leverage_notification_outbox_attempts
-        CHECK (attempt_count >= 0),
-    CONSTRAINT chk_strategy_leverage_notification_outbox_delivery
-        CHECK (
-            (status = 'delivering' AND btrim(claim_token) <> '' AND claimed_at IS NOT NULL)
-            OR (status = 'delivered' AND btrim(claim_token) = '' AND delivered_at IS NOT NULL)
-            OR (status IN ('pending', 'retry') AND btrim(claim_token) = '' AND delivered_at IS NULL)
-        )
-);
-
-CREATE INDEX IF NOT EXISTS idx_strategy_leverage_notification_outbox_drain
-    ON strategy_leverage_notification_outbox (next_attempt_at, created_at)
-    WHERE status IN ('pending', 'retry', 'delivering');
-INSERT INTO schema_migrations (filename) VALUES ('0007_strategy_leverage_notification_outbox.sql') ON CONFLICT (filename) DO NOTHING;
-
--- Source: core-service/internal/storage/migrations/0008_strategy_session_deprecated_leverage_zero.sql
-ALTER TABLE strategy_sessions
-    DROP CONSTRAINT IF EXISTS chk_strategy_sessions_leverage;
-
-ALTER TABLE strategy_sessions
-    ADD CONSTRAINT chk_strategy_sessions_leverage
-    CHECK (leverage >= 0);
-INSERT INTO schema_migrations (filename) VALUES ('0008_strategy_session_deprecated_leverage_zero.sql') ON CONFLICT (filename) DO NOTHING;
 COMMIT;
