@@ -166,6 +166,14 @@ run_integration_without_skip() {
     echo "${test_name} skipped during mandatory DB smoke" >&2
     return 1
   fi
+  if ! grep -Fxq -- "=== RUN   ${test_name}" "${log}"; then
+    echo "${test_name} did not run during mandatory DB smoke" >&2
+    return 1
+  fi
+  if ! grep -Eq -- "^--- PASS: ${test_name}( \\([0-9]+(\\.[0-9]+)?s\\))?$" "${log}"; then
+    echo "${test_name} did not pass during mandatory DB smoke" >&2
+    return 1
+  fi
   if database_exists "${database}"; then
     echo "${test_name} left its owned database behind" >&2
     return 1

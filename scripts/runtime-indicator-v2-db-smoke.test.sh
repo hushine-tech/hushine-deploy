@@ -38,6 +38,13 @@ fi
 printf '%s\n' "$*" >>"${GO_CALLS}"
 case "$*" in
   'test -tags=integration . -run ^TestPortfolioBaselineFreshBootstrapIsCompleteAndIdempotent$ -count=1 -v')
+    if [[ "${HUSHINE_FAKE_GO_NO_TESTS:-0}" == "1" ]]; then
+      printf '%s\n' \
+        'testing: warning: no tests to run' \
+        'PASS' \
+        'ok  hushine/core-service/internal/storage/migrations  0.001s [no tests to run]'
+      exit 0
+    fi
     printf '%s\n' \
       '=== RUN   TestPortfolioBaselineFreshBootstrapIsCompleteAndIdempotent' \
       '--- PASS: TestPortfolioBaselineFreshBootstrapIsCompleteAndIdempotent (0.00s)' \
@@ -102,3 +109,22 @@ cmp "${expected_calls}" "${go_calls}" \
   || fail "database smoke compared bundles outside the Portfolio Indicator scope"
 grep -Fq '✓ Runtime Indicator V2 database smoke passed' <<<"${smoke_output}" \
   || fail "database smoke did not report successful fresh-baseline completion"
+
+set +e
+no_tests_output="$({
+  PATH="${fake_bin}:${PATH}" \
+  CMP_CALLS="${cmp_calls}" \
+  GO_CALLS="${go_calls}" \
+  HUSHINE_FAKE_GO_NO_TESTS=1 \
+  HUSHINE_SOURCE_ROOT="${SOURCE_ROOT}" \
+    bash "${ROOT}/scripts/runtime-indicator-v2-db-smoke.sh"
+} 2>&1)"
+no_tests_status="$?"
+set -e
+
+[[ "${no_tests_status}" -ne 0 ]] \
+  || fail "database smoke accepted an exit-zero Go transcript with no tests run: ${no_tests_output}"
+grep -Fq \
+  'TestPortfolioBaselineFreshBootstrapIsCompleteAndIdempotent did not run during mandatory DB smoke' \
+  <<<"${no_tests_output}" \
+  || fail "database smoke rejected the no-test transcript for the wrong reason: ${no_tests_output}"
