@@ -82,7 +82,8 @@ go test ./internal/storage -count=1
 
 本地 fresh-bootstrap 验收还必须确认：
 
-- 每个 ledger 只有当前 baseline 记录，并保存匹配的 checksum
+- `portfolio`、`order`、`control_panel` 的 ledger 各有 `0000_create_schema_migrations.sql` 和 `0001_current_schema_baseline.sql` 两条记录；scraper 年库只有 `0001_current_schema_baseline.sql` 一条记录
+- 当前 ledger 只记录 `filename` 与 `applied_at`，不声明不存在的 checksum 校验能力
 - `portfolio` 同时具有 Indicator V2 和逐 target leverage 对象
 - `order` 同时具有 Spot exact route、close 和 recovery 对象
 - `control_panel` 具有 runtime Session cleanup outbox
