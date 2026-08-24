@@ -115,11 +115,13 @@ chmod 600 "${CERT_DIR}"/*.key
 # core-service. Keep tracked deployment logging/notification endpoints out of
 # this isolated harness; an empty YAML retains safe defaults and env overrides.
 cd "$ROOT/core-service"
-TIMESCALEDB_DSN="host=${DB_HOST} port=5432 user=postgres password=postgres dbname=${PORTFOLIO_DB_NAME} sslmode=disable" \
-ORDER_TIMESCALEDB_DSN="host=${DB_HOST} port=5432 user=postgres password=postgres dbname=${ORDER_DB_NAME} sslmode=disable" \
-MOCK_BINANCE=1 \
-HTTP_ADDR=":${CORE_HTTP}" \
-GRPC_ADDR=":${CORE_GRPC}" \
+DATABASE_HOST="${DB_HOST}" DATABASE_PORT=5432 DATABASE_USER=postgres DATABASE_PASSWORD=postgres \
+DATABASE_DBNAME="${PORTFOLIO_DB_NAME}" DATABASE_SSLMODE=disable \
+ORDER_DATABASE_HOST="${DB_HOST}" ORDER_DATABASE_PORT=5432 ORDER_DATABASE_USER=postgres ORDER_DATABASE_PASSWORD=postgres \
+ORDER_DATABASE_DBNAME="${ORDER_DB_NAME}" ORDER_DATABASE_SSLMODE=disable \
+EXCHANGE_MOCK_BINANCE=true \
+SERVER_HTTP_ADDR=":${CORE_HTTP}" \
+SERVER_GRPC_ADDR=":${CORE_GRPC}" \
 "$ROOT/.e2e-build/core-service" -config /dev/null > /tmp/e2e-core.log 2>&1 &
 PIDS+=($!)
 echo "  core-service  PID=$! → HTTP:${CORE_HTTP} gRPC:${CORE_GRPC} (portfolio.v1 + order.v1)"
@@ -163,9 +165,6 @@ dependencies:
 provisioning:
   backend: "docker"
   image: "hushine/strategy-runtime:executor-dev"
-  advertise_host: "127.0.0.1"
-  port_range_base: 50100
-  port_range_size: 200
   registration_timeout_seconds: 30
   docker:
     network_mode: "bridge"
@@ -190,8 +189,8 @@ log:
 EOF
 
 cd "$ROOT/control-panel-service"
-CORE_SERVICE_GRPC_ADDR="127.0.0.1:${CORE_GRPC}" \
-ORDER_SERVICE_GRPC_ADDR="127.0.0.1:${CORE_GRPC}" \
+DEPENDENCIES_CORE_SERVICE_GRPC="127.0.0.1:${CORE_GRPC}" \
+DEPENDENCIES_ORDER_SERVICE_GRPC="127.0.0.1:${CORE_GRPC}" \
 MARKET_DATA_DB_HOST="${DB_HOST}" \
 MARKET_DATA_DB_PORT=5432 \
 MARKET_DATA_DB_USER=postgres \
@@ -204,11 +203,12 @@ echo "  control-panel    PID=$! → HTTP:${CP_HTTP} gRPC:${CP_GRPC} RuntimeChann
 
 # quant-handler uses the same isolated default-config pattern.
 cd "$ROOT/gateway/quant-handler"
-CORE_SERVICE_GRPC_ADDR="127.0.0.1:${CORE_GRPC}" \
-CONTROL_PANEL_SERVICE_GRPC_ADDR="127.0.0.1:${CP_GRPC}" \
-QUANT_HANDLER_JWT_SECRET="${JWT_SECRET}" \
-HTTP_ADDR=":${HANDLER_HTTP}" \
-HANDLER_CORS_ORIGINS="http://localhost:5173" \
+DEPENDENCIES_CORE_SERVICE_GRPC="127.0.0.1:${CORE_GRPC}" \
+DEPENDENCIES_ORDER_SERVICE_GRPC="127.0.0.1:${CORE_GRPC}" \
+DEPENDENCIES_CONTROL_PANEL_SERVICE_GRPC="127.0.0.1:${CP_GRPC}" \
+AUTH_JWT_SECRET="${JWT_SECRET}" \
+SERVER_HTTP_ADDR=":${HANDLER_HTTP}" \
+AUTH_CORS_ORIGINS="http://localhost:5173" \
 "$ROOT/.e2e-build/quant-handler" -config /dev/null > /tmp/e2e-handler.log 2>&1 &
 PIDS+=($!)
 echo "  quant-handler    PID=$! → HTTP:${HANDLER_HTTP}"

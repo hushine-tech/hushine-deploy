@@ -31,7 +31,7 @@ for pg_var in PGHOST PGPORT PGUSER PGPASSWORD; do
 	fi
 done
 
-if [[ -z "${ORDER_TIMESCALEDB_DSN:-}" && "$uses_pg_env" == true ]]; then
+if [[ "$uses_pg_env" == true ]]; then
 	[[ -n "${PGHOST:-}" && -z "${ORDER_DATABASE_HOST:-}" ]] && order_db_env+=("ORDER_DATABASE_HOST=${PGHOST}")
 	[[ -n "${PGPORT:-}" && -z "${ORDER_DATABASE_PORT:-}" ]] && order_db_env+=("ORDER_DATABASE_PORT=${PGPORT}")
 	[[ -n "${PGUSER:-}" && -z "${ORDER_DATABASE_USER:-}" ]] && order_db_env+=("ORDER_DATABASE_USER=${PGUSER}")

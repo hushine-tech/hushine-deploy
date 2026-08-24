@@ -63,7 +63,7 @@ while true; do sleep 1; done
             (cert_root / name).write_text("test\n", encoding="utf-8")
         env_file = source_root / ".env.local"
         env_file.write_text(
-            "QUANT_HANDLER_JWT_SECRET=jwt-sentinel\n"
+            "AUTH_JWT_SECRET=jwt-sentinel\n"
             "TELEGRAM_BOT_TOKEN=telegram-sentinel\n"
             "CORE_CREDENTIAL_ENCRYPTION_KEY=encryption-sentinel\n"
             "DATABASE_PASSWORD=portfolio-db-sentinel\n"
@@ -470,14 +470,14 @@ while true; do sleep 1; done
                     captures["scraper"],
                 )
                 self.assertIn(
-                    "QUANT_HANDLER_JWT_SECRET=jwt-sentinel",
+                    "AUTH_JWT_SECRET=jwt-sentinel",
                     captures["quant-handler"],
                 )
                 for service, capture in captures.items():
                     self.assertNotIn("UNRELATED_SECRET=", capture, service)
                     self.assertNotIn("VENUE_API_SECRET=", capture, service)
                 self.assertNotIn("TELEGRAM_BOT_TOKEN=", captures["quant-handler"])
-                self.assertNotIn("QUANT_HANDLER_JWT_SECRET=", captures["core-service"])
+                self.assertNotIn("AUTH_JWT_SECRET=", captures["core-service"])
                 self.assertNotIn("DATABASE_PASSWORD=", captures["control-panel-service"])
                 self.assertNotIn("MARKET_DATA_DB_PASSWORD=", captures["quant-frontend"])
                 self.assertNotIn("jwt-sentinel", captures["quant-frontend"])

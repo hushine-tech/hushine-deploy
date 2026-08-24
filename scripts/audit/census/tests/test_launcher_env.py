@@ -13,7 +13,7 @@ from census.launch_child import (
 class LauncherEnvironmentTests(unittest.TestCase):
     def test_secret_values_reach_only_their_owning_service(self) -> None:
         sentinels = {
-            "QUANT_HANDLER_JWT_SECRET": "jwt-only-handler",
+            "AUTH_JWT_SECRET": "jwt-only-handler",
             "TELEGRAM_BOT_TOKEN": "telegram-only-core",
             "CORE_CREDENTIAL_ENCRYPTION_KEY": "encryption-only-core",
             "DATABASE_PASSWORD": "portfolio-only-core",
@@ -36,7 +36,7 @@ class LauncherEnvironmentTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            environments["quant-handler"]["QUANT_HANDLER_JWT_SECRET"],
+            environments["quant-handler"]["AUTH_JWT_SECRET"],
             "jwt-only-handler",
         )
         self.assertEqual(
@@ -69,7 +69,7 @@ class LauncherEnvironmentTests(unittest.TestCase):
         )
         for service, child in environments.items():
             self.assertNotIn("UNRELATED_SECRET", child, service)
-        self.assertNotIn("QUANT_HANDLER_JWT_SECRET", environments["core-service"])
+        self.assertNotIn("AUTH_JWT_SECRET", environments["core-service"])
         self.assertNotIn("TELEGRAM_BOT_TOKEN", environments["quant-handler"])
         self.assertFalse(
             any(
@@ -86,12 +86,12 @@ class LauncherEnvironmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "census.env"
             path.write_text(
-                "QUANT_HANDLER_JWT_SECRET='literal-$HOME'\n"
+                "AUTH_JWT_SECRET='literal-$HOME'\n"
                 "TELEGRAM_BOT_TOKEN=token\n",
                 encoding="utf-8",
             )
             values = load_environment_file(path)
-            self.assertEqual(values["QUANT_HANDLER_JWT_SECRET"], "literal-$HOME")
+            self.assertEqual(values["AUTH_JWT_SECRET"], "literal-$HOME")
 
             for name in (
                 "BINANCE_API_KEY",

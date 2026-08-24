@@ -669,9 +669,6 @@ dependencies:
 provisioning:
   backend: "docker"
   image: "hushine/strategy-runtime:executor-dev"
-  advertise_host: "127.0.0.1"
-  port_range_base: 50100
-  port_range_size: 200
   registration_timeout_seconds: 60
   docker:
     network_mode: "bridge"
@@ -767,7 +764,7 @@ start_services() {
       ORDER_DATABASE_DBNAME="${order_db}" ORDER_DATABASE_SSLMODE=disable \
       SERVER_HTTP_ADDR="127.0.0.1:${core_http}" \
       SERVER_GRPC_ADDR="127.0.0.1:${core_grpc}" \
-      MOCK_BINANCE=true NOTIFICATION_ENABLED=false \
+      EXCHANGE_MOCK_BINANCE=true NOTIFICATION_ENABLED=false \
       "${STATE_DIR}/bin/core-service" -config /dev/null
   ) >"${STATE_DIR}/logs/core-service.log" 2>&1 &
   record_process "${STATE_DIR}" core-service "$!"
