@@ -432,7 +432,7 @@ for i in $(seq 1 30); do
     STATUS=$(echo "$STATUS_RESP" | jq -r '.status')
     BARS=$(echo "$STATUS_RESP" | jq -r '.bars_processed')
 
-    if [ "$STATUS" = "completed" ] || [ "$STATUS" = "finished" ]; then
+    if [ "$STATUS" = "finished" ]; then
         pass "Backtest completed: bars_processed=${BARS}"
         break
     elif [ "$STATUS" = "failed" ]; then
@@ -446,7 +446,7 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-if [ "$STATUS" != "completed" ] && [ "$STATUS" != "finished" ]; then
+if [ "$STATUS" != "finished" ]; then
     fail "Backtest did not complete within 60s"
     exit 1
 fi
@@ -592,10 +592,10 @@ else
 
     [ "$SESSION_PORTFOLIO_ID" = "$PORTFOLIO_ID" ] && pass "strategy_sessions portfolio_id matches ${PORTFOLIO_ID}" || fail "strategy_sessions portfolio_id=${SESSION_PORTFOLIO_ID}, expected ${PORTFOLIO_ID}"
     [ "$SESSION_STRATEGY_ID" = "$STRATEGY_ID" ] && pass "strategy_sessions strategy_id matches ${STRATEGY_ID}" || fail "strategy_sessions strategy_id=${SESSION_STRATEGY_ID}, expected ${STRATEGY_ID}"
-    if [ "$SESSION_STATUS" = "completed" ] || [ "$SESSION_STATUS" = "finished" ] || [ "$SESSION_STATUS" = "6" ]; then
+    if [ "$SESSION_STATUS" = "finished" ] || [ "$SESSION_STATUS" = "6" ]; then
         pass "strategy_sessions status=${SESSION_STATUS}"
     else
-        fail "strategy_sessions status=${SESSION_STATUS}, expected completed/finished/6"
+        fail "strategy_sessions status=${SESSION_STATUS}, expected finished/6"
     fi
     [ "$SESSION_BARS" = "$BARS" ] && pass "strategy_sessions bars_processed=${BARS}" || fail "strategy_sessions bars_processed=${SESSION_BARS}, expected ${BARS}"
 fi
@@ -645,7 +645,7 @@ for i in $(seq 1 30); do
     MULTI_STATUS_RESP=$(curl -s "${API}/api/strategy-sessions/${MULTI_SESSION_ID}" -H "$AUTH" 2>/dev/null || echo '{"status":"error"}')
     MULTI_STATUS=$(echo "$MULTI_STATUS_RESP" | jq -r '.status')
     MULTI_BARS=$(echo "$MULTI_STATUS_RESP" | jq -r '.bars_processed')
-    if [ "$MULTI_STATUS" = "completed" ] || [ "$MULTI_STATUS" = "finished" ]; then
+    if [ "$MULTI_STATUS" = "finished" ]; then
         break
     elif [ "$MULTI_STATUS" = "failed" ]; then
         fail "Multi-stream backtest failed: $(echo "$MULTI_STATUS_RESP" | jq -r '.error')"
@@ -654,7 +654,7 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-if [ "$MULTI_STATUS" != "completed" ] && [ "$MULTI_STATUS" != "finished" ]; then
+if [ "$MULTI_STATUS" != "finished" ]; then
     fail "Multi-stream backtest did not complete within 60s (status=${MULTI_STATUS})"
 elif [ "$MULTI_BARS" = "440" ]; then
     pass "Multi-stream replay kept all three streams independent: bars_processed=440"

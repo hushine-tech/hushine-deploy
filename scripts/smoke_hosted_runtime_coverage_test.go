@@ -233,7 +233,7 @@ func TestTerminalSessionStatusRequiresStopped(t *testing.T) {
 	if !terminalSessionStatus("stopped") {
 		t.Fatal("stopped must be accepted")
 	}
-	for _, status := range []string{"completed", "finished", "failed", "stop_failed", "recoverable"} {
+	for _, status := range []string{"finished", "failed", "stop_failed", "recoverable"} {
 		if terminalSessionStatus(status) {
 			t.Errorf("%q must not satisfy a successful STOP_ACTION_STOP_ONLY assertion", status)
 		}

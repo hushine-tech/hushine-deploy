@@ -432,11 +432,9 @@ type spotDemoBaseline struct {
 type reconciliationSnapshot struct {
 	Spot struct {
 		Assets []struct {
-			Asset         string  `json:"asset"`
-			Free          float64 `json:"free"`
-			Locked        float64 `json:"locked"`
-			FreeDecimal   string  `json:"free_decimal"`
-			LockedDecimal string  `json:"locked_decimal"`
+			Asset         string `json:"asset"`
+			FreeDecimal   string `json:"free_decimal"`
+			LockedDecimal string `json:"locked_decimal"`
 		} `json:"assets"`
 	} `json:"spot"`
 }
@@ -514,8 +512,8 @@ func baselineFromPortfolioSnapshot(snapshot *portfoliov1.PortfolioSnapshot, port
 					return spotDemoBaseline{}, fmt.Errorf("Spot baseline contains duplicate asset")
 				}
 				baseline.SpotAssets[code] = spotBalanceFact{
-					Free:   decimalOrFloat(asset.GetFreeDecimal(), asset.GetFree()),
-					Locked: decimalOrFloat(asset.GetLockedDecimal(), asset.GetLocked()),
+					Free:   strings.TrimSpace(asset.GetFreeDecimal()),
+					Locked: strings.TrimSpace(asset.GetLockedDecimal()),
 				}
 			}
 		case 2:
@@ -537,14 +535,6 @@ func baselineFromPortfolioSnapshot(snapshot *portfoliov1.PortfolioSnapshot, port
 		return spotDemoBaseline{}, fmt.Errorf("pre-recorded Futures route snapshot is missing")
 	}
 	return baseline, nil
-}
-
-func decimalOrFloat(exact string, display float64) string {
-	exact = strings.TrimSpace(exact)
-	if exact != "" {
-		return exact
-	}
-	return strconv.FormatFloat(display, 'g', -1, 64)
 }
 
 func readStrictJSON(path string, out any) error {
@@ -820,8 +810,8 @@ func balancesFromReconciliationJSON(raw string) (map[string]spotBalanceFact, err
 			return nil, fmt.Errorf("reconciliation contains duplicate asset")
 		}
 		result[code] = spotBalanceFact{
-			Free:   decimalOrFloat(asset.FreeDecimal, asset.Free),
-			Locked: decimalOrFloat(asset.LockedDecimal, asset.Locked),
+			Free:   strings.TrimSpace(asset.FreeDecimal),
+			Locked: strings.TrimSpace(asset.LockedDecimal),
 		}
 	}
 	return result, nil
@@ -1332,7 +1322,7 @@ func terminalSessionStatus(value string) bool {
 
 func knownTerminalSessionStatus(value string) bool {
 	switch value {
-	case "completed", "finished", "failed", "stopped", "stop_failed", "recoverable", "preflight_failed":
+	case "finished", "failed", "stopped", "stop_failed", "recoverable", "preflight_failed":
 		return true
 	default:
 		return false

@@ -1561,7 +1561,6 @@ validate_barrier_ack() {
       ($chain[0]) as $chain
       | type == "object"
       and keys == [
-        "completed",
         "generation",
         "last_open_time_ms",
         "owner_token",
