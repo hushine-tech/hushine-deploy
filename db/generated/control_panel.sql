@@ -442,11 +442,11 @@ CREATE TABLE IF NOT EXISTS runtime_registry (
     CONSTRAINT ck_runtime_registry_cleanup_status CHECK (((cleanup_status = ''::text) OR (cleanup_status = ANY (ARRAY['succeeded'::text, 'failed'::text, 'user_owned'::text])))),
     CONSTRAINT ck_runtime_registry_connection_owner CHECK ((((connection_owner_instance_id = ''::text) AND (connection_owner_acquired_at IS NULL) AND (connection_owner_heartbeat_at IS NULL)) OR ((connection_owner_instance_id <> ''::text) AND (connection_owner_acquired_at IS NOT NULL) AND (connection_owner_heartbeat_at IS NOT NULL)))),
     CONSTRAINT ck_runtime_registry_ended_reason CHECK (((ended_reason = ''::text) OR (ended_reason = ANY (ARRAY['user_cancelled'::text, 'runtime_exited'::text, 'heartbeat_stale'::text, 'provision_failed'::text, 'auth_failed'::text, 'control_panel_shutdown'::text])))),
-    CONSTRAINT ck_runtime_registry_lifecycle CHECK ((((status = ANY (ARRAY['starting'::text, 'paired'::text, 'active'::text, 'unhealthy'::text])) AND (ended_at IS NULL) AND (ended_reason = ''::text) AND ((status <> 'active'::text) OR (started_at IS NOT NULL))) OR ((status = ANY (ARRAY['heartbeat_stale'::text, 'ended'::text, 'cancelled'::text, 'failed'::text])) AND (ended_at IS NOT NULL) AND (ended_reason <> ''::text)))),
+    CONSTRAINT ck_runtime_registry_lifecycle CHECK ((((status = ANY (ARRAY['starting'::text, 'active'::text, 'unhealthy'::text])) AND (ended_at IS NULL) AND (ended_reason = ''::text) AND ((status <> 'active'::text) OR (started_at IS NOT NULL))) OR ((status = ANY (ARRAY['heartbeat_stale'::text, 'ended'::text, 'cancelled'::text, 'failed'::text])) AND (ended_at IS NOT NULL) AND (ended_reason <> ''::text)))),
     CONSTRAINT ck_runtime_registry_name CHECK ((name ~ '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$'::text)),
     CONSTRAINT ck_runtime_registry_role CHECK ((role = ANY (ARRAY['executor'::text, 'debugger'::text]))),
     CONSTRAINT ck_runtime_registry_source CHECK ((source = ANY (ARRAY['hosted'::text, 'self_hosted'::text, 'bare'::text]))),
-    CONSTRAINT ck_runtime_registry_status CHECK ((status = ANY (ARRAY['starting'::text, 'paired'::text, 'active'::text, 'unhealthy'::text, 'heartbeat_stale'::text, 'ended'::text, 'cancelled'::text, 'failed'::text])))
+    CONSTRAINT ck_runtime_registry_status CHECK ((status = ANY (ARRAY['starting'::text, 'active'::text, 'unhealthy'::text, 'heartbeat_stale'::text, 'ended'::text, 'cancelled'::text, 'failed'::text])))
 );
 
 
@@ -1307,11 +1307,9 @@ $baseline$;
 
 
 --
--- PostgreSQL database dump complete
+-- Name: runtime_session_cleanup_outbox; Type: TABLE; Schema: public; Owner: -
 --
-INSERT INTO schema_migrations (filename) VALUES ('0001_current_schema_baseline.sql') ON CONFLICT (filename) DO NOTHING;
 
--- Source: control-panel-service/internal/storage/migrations/0002_runtime_session_cleanup_outbox.sql
 CREATE TABLE IF NOT EXISTS runtime_session_cleanup_outbox (
     runtime_id text PRIMARY KEY
         REFERENCES runtime_registry(runtime_id) ON DELETE CASCADE,
@@ -1329,20 +1327,17 @@ CREATE TABLE IF NOT EXISTS runtime_session_cleanup_outbox (
         CHECK (attempt_count >= 0)
 );
 
+
+--
+-- Name: idx_runtime_session_cleanup_outbox_due; Type: INDEX; Schema: public; Owner: -
+--
+
 CREATE INDEX IF NOT EXISTS idx_runtime_session_cleanup_outbox_due
     ON runtime_session_cleanup_outbox (next_attempt_at, created_at, runtime_id);
 
--- Existing terminal runtimes may have crossed the old one-shot handoff before
--- this migration. Re-enqueueing them is safe because the core RPC is
--- idempotent and closes the crash window during upgrade.
-INSERT INTO runtime_session_cleanup_outbox (
-    runtime_id, error_message, next_attempt_at, created_at, updated_at
-)
-SELECT runtime_id,
-       format('runtime %s ended: %s; session cleanup pending', runtime_id, ended_reason),
-       now(), now(), now()
-FROM runtime_registry
-WHERE status IN ('heartbeat_stale', 'ended', 'cancelled', 'failed')
-ON CONFLICT (runtime_id) DO NOTHING;
-INSERT INTO schema_migrations (filename) VALUES ('0002_runtime_session_cleanup_outbox.sql') ON CONFLICT (filename) DO NOTHING;
+
+--
+-- PostgreSQL database dump complete
+--
+INSERT INTO schema_migrations (filename) VALUES ('0001_current_schema_baseline.sql') ON CONFLICT (filename) DO NOTHING;
 COMMIT;
