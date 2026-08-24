@@ -71,10 +71,14 @@ case "$*" in
     echo "removed Indicator V1 upgrade action reached psql: $*" >&2
     exit 97
     ;;
+  *values_json*)
+    echo "removed Indicator V1 column guard reached psql: $*" >&2
+    exit 98
+    ;;
   *'SELECT EXISTS(SELECT 1 FROM pg_database'*)
     printf '%s\n' 'f'
     ;;
-  *'SELECT md5('*|*values_json*protocol_version*)
+  *'SELECT md5('*|*protocol_version*)
     printf '%s\n' 't'
     ;;
 esac

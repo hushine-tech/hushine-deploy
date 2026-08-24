@@ -122,11 +122,6 @@ assert_single_listener() {
 echo "→ 停止现有服务..."
 make -C "${SOURCE_ROOT}" local-stop
 
-if command -v docker >/dev/null 2>&1; then
-  # 旧部署方式可能留下同名 strategy-service 容器并占用 50053。
-  docker rm -f hushine-strategy-service >/dev/null 2>&1 || true
-fi
-
 app_ports=(
   "50051:core-service"
   "18080:core-service-http"
@@ -135,14 +130,6 @@ app_ports=(
   "8082:control-panel-service-http"
   "8090:quant-handler"
   "5173:quant-frontend"
-)
-
-# 历史遗留：order.v1 已并入 core-service；strategy-service 现在由
-# control-panel-service 通过 hosted runtime 镜像按需拉起。这里只清理旧
-# standalone 进程 / 端口，不再启动它们。
-legacy_ports=(
-  "50053:legacy-strategy-service"
-  "50052:legacy-order-service"
 )
 
 # 兜底：仅清理仓库自己的残留进程，避免误杀同机其它服务（如 GitLab / Kafka / DB）。
@@ -156,22 +143,14 @@ cleanup_patterns=(
   "${REPO_ROOT}/gateway/quant-handler/bin/quant-handler" \
   './bin/quant-handler -config' \
   'go run ./cmd/quant-handler -config' \
-  "${REPO_ROOT}/strategy-service/run_grpc_server.py" \
-  'run_grpc_server.py -config' \
   "${REPO_ROOT}/scraper/bin/scraper" \
   './bin/scraper -config' \
   'go run ./cmd/scraper -config' \
   'vite preview --port 5173 --host'
 )
 
-legacy_cleanup_patterns=(
-  "${REPO_ROOT}/order-service/bin/order-service" \
-  './bin/order-service -config' \
-  'go run ./cmd/order-service -config'
-)
-
-kill_process_patterns "${cleanup_patterns[@]}" "${legacy_cleanup_patterns[@]}"
-kill_listening_ports "${app_ports[@]}" "${legacy_ports[@]}"
+kill_process_patterns "${cleanup_patterns[@]}"
+kill_listening_ports "${app_ports[@]}"
 
 echo "→ 检查本机基础设施..."
 for port in 5432 19092 4318; do

@@ -471,6 +471,41 @@ if (
   fail "API/database indicator comparison accepted a revision mismatch"
 fi
 
+await_state_dir="${test_root}/await-current-v2"
+await_runtime_root="${test_root}/await-runtime"
+mkdir -p "${await_state_dir}" "${await_runtime_root}"
+jq -nc \
+  --arg runtime_root "${await_runtime_root}" \
+  '{
+    schema:1,
+    owner_token:"owner",
+    generation:"generation",
+    runtime_id:"runtime",
+    session_id:"session-1",
+    runtime_root:$runtime_root,
+    databases:{portfolio:"hushine_indicator_chain_portfolio",order:"hushine_indicator_chain_order"},
+    urls:{handler:"http://127.0.0.1:1"}
+  }' >"${await_state_dir}/chain.json"
+jq -nc '{owner_token:"owner"}' >"${await_state_dir}/owner.json"
+jq -nc '{token:"token"}' >"${await_state_dir}/auth.json"
+jq -nc '{completed:1025}' >"${await_runtime_root}/indicator-v2-ack.json"
+chmod 0600 \
+  "${await_state_dir}/chain.json" \
+  "${await_state_dir}/owner.json" \
+  "${await_state_dir}/auth.json" \
+  "${await_runtime_root}/indicator-v2-ack.json"
+api_items_with_unrelated_field="$(jq '.items[0].values_json = "ignored-extra-field"' <<<"${api_items}")"
+(
+  source "${SCRIPT}"
+  validate_barrier_ack() { return 0; }
+  indicator_snapshot() { printf '%s\n' "${database_items}"; }
+  assert_snapshot_state() { return 0; }
+  assert_cutover_markers() { return 0; }
+  api_indicator_snapshot() { printf '%s\n' "${api_items_with_unrelated_field}"; }
+  await_state finalized-1024-plus-tail "${await_state_dir}"
+) >/dev/null \
+  || fail "current V2 response validation still branches on a removed schema field"
+
 valid_orders="$(jq -nc \
   --argjson start 1735689600000 \
   '[

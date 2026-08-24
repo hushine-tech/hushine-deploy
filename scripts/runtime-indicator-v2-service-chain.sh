@@ -1648,7 +1648,6 @@ await_state() {
       and has("times_ms")
       and has("revision")
       and has("finalized")
-      and (has("values_json") | not)
     )
   ' <<<"${api_snapshot}" >/dev/null \
     || die "${requested_state} handler V2 response contract failed"
