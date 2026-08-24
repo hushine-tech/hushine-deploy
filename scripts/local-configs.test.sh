@@ -108,6 +108,16 @@ import re
 import sys
 
 root = Path(sys.argv[1])
+core = (root / "core-service/config.local.yaml").read_text()
+credential = re.search(
+    r'(?ms)^credential:\n'
+    r'  encryption_key: "([^"]+)"\n'
+    r'  key_version: "([^"]+)"$',
+    core,
+)
+assert credential and len(credential.group(1).encode("utf-8")) == 32
+assert credential.group(2) == "local-v1"
+
 control = (root / "control-panel-service/config.local.yaml").read_text()
 match = re.search(
     r"(?ms)^runtime_channel_server:\n.*?^  tls:\n"

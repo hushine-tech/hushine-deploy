@@ -20,13 +20,29 @@ SHARED_HOST = "192.168.88.10"
 LOCAL_CERT_DIR = Path(
     os.environ.get("HUSHINE_LOCAL_CERT_DIR", str(DEPLOY_ROOT / "certs"))
 ).expanduser().resolve()
+LOCAL_CREDENTIAL_ENCRYPTION_KEY = "local-dev-credential-key-32bytes"
 
 
-def _localize_yaml(relative_source: str, relative_target: str, *, control=False) -> None:
+def _localize_yaml(
+    relative_source: str,
+    relative_target: str,
+    *,
+    control: bool = False,
+    core: bool = False,
+) -> None:
     source = SOURCE_ROOT / relative_source
     target = SOURCE_ROOT / relative_target
     text = source.read_text(encoding="utf-8")
     text = text.replace(SHARED_HOST, "127.0.0.1").replace(":19092", ":9092")
+    if core:
+        if re.search(r"(?m)^credential:\s*$", text):
+            raise RuntimeError("core-service source config unexpectedly defines credential")
+        text = (
+            text.rstrip()
+            + "\n\ncredential:\n"
+            + f"  encryption_key: {json.dumps(LOCAL_CREDENTIAL_ENCRYPTION_KEY)}\n"
+            + '  key_version: "local-v1"\n'
+        )
     if control:
         pattern = re.compile(
             r"(?ms)^(runtime_channel_server:\n.*?^  tls:\n)"
@@ -92,8 +108,12 @@ def _write_private(target: Path, content: str) -> None:
 
 
 def main() -> int:
+    _localize_yaml(
+        "core-service/config.yaml",
+        "core-service/config.local.yaml",
+        core=True,
+    )
     for source, target in (
-        ("core-service/config.yaml", "core-service/config.local.yaml"),
         (
             "gateway/quant-handler/config.yaml",
             "gateway/quant-handler/config.local.yaml",
