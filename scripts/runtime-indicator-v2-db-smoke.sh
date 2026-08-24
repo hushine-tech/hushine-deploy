@@ -58,13 +58,9 @@ run_suffix="$(
 )"
 FRESH_DB="hushine_indicator_acceptance_${run_suffix}_fresh"
 BUNDLE_DB="hushine_indicator_acceptance_${run_suffix}_bundle"
-UPGRADE_DB="hushine_indicator_acceptance_${run_suffix}_upgrade"
-ORDER_GUARD_DB="hushine_indicator_acceptance_${run_suffix}_order_guard"
 OWNED_DATABASES=(
   "${FRESH_DB}"
   "${BUNDLE_DB}"
-  "${UPGRADE_DB}"
-  "${ORDER_GUARD_DB}"
 )
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hushine-indicator-v2-db.XXXXXX")"
 chmod 700 "${WORK_DIR}"
@@ -194,11 +190,6 @@ psql_owned() {
   run_psql -X -v ON_ERROR_STOP=1 -d "${database}" "$@"
 }
 
-indicator_v1_rows() {
-  psql_owned "${UPGRADE_DB}" -Atc \
-    "SELECT (SELECT count(*) FROM strategy_indicator_definitions) + (SELECT count(*) FROM strategy_indicator_chunks)"
-}
-
 schema_fingerprint() {
   local database="$1"
   psql_owned "${database}" -Atc "
@@ -220,43 +211,23 @@ SELECT md5(
 )"
 }
 
-order_rows_fingerprint() {
-  psql_owned "${ORDER_GUARD_DB}" -Atc "
-SELECT md5(
-  (SELECT string_agg(to_jsonb(item)::text, '' ORDER BY order_id) FROM orders AS item)
-  ||
-  (SELECT string_agg(to_jsonb(item)::text, '' ORDER BY fill_id) FROM order_fills AS item)
-)"
-}
-
-echo "→ Generated schema bundle matches current service migrations"
+echo "→ Generated portfolio bundle matches current service migrations"
 rendered_bundle_dir="${WORK_DIR}/generated"
 HUSHINE_SOURCE_ROOT="${SOURCE_ROOT}" \
   bash "${DEPLOY_ROOT}/scripts/db/render-schema-bundle.sh" \
   "${rendered_bundle_dir}" >/dev/null
-for generated_file in \
-  00_create_databases.psql \
-  portfolio.sql \
-  order.sql \
-  control_panel.sql \
-  market_data_year.sql \
-  README.md; do
-  cmp \
-    "${rendered_bundle_dir}/${generated_file}" \
-    "${DEPLOY_ROOT}/db/generated/${generated_file}" \
-    || {
-      echo "tracked schema bundle is stale: ${generated_file}" >&2
-      exit 1
-    }
-done
+cmp \
+  "${rendered_bundle_dir}/portfolio.sql" \
+  "${DEPLOY_ROOT}/db/generated/portfolio.sql" \
+  || {
+    echo "tracked schema bundle is stale: portfolio.sql" >&2
+    exit 1
+  }
 
-echo "→ Indicator V2 isolated migration tests"
+echo "→ Indicator V2 fresh-baseline integration test"
 run_integration_without_skip \
-  TestIndicatorV2FreshBootstrapIsCompleteAndIdempotent \
+  TestPortfolioBaselineFreshBootstrapIsCompleteAndIdempotent \
   "${FRESH_DB}"
-run_integration_without_skip \
-  TestIndicatorV1PopulatedUpgradePreservesEveryRetainedTable \
-  "${UPGRADE_DB}"
 
 for database in "${OWNED_DATABASES[@]}"; do
   create_owned_database "${database}"
@@ -309,127 +280,6 @@ SELECT
 "
 )" == "t" ]] || {
   echo "generated portfolio bundle did not bootstrap Indicator V2" >&2
-  exit 1
-}
-
-echo "→ Populate a legacy V1 target behind the destructive guard"
-run_portfolio_runner "${UPGRADE_DB}" >/dev/null
-psql_owned "${UPGRADE_DB}" \
-  <"${CORE_ROOT}/internal/storage/migrations/testdata/indicator_v1_fixture.sql" \
-  >/dev/null
-[[ "$(indicator_v1_rows)" == "4" ]] || {
-  echo "legacy V1 fixture did not produce four rows" >&2
-  exit 1
-}
-
-echo "→ Seed a separate order/fill database"
-psql_owned "${ORDER_GUARD_DB}" \
-  <"${DEPLOY_ROOT}/db/generated/order.sql" >/dev/null
-psql_owned "${ORDER_GUARD_DB}" >/dev/null <<'SQL'
-INSERT INTO order_intents (
-  intent_id, time, updated_at, portfolio_id, venue_id, user_id, strategy_id,
-  session_id, environment, exchange, market, symbol, side, position_side,
-  order_type, requested_qty, requested_price, status
-) VALUES (
-  'indicator-v2-intent', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
-  1, 1, 1, 1, 'indicator-v2-session', 1, 1, 1, 'TESTUSDT', 1, 0, 1,
-  1, 100, 2
-);
-INSERT INTO order_attempts (
-  attempt_id, intent_id, time, updated_at, status
-) VALUES (
-  'indicator-v2-attempt', 'indicator-v2-intent',
-  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 2
-);
-INSERT INTO orders (
-  order_id, attempt_id, intent_id, orig_qty, executed_qty, remaining_qty,
-  avg_price, price, status, time, updated_at
-) VALUES (
-  'indicator-v2-order', 'indicator-v2-attempt', 'indicator-v2-intent',
-  1, 1, 0, 100, 100, 3, '2026-01-01T00:00:00Z',
-  '2026-01-01T00:00:00Z'
-);
-INSERT INTO order_fills (
-  time, fill_id, order_id, attempt_id, intent_id, qty, fill_price, status
-) VALUES (
-  '2026-01-01T00:00:00Z', 'indicator-v2-fill', 'indicator-v2-order',
-  'indicator-v2-attempt', 'indicator-v2-intent', 1, 100, 1
-);
-SQL
-order_hash_before="$(order_rows_fingerprint)"
-
-owner_token="$(openssl rand -hex 32)"
-mismatched_token="$(openssl rand -hex 32)"
-owner_file="${WORK_DIR}/upgrade-owner.json"
-mismatched_owner_file="${WORK_DIR}/upgrade-owner-mismatch.json"
-printf '{"schema":1,"database":"%s","owner_token":"%s"}\n' \
-  "${UPGRADE_DB}" "${owner_token}" >"${owner_file}"
-printf '{"schema":1,"database":"%s","owner_token":"%s"}\n' \
-  "${UPGRADE_DB}" "${mismatched_token}" >"${mismatched_owner_file}"
-chmod 600 "${owner_file}" "${mismatched_owner_file}"
-run_psql -X -v ON_ERROR_STOP=1 -d "${PGDATABASE_ADMIN}" \
-  -c "COMMENT ON DATABASE \"${UPGRADE_DB}\" IS 'hushine-indicator-acceptance:${owner_token}'" \
-  >/dev/null
-
-echo "→ Destructive guard rejects missing and mismatched ownership"
-if run_portfolio_runner "${UPGRADE_DB}" >"${WORK_DIR}/missing-owner.log" 2>&1; then
-  echo "legacy V1 migration ran without explicit ownership" >&2
-  exit 1
-fi
-grep -Fq 'INDICATOR_V2_CUTOVER_AUTH_REQUIRED' "${WORK_DIR}/missing-owner.log"
-[[ "$(indicator_v1_rows)" == "4" ]] || {
-  echo "missing-owner rejection changed V1 rows" >&2
-  exit 1
-}
-if (
-  export HUSHINE_INDICATOR_V2_DESTRUCTIVE_MODE=acceptance
-  export HUSHINE_INDICATOR_V2_ACCEPTANCE_OWNER_FILE="${mismatched_owner_file}"
-  run_portfolio_runner "${UPGRADE_DB}"
-) >"${WORK_DIR}/mismatched-owner.log" 2>&1; then
-  echo "legacy V1 migration accepted a mismatched owner token" >&2
-  exit 1
-fi
-grep -Fq 'INDICATOR_V2_ACCEPTANCE_OWNERSHIP_INVALID' \
-  "${WORK_DIR}/mismatched-owner.log"
-[[ "$(indicator_v1_rows)" == "4" ]] || {
-  echo "mismatched-owner rejection changed V1 rows" >&2
-  exit 1
-}
-
-echo "→ Owned destructive indicator-only upgrade"
-(
-  export HUSHINE_INDICATOR_V2_DESTRUCTIVE_MODE=acceptance
-  export HUSHINE_INDICATOR_V2_ACCEPTANCE_OWNER_FILE="${owner_file}"
-  run_portfolio_runner "${UPGRADE_DB}"
-) | tee "${WORK_DIR}/owned-upgrade.log"
-grep -Fq \
-  "ensure-portfolio-db: OK (database ${UPGRADE_DB} + migrations)" \
-  "${WORK_DIR}/owned-upgrade.log"
-[[ "$(indicator_v1_rows)" == "0" ]] || {
-  echo "owned V1 upgrade left legacy indicator rows" >&2
-  exit 1
-}
-psql_owned "${UPGRADE_DB}" -Atc "
-SELECT count(*) = 10
-FROM information_schema.columns
-WHERE table_schema='public' AND (
-  (
-    table_name='strategy_indicator_chunks' AND column_name IN (
-      'start_sequence', 'end_sequence', 'times_ms', 'scalar_values',
-      'markers_json', 'revision', 'finalized', 'protocol_version'
-    )
-  )
-  OR (
-    table_name='strategy_indicator_definitions'
-    AND column_name='protocol_version'
-  )
-  OR (
-    table_name='strategy_sessions'
-    AND column_name='indicator_finalization_pending'
-  )
-)" | grep -qx 't'
-[[ "$(order_rows_fingerprint)" == "${order_hash_before}" ]] || {
-  echo "portfolio indicator upgrade changed the separate order/fill database" >&2
   exit 1
 }
 

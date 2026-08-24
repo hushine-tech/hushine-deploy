@@ -62,8 +62,7 @@ mkdir -p "${source_root}/gateway"
 
 scan_source_root="${test_root}/scan-source"
 mkdir -p \
-  "${scan_source_root}/core-service/internal/storage/migrations/testdata" \
-  "${scan_source_root}/core-service/cmd/ensure-portfolio-db" \
+  "${scan_source_root}/core-service/internal/storage/migrations" \
   "${scan_source_root}/core-service/internal/service" \
   "${scan_source_root}/control-panel-service" \
   "${scan_source_root}/strategy-service/gen/runtimeworkerv1" \
@@ -72,21 +71,36 @@ mkdir -p \
   "${scan_source_root}/gateway/quant-frontend"
 printf '%s\n' 'type WorkerFrame_IndicatorFrameV2 struct{}' \
   >"${scan_source_root}/strategy-service/gen/runtimeworkerv1/runtime_worker.pb.go"
-printf '%s\n' "SELECT 'values_json';" \
-  >"${scan_source_root}/core-service/internal/storage/migrations/0005_runtime_indicator_v2.sql"
-printf '%s\n' 'const legacyColumn = "values_json"' \
-  >"${scan_source_root}/core-service/cmd/ensure-portfolio-db/cutover_guard.go"
-printf '%s\n' 'const legacyColumn = "values_json"' \
-  >"${scan_source_root}/core-service/cmd/ensure-portfolio-db/cutover_guard_test.go"
 printf '%s\n' 'const legacyColumn = "values_json"' \
   >"${scan_source_root}/core-service/internal/storage/migrations/indicator_v2_integration_test.go"
-printf '%s\n' 'values_json jsonb NOT NULL' \
-  >"${scan_source_root}/core-service/internal/storage/migrations/testdata/indicator_v1_fixture.sql"
 
 scan_output="${test_root}/scan.log"
 HUSHINE_SOURCE_ROOT="${scan_source_root}" "${SCRIPT}" scan-no-v1 >"${scan_output}"
 grep -Fxq 'runtime Indicator V2 no-V1 source/generated scan: PASS' "${scan_output}" \
-  || fail "strict no-V1 scan did not accept V2 generated wrappers and the compatibility allowlist"
+  || fail "strict no-V1 scan did not accept V2 generated wrappers and current test coverage"
+
+deleted_core_paths=(
+  core-service/internal/storage/migrations/0005_runtime_indicator_v2.sql
+  core-service/cmd/ensure-portfolio-db/cutover_guard.go
+  core-service/cmd/ensure-portfolio-db/cutover_guard_test.go
+  core-service/internal/storage/migrations/testdata/indicator_v1_fixture.sql
+)
+for deleted_path in "${deleted_core_paths[@]}"; do
+  mkdir -p "$(dirname "${scan_source_root}/${deleted_path}")"
+  printf '%s\n' 'const legacyColumn = "values_json"' \
+    >"${scan_source_root}/${deleted_path}"
+  set +e
+  deleted_path_output="$(
+    HUSHINE_SOURCE_ROOT="${scan_source_root}" "${SCRIPT}" scan-no-v1 2>&1
+  )"
+  deleted_path_status="$?"
+  set -e
+  [[ "${deleted_path_status}" -ne 0 ]] \
+    || fail "strict no-V1 scan accepted deleted Core path ${deleted_path}"
+  grep -Fq "${deleted_path}" <<<"${deleted_path_output}" \
+    || fail "deleted Core path failure did not identify ${deleted_path}"
+  rm -f -- "${scan_source_root}/${deleted_path}"
+done
 
 printf '%s\n' 'type WorkerFrame_IndicatorFrame struct{}' \
   >"${scan_source_root}/strategy-service/gen/runtimeworkerv1/runtime_worker.pb.go"

@@ -168,11 +168,7 @@ run_no_v1_scan() {
     [[ -n "${line}" ]] || continue
     path="${line%%:*}"
     case "${path}" in
-      core-service/internal/storage/migrations/0005_runtime_indicator_v2.sql|\
-      core-service/cmd/ensure-portfolio-db/cutover_guard.go|\
-      core-service/cmd/ensure-portfolio-db/cutover_guard_test.go|\
       core-service/internal/storage/migrations/indicator_v2_integration_test.go|\
-      core-service/internal/storage/migrations/testdata/indicator_v1_fixture.sql|\
       core-service/internal/service/grpc_strategy_indicator_proto_test.go|\
       strategy-service/tests/test_strategy_indicators.py|\
       strategy-service/tests/test_platform_proxy.py|\
