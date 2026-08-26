@@ -22,8 +22,9 @@ required_literals=(
   'DEPLOY_ROOT="$(pwd -P)"'
   'SOURCE_ROOT="${DEPLOY_ROOT}"'
   'SOURCE_ROOT="$(cd "${DEPLOY_ROOT}/.." && pwd -P)"'
-  'make -C "${SOURCE_ROOT}" ensure-dbs'
-  'make -C "${SOURCE_ROOT}/core-service" start CONFIG="${APP_CONFIG}"'
+  'PGHOST="${DEP_HOST}" make -C "${SOURCE_ROOT}" ensure-dbs'
+  'prepare-remote-configs.py'
+  'make -C "${SOURCE_ROOT}/core-service" start CONFIG="${CORE_CONFIG}"'
   'CORE_CREDENTIAL_ENCRYPTION_KEY="${CORE_CREDENTIAL_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef}"'
   'CORE_CREDENTIAL_KEY_VERSION="${CORE_CREDENTIAL_KEY_VERSION:-dev-v1}"'
   'RUNTIME_PLATFORM_DEBUG_BARE_RUNTIME_ENABLED="${RUNTIME_PLATFORM_DEBUG_BARE_RUNTIME_ENABLED:-true}"'
@@ -62,6 +63,16 @@ for literal in "${required_literals[@]}"; do
   fi
 done
 
+handler_config="../gateway/quant-handler/config.yaml"
+if grep -Fq '192.168.88.10' "${handler_config}"; then
+  echo "quant-handler active config still contains the retired remote default" >&2
+  exit 1
+fi
+grep -Fq 'brokers: ["127.0.0.1:9092"]' "${handler_config}" \
+  || { echo "quant-handler local Kafka default is not loopback" >&2; exit 1; }
+grep -Fq 'endpoint: "http://127.0.0.1:4318"' "${handler_config}" \
+  || { echo "quant-handler local OTLP default is not loopback" >&2; exit 1; }
+
 test_root="$(mktemp -d)"
 trap 'rm -rf -- "${test_root}"' EXIT
 fake_bin="${test_root}/bin"
@@ -73,9 +84,40 @@ cat >"${fake_bin}/make" <<'FAKE_MAKE'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'make %s\n' "$*" >>"${COMMAND_LOG}"
+config="" log_config=""
+for argument in "$@"; do
+  case "${argument}" in
+    CONFIG=*) config="${argument#CONFIG=}" ;;
+    LOG_CONFIG=*) log_config="${argument#LOG_CONFIG=}" ;;
+  esac
+done
 case "$*" in
+  *' ensure-dbs')
+    [[ "${PGHOST:-}" == "${DEP_HOST}" ]] || {
+      echo "ensure-dbs did not receive DEP_HOST through PGHOST" >&2
+      exit 96
+    }
+    ;;
   *'/core-service start CONFIG='*)
+    grep -Fq "host: \"${DEP_HOST}\"" "${config}"
+    grep -Fq "\"${DEP_HOST}:19092\"" "${config}"
+    grep -Fq "http://${DEP_HOST}:4318" "${config}"
     : >"${STARTED_FILE}"
+    ;;
+  *'/control-panel-service start CONFIG='*)
+    [[ "$(grep -Fc "host: \"${DEP_HOST}\"" "${config}")" -ge 2 ]]
+    grep -Fq "\"${DEP_HOST}:19092\"" "${config}"
+    grep -Fq "http://${DEP_HOST}:4318" "${config}"
+    ;;
+  *'/scraper start CONFIG='*)
+    [[ "$(grep -Fc "host: \"${DEP_HOST}\"" "${config}")" -ge 2 ]]
+    grep -Fq "\"${DEP_HOST}:19092\"" "${config}"
+    grep -Fq "${DEP_HOST}:19092" "${log_config}"
+    grep -Fq "http://${DEP_HOST}:4318" "${log_config}"
+    ;;
+  *'/gateway/quant-handler start CONFIG='*)
+    grep -Fq "\"${DEP_HOST}:19092\"" "${config}"
+    grep -Fq "http://${DEP_HOST}:4318" "${config}"
     ;;
 esac
 FAKE_MAKE
@@ -163,7 +205,7 @@ done
 for current_call in \
   'lsof -nP -tiTCP:50051 -sTCP:LISTEN' \
   'lsof -nP -tiTCP:50055 -sTCP:LISTEN' \
-  'make -C '"${expected_source_root}"'/core-service start CONFIG=./config.local.yaml'; do
+  'make -C '"${expected_source_root}"'/core-service start CONFIG=/'; do
   if ! grep -Fq -- "${current_call}" "${command_log}"; then
     echo "restart skipped current startup/cleanup behavior: ${current_call}" >&2
     exit 1

@@ -41,6 +41,10 @@ cat >"${fake_bin}/go" <<'FAKE_GO'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1" == build && "$2" == -trimpath && "$3" == -o ]]
+if { true <&"${FUNDING_SMOKE_CREDENTIAL_FD}"; } 2>/dev/null; then
+  echo "credential descriptor leaked into build subprocess" >&2
+  exit 95
+fi
 output="$4"
 cat >"${output}" <<'FAKE_BINARY'
 #!/usr/bin/env bash

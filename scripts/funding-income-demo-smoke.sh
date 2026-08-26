@@ -42,6 +42,10 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 (
+  # The build toolchain must never inherit the credential channel. This only
+  # closes the already-validated numeric descriptor in the build subshell;
+  # the final smoke process still inherits it from the parent shell.
+  eval "exec ${CREDENTIAL_FD}<&-"
   cd "${CORE_ROOT}"
   go build -trimpath -o "${temporary}/funding-income-demo-smoke" \
     ./cmd/funding-income-demo-smoke

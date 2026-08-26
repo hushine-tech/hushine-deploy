@@ -15,7 +15,7 @@ bash -n "${SCRIPT}" || fail "service-chain gate is not valid Bash"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/funding-chain-contract.XXXXXX")"
 trap 'rm -rf -- "${fixture}"' EXIT
 chmod 0700 "${fixture}"
-for repository in core-service scraper control-panel-service strategy-service hushine-deploy; do
+for repository in core-service scraper control-panel-service strategy-service gateway/quant-handler hushine-deploy; do
   mkdir -p "${fixture}/${repository}"
   git -C "${fixture}/${repository}" init -q
   git -C "${fixture}/${repository}" config user.name "Funding chain test"
@@ -75,6 +75,35 @@ make -C "${DEPLOY_ROOT}" -n funding-income-demo-smoke >/dev/null \
   || fail "Makefile Demo smoke entry point is missing"
 grep -Fq 'HUSHINE_TEST_PG_ADMIN_DSN="${LOCAL_PG_ADMIN_DSN}"' "${SCRIPT}" \
   || fail "fresh-schema assertion does not receive the owned local admin DSN"
+grep -Fq 'go test -v -tags=integration ./internal/runtimeagent' "${SCRIPT}" \
+  || fail "blocked-worker assertion is not compiled with the integration build tag"
+grep -Fq -- '--- PASS: TestIndicatorV2Integration1023ThenTwoFrames' "${SCRIPT}" \
+  || fail "Indicator assertion has no exact executed-test PASS check"
+grep -Fq -- '--- PASS: TestBlockedWorkerKeepsRuntimeHeartbeatAndCanBeReplaced' "${SCRIPT}" \
+  || fail "blocked-worker assertion has no exact executed-test PASS check"
+grep -Fq 'runtimeagent-integration-test.log' "${SCRIPT}" \
+  || fail "runtime-agent integration evidence is not retained for validation"
+grep -Fq -- '--no-recreate' "${SCRIPT}" \
+  || fail "local infrastructure may recreate containers that predate the gate"
+grep -Fq 'containers.all.before' "${SCRIPT}" \
+  || fail "container cleanup does not snapshot every pre-existing container"
+grep -Fq 'docker rm -f' "${SCRIPT}" \
+  || fail "containers created by the gate are not removed"
+grep -Fq 'PGDATABASE_PORTFOLIO="${OWNED_PORTFOLIO_DB}"' "${SCRIPT}" \
+  || fail "service-chain migrations do not use an owned Portfolio database"
+grep -Fq 'SCRAPER_DATABASE_PREFIX="${OWNED_MARKET_PREFIX}"' "${SCRIPT}" \
+  || fail "service-chain migrations do not use owned market-data databases"
+grep -Fq 'drop_owned_databases' "${SCRIPT}" \
+  || fail "owned database cleanup is missing"
+for real_probe in \
+  'probe_started_mock_adapter' \
+  'probe_started_core_http' \
+  'probe_started_control_http' \
+  'probe_started_runtime_channel_mtls' \
+  'probe_started_scraper_reconcile'; do
+  grep -Fq "${real_probe}" "${SCRIPT}" \
+    || fail "started-service probe is missing: ${real_probe}"
+done
 
 mkdir -p "${fixture}/evidence"
 printf '%s\n' 'core-startup-root-cause' >"${fixture}/evidence/core-service.log"

@@ -29,10 +29,28 @@ if [ -z "${DEP_HOST}" ]; then
   echo "DEP_HOST is required; use make local-start for loopback local infrastructure." >&2
   exit 2
 fi
+if [[ ! "${DEP_HOST}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+  echo "DEP_HOST must be a plain IPv4 address or DNS name." >&2
+  exit 2
+fi
 REMOTE_RUNTIME_USER="${REMOTE_RUNTIME_USER:-hushine-tech}"
 CONTROL_PANEL_ADDR="${CONTROL_PANEL_ADDR:-127.0.0.1:50054}"
-APP_CONFIG="${APP_CONFIG:-./config.local.yaml}"
-SCRAPER_LOG_CONFIG="${SCRAPER_LOG_CONFIG:-./log-config.local.json}"
+
+REMOTE_CONFIG_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/hushine-remote-config.XXXXXX")"
+chmod 0700 "${REMOTE_CONFIG_ROOT}"
+cleanup_remote_configs() {
+  rm -rf -- "${REMOTE_CONFIG_ROOT}"
+}
+trap cleanup_remote_configs EXIT HUP INT TERM
+python3 "${DEPLOY_ROOT}/scripts/prepare-remote-configs.py" \
+  --source-root "${SOURCE_ROOT}" \
+  --output-dir "${REMOTE_CONFIG_ROOT}" \
+  --host "${DEP_HOST}"
+CORE_CONFIG="${REMOTE_CONFIG_ROOT}/core-service.yaml"
+CONTROL_PANEL_CONFIG="${REMOTE_CONFIG_ROOT}/control-panel-service.yaml"
+SCRAPER_CONFIG="${REMOTE_CONFIG_ROOT}/scraper.yaml"
+SCRAPER_LOG_CONFIG="${REMOTE_CONFIG_ROOT}/scraper-log.json"
+HANDLER_CONFIG="${REMOTE_CONFIG_ROOT}/quant-handler.yaml"
 
 export PATH="/usr/local/go/bin:${PATH}"
 export NO_PROXY="127.0.0.1,localhost,::1,${DEP_HOST},${NO_PROXY:-}"
@@ -165,15 +183,15 @@ for port in 5432 19092 4318; do
 done
 
 echo "→ 应用数据库迁移..."
-make -C "${SOURCE_ROOT}" ensure-dbs
+PGHOST="${DEP_HOST}" make -C "${SOURCE_ROOT}" ensure-dbs
 
 echo "→ 启动应用服务...（远端 runtime 用户默认 ${REMOTE_RUNTIME_USER}@${DEP_HOST}）"
-make -C "${SOURCE_ROOT}/core-service" start CONFIG="${APP_CONFIG}"
+make -C "${SOURCE_ROOT}/core-service" start CONFIG="${CORE_CONFIG}"
 sleep 2
-make -C "${SOURCE_ROOT}/control-panel-service" start CONFIG="${APP_CONFIG}"
-make -C "${SOURCE_ROOT}/scraper" start CONFIG="${APP_CONFIG}" LOG_CONFIG="${SCRAPER_LOG_CONFIG}"
+make -C "${SOURCE_ROOT}/control-panel-service" start CONFIG="${CONTROL_PANEL_CONFIG}"
+make -C "${SOURCE_ROOT}/scraper" start CONFIG="${SCRAPER_CONFIG}" LOG_CONFIG="${SCRAPER_LOG_CONFIG}"
 sleep 1
-make -C "${SOURCE_ROOT}/gateway/quant-handler" start CONFIG="${APP_CONFIG}"
+make -C "${SOURCE_ROOT}/gateway/quant-handler" start CONFIG="${HANDLER_CONFIG}"
 make -C "${SOURCE_ROOT}/gateway/quant-frontend" start
 
 assert_single_process "control-panel-service" "control-panel-service.*-config"
