@@ -352,8 +352,8 @@ PY
 }
 
 probe_started_core_http() {
-  wait_http "http://127.0.0.1:${CORE_HTTP_PORT}/portfolios" "core-service" "core-service"
-  curl -fsS "http://127.0.0.1:${CORE_HTTP_PORT}/portfolios" \
+  wait_http "http://127.0.0.1:${CORE_HTTP_PORT}/portfolios?user_id=1" "core-service" "core-service"
+  curl -fsS "http://127.0.0.1:${CORE_HTTP_PORT}/portfolios?user_id=1" \
     >"${EVIDENCE_ROOT}/core-portfolios.json"
   python3 - "${EVIDENCE_ROOT}/core-portfolios.json" <<'PY'
 import json, sys
