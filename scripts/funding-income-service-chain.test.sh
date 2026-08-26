@@ -103,10 +103,16 @@ PY
 }
 
 wait_http() {
-  local url="$1" name="$2"
+  local url="$1" name="$2" log_name="${3:-$2}" status=""
   local deadline=$((SECONDS + ${SERVICE_READY_TIMEOUT_SECONDS:-45}))
-  until curl -fsS "${url}" >/dev/null 2>&1; do
-    (( SECONDS < deadline )) || die "${name} did not become HTTP-ready: ${url}"
+  until status="$(curl -sS -o "${EVIDENCE_ROOT}/${log_name}-http-response" -w '%{http_code}' "${url}" 2>/dev/null)" \
+    && [[ "${status}" =~ ^2[0-9][0-9]$ ]]; do
+    if (( SECONDS >= deadline )); then
+      [[ ! -f "${EVIDENCE_ROOT}/${log_name}.log" ]] || tail -n 200 "${EVIDENCE_ROOT}/${log_name}.log" >&2
+      [[ ! -f "${EVIDENCE_ROOT}/${log_name}-http-response" ]] \
+        || { echo "--- ${name} HTTP ${status} ---" >&2; cat "${EVIDENCE_ROOT}/${log_name}-http-response" >&2; }
+      die "${name} did not become HTTP-ready: ${url}"
+    fi
     sleep 0.25
   done
 }
@@ -346,7 +352,7 @@ PY
 }
 
 probe_started_core_http() {
-  wait_http "http://127.0.0.1:${CORE_HTTP_PORT}/portfolios" "core-service"
+  wait_http "http://127.0.0.1:${CORE_HTTP_PORT}/portfolios" "core-service" "core-service"
   curl -fsS "http://127.0.0.1:${CORE_HTTP_PORT}/portfolios" \
     >"${EVIDENCE_ROOT}/core-portfolios.json"
   python3 - "${EVIDENCE_ROOT}/core-portfolios.json" <<'PY'
@@ -357,8 +363,8 @@ PY
 }
 
 probe_started_control_http() {
-  wait_http "http://127.0.0.1:${CONTROL_HTTP_PORT}/healthz" "control-panel health"
-  wait_http "http://127.0.0.1:${CONTROL_HTTP_PORT}/readyz" "control-panel readiness"
+  wait_http "http://127.0.0.1:${CONTROL_HTTP_PORT}/healthz" "control-panel health" "control-panel-service"
+  wait_http "http://127.0.0.1:${CONTROL_HTTP_PORT}/readyz" "control-panel readiness" "control-panel-service"
   echo "probe: started control-panel-service health and readiness passed"
 }
 
