@@ -65,14 +65,22 @@ PY
 }
 
 wait_tcp() {
-  local port="$1" name="$2" deadline=$((SECONDS + 45))
+  local port="$1" name="$2" log_name="${3:-$2}"
+  local deadline=$((SECONDS + ${SERVICE_READY_TIMEOUT_SECONDS:-45}))
   until python3 - "${port}" <<'PY' >/dev/null 2>&1
 import socket, sys
 with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=0.25):
     pass
 PY
   do
-    (( SECONDS < deadline )) || die "${name} did not become ready on loopback:${port}"
+    if (( SECONDS >= deadline )); then
+      if [[ -n "${EVIDENCE_ROOT}" && -f "${EVIDENCE_ROOT}/${log_name}.log" ]]; then
+        echo "--- ${name} startup log ---" >&2
+        tail -n 200 "${EVIDENCE_ROOT}/${log_name}.log" >&2
+        echo "--- end ${name} startup log ---" >&2
+      fi
+      die "${name} did not become ready on loopback:${port}"
+    fi
     sleep 0.25
   done
 }

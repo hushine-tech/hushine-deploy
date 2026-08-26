@@ -74,4 +74,23 @@ make -C "${DEPLOY_ROOT}" -n funding-income-service-chain >/dev/null \
 make -C "${DEPLOY_ROOT}" -n funding-income-demo-smoke >/dev/null \
   || fail "Makefile Demo smoke entry point is missing"
 
+mkdir -p "${fixture}/evidence"
+printf '%s\n' 'core-startup-root-cause' >"${fixture}/evidence/core-service.log"
+set +e
+readiness_output="$(
+  (
+    export HUSHINE_SOURCE_ROOT="${fixture}"
+    export SERVICE_READY_TIMEOUT_SECONDS=0
+    # shellcheck disable=SC1090
+    source "${SCRIPT}"
+    EVIDENCE_ROOT="${fixture}/evidence"
+    wait_tcp 1 "core-service" "core-service"
+  ) 2>&1
+)"
+readiness_status="$?"
+set -e
+[[ "${readiness_status}" -ne 0 ]] || fail "failed readiness check unexpectedly passed"
+grep -Fq 'core-startup-root-cause' <<<"${readiness_output}" \
+  || fail "readiness failure omitted the owned service log"
+
 echo "funding-income service-chain contract: PASS"
