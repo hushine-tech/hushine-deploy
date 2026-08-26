@@ -123,9 +123,23 @@ FAKE_PGREP
 chmod 0700 "${fake_bin}"/*
 : >"${command_log}"
 
+set +e
+missing_host_output="$(DEP_HOST= bash restart.sh 2>&1)"
+missing_host_status="$?"
+set -e
+[[ "${missing_host_status}" -eq 2 ]] || {
+  echo "restart accepted a missing DEP_HOST" >&2
+  exit 1
+}
+grep -Fq 'DEP_HOST is required' <<<"${missing_host_output}" || {
+  echo "restart rejected missing DEP_HOST without an actionable message" >&2
+  exit 1
+}
+
 PATH="${fake_bin}:${PATH}" \
 COMMAND_LOG="${command_log}" \
 STARTED_FILE="${started_file}" \
+DEP_HOST="203.0.113.10" \
   bash restart.sh >/dev/null
 
 expected_source_root="$(pwd -P)"
