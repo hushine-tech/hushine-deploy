@@ -77,6 +77,9 @@ done
 if grep -Fq 'strategy_path' "${SCRIPT}"; then
   fail "service-chain sends the removed strategy_path compatibility field"
 fi
+if grep -Fq 'positions:[{' "${SCRIPT}"; then
+  fail "service-chain seeds a non-canonical one-way Futures position"
+fi
 
 for forbidden in \
   'HUSHINE_INDICATOR_V2_BARRIER_FILE=' \

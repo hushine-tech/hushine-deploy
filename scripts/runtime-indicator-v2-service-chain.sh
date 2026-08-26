@@ -958,13 +958,7 @@ provision_acceptance_run() {
       futures:{
         margin_mode:"cross",
         position_mode:"one_way",
-        initial_balance:100000,
-        positions:[{
-          symbol:"TESTUSDT",
-          direction:0,
-          initial_balance:100000,
-          fee_rate:0.0004
-        }]
+        initial_balance:100000
       }
     }')")"
   venue="$(jq -er .venue_id <<<"${response}")"
