@@ -21,6 +21,7 @@ CORE_GRPC_PORT=""
 CONTROL_HTTP_PORT=""
 CONTROL_GRPC_PORT=""
 RUNTIME_GRPC_PORT=""
+CHAIN_ASSERTIONS_PASSED=false
 
 die() {
   echo "funding-income service-chain: $*" >&2
@@ -38,7 +39,7 @@ require_clean_repositories() {
 }
 
 cleanup_owned_processes() {
-  local index pid
+  local index pid result=0
   for ((index=${#OWNED_PIDS[@]}-1; index>=0; index--)); do
     pid="${OWNED_PIDS[index]}"
     kill -0 "${pid}" 2>/dev/null || continue
@@ -49,25 +50,72 @@ cleanup_owned_processes() {
     done
     kill -0 "${pid}" 2>/dev/null && kill -KILL "${pid}" 2>/dev/null || true
     wait "${pid}" 2>/dev/null || true
+    if kill -0 "${pid}" 2>/dev/null; then
+      echo "funding-income service-chain cleanup failed: process remains alive: ${pid}" >&2
+      result=1
+    fi
   done
   OWNED_PIDS=()
+  return "${result}"
 }
 
 cleanup_owned_resources() {
-  local rc="$?" container
+  local rc="$?" cleanup_rc=0 container id was_running was_paused now_running now_paused
   trap - EXIT HUP INT TERM
-  cleanup_owned_processes
-  drop_owned_databases || true
+  cleanup_owned_processes || cleanup_rc=1
+  drop_owned_databases || cleanup_rc=1
   if [[ -n "${EVIDENCE_ROOT}" && -f "${EVIDENCE_ROOT}/containers.all.before" ]]; then
-    record_local_container_changes || true
+    record_local_container_changes || cleanup_rc=1
   fi
   for container in "${CREATED_CONTAINERS[@]}"; do
-    docker rm -f "${container}" >/dev/null 2>&1 || true
+    if ! docker rm -f "${container}" >/dev/null 2>&1 \
+      || docker inspect "${container}" >/dev/null 2>&1; then
+      echo "funding-income service-chain cleanup failed: remove created container ${container}" >&2
+      cleanup_rc=1
+    fi
   done
-  for container in "${STARTED_EXISTING_CONTAINERS[@]}"; do
-    docker stop --time 10 "${container}" >/dev/null 2>&1 || true
-  done
-  [[ -z "${EVIDENCE_ROOT}" ]] || rm -rf -- "${EVIDENCE_ROOT}"
+  if [[ -n "${EVIDENCE_ROOT}" && -f "${EVIDENCE_ROOT}/containers.state.before" ]]; then
+    while IFS='|' read -r id was_running was_paused; do
+      [[ -n "${id}" ]] || continue
+      if ! docker inspect "${id}" >/dev/null 2>&1; then
+        echo "funding-income service-chain cleanup failed: pre-existing container disappeared: ${id}" >&2
+        cleanup_rc=1
+        continue
+      fi
+      IFS='|' read -r now_running now_paused < <(
+        docker inspect -f '{{.State.Running}}|{{.State.Paused}}' "${id}" 2>/dev/null
+      )
+      if [[ "${was_running}" == "true" ]]; then
+        docker start "${id}" >/dev/null 2>&1 || cleanup_rc=1
+      else
+        docker stop --time 10 "${id}" >/dev/null 2>&1 || cleanup_rc=1
+      fi
+      IFS='|' read -r now_running now_paused < <(
+        docker inspect -f '{{.State.Running}}|{{.State.Paused}}' "${id}" 2>/dev/null
+      )
+      if [[ "${was_paused}" == "true" && "${now_paused}" != "true" ]]; then
+        docker pause "${id}" >/dev/null 2>&1 || cleanup_rc=1
+      elif [[ "${was_paused}" != "true" && "${now_paused}" == "true" ]]; then
+        docker unpause "${id}" >/dev/null 2>&1 || cleanup_rc=1
+      fi
+      IFS='|' read -r now_running now_paused < <(
+        docker inspect -f '{{.State.Running}}|{{.State.Paused}}' "${id}" 2>/dev/null
+      )
+      if [[ "${now_running}|${now_paused}" != "${was_running}|${was_paused}" ]]; then
+        echo "funding-income service-chain cleanup failed: container state ${id}=${now_running}|${now_paused}, want ${was_running}|${was_paused}" >&2
+        cleanup_rc=1
+      fi
+    done <"${EVIDENCE_ROOT}/containers.state.before"
+  fi
+  if [[ "${cleanup_rc}" -ne 0 ]]; then
+    echo "funding-income service-chain cleanup failed; evidence retained at ${EVIDENCE_ROOT}" >&2
+    [[ "${rc}" -ne 0 ]] || rc=1
+  else
+    [[ -z "${EVIDENCE_ROOT}" ]] || rm -rf -- "${EVIDENCE_ROOT}"
+    if [[ "${rc}" -eq 0 && "${CHAIN_ASSERTIONS_PASSED}" == "true" ]]; then
+      echo "funding-income service-chain: PASS (assertions and cleanup verified)"
+    fi
+  fi
   exit "${rc}"
 }
 
@@ -134,7 +182,7 @@ record_local_container_changes() {
   local container
   while IFS= read -r container; do
     [[ -n "${container}" ]] || continue
-    if ! grep -Fqx "${container}" "${EVIDENCE_ROOT}/containers.all.before"; then
+    if ! cut -d'|' -f1 "${EVIDENCE_ROOT}/containers.state.before" | grep -Fqx "${container}"; then
       append_unique CREATED_CONTAINERS "${container}"
     elif ! grep -Fqx "${container}" "${EVIDENCE_ROOT}/containers.running.before" \
       && docker inspect -f '{{.State.Running}}' "${container}" 2>/dev/null | grep -Fqx true; then
@@ -144,7 +192,7 @@ record_local_container_changes() {
 }
 
 drop_owned_databases() {
-  local database
+  local database result=0 remaining
   [[ ${#OWNED_DATABASES[@]} -gt 0 ]] || return 0
   for database in "${OWNED_DATABASES[@]}"; do
     [[ "${database}" =~ ^hushine_funding_chain_[a-z0-9_]+$ ]] || continue
@@ -152,11 +200,20 @@ drop_owned_databases() {
       psql -X -q -U postgres -d postgres -v ON_ERROR_STOP=1 \
       -v owned_db="${database}" -c \
       "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'owned_db' AND pid <> pg_backend_pid();" \
-      >/dev/null 2>&1 || true
+      >/dev/null 2>&1 || result=1
     docker compose -f "${COMPOSE_FILE}" exec -T timescaledb \
-      dropdb -U postgres --if-exists "${database}" >/dev/null 2>&1 || true
+      dropdb -U postgres --if-exists "${database}" >/dev/null 2>&1 || result=1
+    remaining="$(docker compose -f "${COMPOSE_FILE}" exec -T timescaledb \
+      psql -X -At -U postgres -d postgres -v ON_ERROR_STOP=1 \
+      -c "SELECT count(*) FROM pg_database WHERE datname='${database}';" 2>/dev/null)" \
+      || result=1
+    if [[ "${remaining}" != "0" ]]; then
+      echo "funding-income service-chain cleanup failed: owned database remains: ${database}" >&2
+      result=1
+    fi
   done
-  OWNED_DATABASES=()
+  [[ "${result}" -ne 0 ]] || OWNED_DATABASES=()
+  return "${result}"
 }
 
 verify_income_schema() {
@@ -379,13 +436,19 @@ probe_started_runtime_channel_mtls() {
     -CAkey "${DEPLOY_ROOT}/certs/runtime-client-ca.key" \
     -CAserial "${EVIDENCE_ROOT}/runtime-client-ca.srl" -CAcreateserial \
     -out "${EVIDENCE_ROOT}/runtime-client.pem" >/dev/null 2>&1
-  openssl s_client -verify_return_error \
+  if ! openssl s_client -verify_return_error \
     -connect "127.0.0.1:${RUNTIME_GRPC_PORT}" \
     -servername runtime-channel.local \
     -CAfile "${DEPLOY_ROOT}/certs/runtime-channel-ca.pem" \
     -cert "${EVIDENCE_ROOT}/runtime-client.pem" \
     -key "${EVIDENCE_ROOT}/runtime-client.key" \
-    </dev/null >"${EVIDENCE_ROOT}/runtime-channel-mtls.log" 2>&1 || true
+    </dev/null >"${EVIDENCE_ROOT}/runtime-channel-mtls.log" 2>&1; then
+    cat "${EVIDENCE_ROOT}/runtime-channel-mtls.log" >&2
+    die "started RuntimeChannel rejected the mTLS connection"
+  fi
+  ! grep -Eiq 'alert|handshake failure|certificate required|unknown ca' \
+    "${EVIDENCE_ROOT}/runtime-channel-mtls.log" \
+    || die "started RuntimeChannel returned a TLS rejection alert"
   if ! grep -Fq 'Verification: OK' "${EVIDENCE_ROOT}/runtime-channel-mtls.log" \
     && ! grep -Fq 'Verify return code: 0 (ok)' "${EVIDENCE_ROOT}/runtime-channel-mtls.log"; then
     cat "${EVIDENCE_ROOT}/runtime-channel-mtls.log" >&2
@@ -463,12 +526,38 @@ run_approved_assertions() {
     || die "runtime-agent integration test skipped"
 }
 
+run_real_runtime_worker_chain() {
+  local state_dir="${EVIDENCE_ROOT}/runtime-worker-chain" script status=0 stop_status=0
+  script="${DEPLOY_ROOT}/scripts/runtime-indicator-v2-service-chain.sh"
+  mkdir -m 0700 -p "${state_dir}"
+  set +e
+  "${script}" start --phase pre --state-dir "${state_dir}"
+  status="$?"
+  if [[ "${status}" -eq 0 ]]; then
+    "${script}" advance 1025 --state-dir "${state_dir}" \
+      && "${script}" await finalized-1024-plus-tail --state-dir "${state_dir}"
+    status="$?"
+  fi
+  if [[ -f "${state_dir}/chain.json" ]] \
+    && [[ "$(jq -r '.status // ""' "${state_dir}/chain.json" 2>/dev/null)" == "running" ]]; then
+    "${script}" stop --state-dir "${state_dir}"
+    stop_status="$?"
+  fi
+  set -e
+  [[ "${status}" -eq 0 && "${stop_status}" -eq 0 ]] \
+    || die "real RuntimeChannel/Worker business chain failed (run=${status}, cleanup=${stop_status})"
+  [[ "$(jq -r '.cleanup.complete // false' "${state_dir}/chain.json")" == "true" ]] \
+    || die "real RuntimeChannel/Worker business chain cleanup is incomplete"
+  echo "real chain: core -> control -> authenticated RuntimeChannel -> Agent -> blocked Worker -> Funding Income wallet-once PASS"
+}
+
 main() {
   command -v docker >/dev/null 2>&1 || die "docker is required"
   command -v go >/dev/null 2>&1 || die "go is required"
   command -v uv >/dev/null 2>&1 || die "uv is required"
   command -v curl >/dev/null 2>&1 || die "curl is required"
   command -v openssl >/dev/null 2>&1 || die "openssl is required"
+  command -v jq >/dev/null 2>&1 || die "jq is required"
   require_clean_repositories
   EVIDENCE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/hushine-funding-chain.XXXXXX")"
   chmod 0700 "${EVIDENCE_ROOT}"
@@ -476,6 +565,12 @@ main() {
 
   docker compose -f "${COMPOSE_FILE}" ps -a -q >"${EVIDENCE_ROOT}/containers.all.before"
   docker compose -f "${COMPOSE_FILE}" ps --status running -q >"${EVIDENCE_ROOT}/containers.running.before"
+  : >"${EVIDENCE_ROOT}/containers.state.before"
+  while IFS= read -r container; do
+    [[ -n "${container}" ]] || continue
+    docker inspect -f '{{.Id}}|{{.State.Running}}|{{.State.Paused}}' "${container}" \
+      >>"${EVIDENCE_ROOT}/containers.state.before"
+  done <"${EVIDENCE_ROOT}/containers.all.before"
   docker image inspect elk-kafka-es-bridge:latest >/dev/null 2>&1 \
     || docker compose -f "${COMPOSE_FILE}" build kafka-es-bridge
   docker compose -f "${COMPOSE_FILE}" up -d --no-build --no-recreate
@@ -487,7 +582,8 @@ main() {
   build_and_start_services
   probe_started_services
   run_approved_assertions
-  echo "funding-income service-chain: PASS"
+  run_real_runtime_worker_chain
+  CHAIN_ASSERTIONS_PASSED=true
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

@@ -567,7 +567,7 @@ apply_owned_migrations() {
 }
 
 seed_market_data() {
-  local market="$1"
+  local market="$1" control="$2"
   pg_database "${market}" >/dev/null <<'SQL'
 CREATE TABLE IF NOT EXISTS futures_klines_testusdt_1m (
     time TIMESTAMPTZ NOT NULL,
@@ -623,6 +623,43 @@ BEGIN
     END IF;
 END
 $verify$;
+
+CREATE TABLE IF NOT EXISTS futures_funding_rates_testusdt (
+    time TIMESTAMPTZ NOT NULL,
+    symbol TEXT NOT NULL,
+    market TEXT NOT NULL DEFAULT 'futures',
+    exchange TEXT NOT NULL DEFAULT 'binance',
+    funding_rate NUMERIC(38,18) NOT NULL,
+    mark_price NUMERIC(38,18) NOT NULL,
+    next_funding_time TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (time, symbol)
+);
+SELECT create_hypertable(
+    'futures_funding_rates_testusdt',
+    'time',
+    if_not_exists => TRUE
+);
+INSERT INTO futures_funding_rates_testusdt (
+    time, symbol, market, exchange, funding_rate, mark_price, next_funding_time
+) VALUES (
+    '2025-01-01T00:06:00Z', 'TESTUSDT', 'futures', 'binance',
+    0.001000000000000000, 106.000000000000000000,
+    '2025-01-01T08:06:00Z'
+) ON CONFLICT (time, symbol) DO NOTHING;
+SQL
+  pg_database "${control}" >/dev/null <<'SQL'
+INSERT INTO market_data_coverage_segments (
+    exchange, market, kind, symbol, "interval", year,
+    segment_start_at, segment_end_at, row_count, source
+) VALUES
+    ('binance', 'futures', 'kline', 'TESTUSDT', '1m', 2025,
+     '2025-01-01T00:00:00Z', '2025-01-02T10:10:00Z', 2050,
+     'runtime-indicator-v2-service-chain'),
+    ('binance', 'futures', 'funding_rate', 'TESTUSDT', '', 2025,
+     '2025-01-01T00:00:00Z', '2025-01-02T10:10:00Z', 1,
+     'runtime-indicator-v2-service-chain')
+ON CONFLICT DO NOTHING;
 SQL
 }
 
@@ -1224,7 +1261,9 @@ supervise() {
 
   create_owned_databases "${databases}" "${owner}"
   apply_owned_migrations "${databases}"
-  seed_market_data "$(jq -r .market <<<"${databases}")"
+  seed_market_data \
+    "$(jq -r .market <<<"${databases}")" \
+    "$(jq -r .control_panel <<<"${databases}")"
   build_service_binaries
   cert_dir="${STATE_DIR}/certs"
   generate_runtime_certs "${cert_dir}"
@@ -1262,6 +1301,62 @@ require_chain() {
   owner_owner="$(jq -r .owner_token "${STATE_DIR}/owner.json")"
   [[ -n "${chain_owner}" && "${chain_owner}" == "${owner_owner}" ]] \
     || die "chain ownership token mismatch"
+}
+
+assert_funding_income_once() {
+  local state_dir="$1" database session venue result
+  local count income_id cursor status source income_type applied
+  require_chain "${state_dir}"
+  database="$(jq -r .databases.portfolio "${STATE_DIR}/chain.json")"
+  session="$(jq -r .session_id "${STATE_DIR}/chain.json")"
+  venue="$(jq -r .venue_id "${STATE_DIR}/chain.json")"
+  result="$(pg_database "${database}" -Atc "
+WITH exact_income AS (
+  SELECT income_entry_id, status, source, income_type, applied_amount
+  FROM venue_income_entries
+  WHERE session_id = '${session}' AND venue_id = ${venue}
+)
+SELECT
+  count(*),
+  COALESCE(max(income_entry_id), 0),
+  COALESCE((
+    SELECT snapshot_json #>> '{futures,last_applied_income_entry_id}'
+    FROM venue_wallet_states WHERE venue_id = ${venue}
+  ), '0'),
+  COALESCE(max(status), ''),
+  COALESCE(max(source), ''),
+  COALESCE(max(income_type), ''),
+  COALESCE(max(applied_amount), 0)
+FROM exact_income;")"
+  IFS='|' read -r count income_id cursor status source income_type applied <<<"${result}"
+  [[ "${count}" == "1" && "${income_id}" =~ ^[1-9][0-9]*$ ]]
+  [[ "${cursor}" == "${income_id}" ]]
+  [[ "${status}" == "calculated" && "${source}" == "backtest" ]]
+  [[ "${income_type}" == "FUNDING_FEE" ]]
+  [[ "${applied}" != "0" && "${applied}" != "0.000000000000000000" ]]
+  echo "runtime Indicator V2 service-chain: Funding Income wallet-once PASS"
+}
+
+assert_blocked_worker_heartbeat() {
+  local state_dir="$1" database runtime before after status deadline
+  require_chain "${state_dir}"
+  database="$(jq -r .databases.control_panel "${STATE_DIR}/chain.json")"
+  runtime="$(jq -r .runtime_id "${STATE_DIR}/chain.json")"
+  before="$(pg_database "${database}" -Atc \
+    "SELECT COALESCE(extract(epoch FROM heartbeat_at) * 1000000, 0)::bigint FROM runtime_registry WHERE runtime_id='${runtime}';")"
+  [[ "${before}" =~ ^[1-9][0-9]*$ ]] \
+    || die "blocked Worker chain has no initial Agent heartbeat"
+  deadline=$((SECONDS + 30))
+  while :; do
+    IFS='|' read -r after status < <(pg_database "${database}" -Atc \
+      "SELECT COALESCE(extract(epoch FROM heartbeat_at) * 1000000, 0)::bigint, status FROM runtime_registry WHERE runtime_id='${runtime}';")
+    if [[ "${after}" =~ ^[1-9][0-9]*$ && "${after}" -gt "${before}" && "${status}" == "active" ]]; then
+      break
+    fi
+    (( SECONDS < deadline )) || die "Agent heartbeat did not advance while Worker was barrier-blocked"
+    sleep 0.5
+  done
+  echo "runtime Indicator V2 service-chain: blocked Worker Agent heartbeat PASS"
 }
 
 indicator_snapshot() {
@@ -1843,6 +1938,8 @@ start_chain() {
     sleep 1
   done
   await_state open-1023 "${state_dir}"
+  assert_funding_income_once "${state_dir}"
+  assert_blocked_worker_heartbeat "${state_dir}"
   trap - EXIT INT TERM
   unset STARTUP_SUPERVISOR_PID STARTUP_SUPERVISOR_IDENTITY STARTUP_STATE_DIR
   echo "runtime Indicator V2 service-chain: start PASS state_dir=${state_dir}"

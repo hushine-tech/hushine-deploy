@@ -104,6 +104,130 @@ for real_probe in \
   grep -Fq "${real_probe}" "${SCRIPT}" \
     || fail "started-service probe is missing: ${real_probe}"
 done
+grep -Fq 'run_real_runtime_worker_chain' "${SCRIPT}" \
+  || fail "real core-control-RuntimeChannel-Worker business chain is not invoked"
+
+cleanup_bin="${fixture}/cleanup-bin"
+mkdir -p "${cleanup_bin}"
+cat >"${cleanup_bin}/docker" <<'FAKE_DOCKER_FAILURE'
+#!/usr/bin/env bash
+exit 73
+FAKE_DOCKER_FAILURE
+chmod 0700 "${cleanup_bin}/docker"
+set +e
+cleanup_failure_output="$(
+  (
+    export PATH="${cleanup_bin}:${PATH}"
+    # shellcheck disable=SC1090
+    source "${SCRIPT}"
+    EVIDENCE_ROOT="${fixture}/cleanup-failure-evidence"
+    mkdir -p "${EVIDENCE_ROOT}"
+    CREATED_CONTAINERS=(created-by-gate)
+    CHAIN_ASSERTIONS_PASSED=true
+    cleanup_owned_resources
+  ) 2>&1
+)"
+cleanup_failure_status="$?"
+set -e
+[[ "${cleanup_failure_status}" -ne 0 ]] \
+  || fail "created-container removal failure did not fail the gate"
+[[ "${cleanup_failure_output}" != *'funding-income service-chain: PASS'* ]] \
+  || fail "gate printed PASS after cleanup failed"
+grep -Fq 'cleanup failed' <<<"${cleanup_failure_output}" \
+  || fail "cleanup failure did not emit a diagnostic"
+
+set +e
+database_cleanup_output="$(
+  (
+    export PATH="${cleanup_bin}:${PATH}"
+    # shellcheck disable=SC1090
+    source "${SCRIPT}"
+    EVIDENCE_ROOT="${fixture}/database-cleanup-failure"
+    mkdir -p "${EVIDENCE_ROOT}"
+    OWNED_DATABASES=(hushine_funding_chain_contract_portfolio)
+    CHAIN_ASSERTIONS_PASSED=true
+    cleanup_owned_resources
+  ) 2>&1
+)"
+database_cleanup_status="$?"
+set -e
+[[ "${database_cleanup_status}" -ne 0 ]] \
+  || fail "owned-database drop failure did not fail the gate"
+grep -Fq 'cleanup failed' <<<"${database_cleanup_output}" \
+  || fail "owned-database cleanup failure omitted its diagnostic"
+
+state_bin="${fixture}/state-bin"
+state_root="${fixture}/docker-state"
+mkdir -p "${state_bin}" "${state_root}"
+cat >"${state_bin}/docker" <<'FAKE_DOCKER_STATE'
+#!/usr/bin/env bash
+set -euo pipefail
+action="$1"
+shift
+case "${action}" in
+  inspect)
+    if [[ "${1:-}" == "-f" ]]; then
+      format="$2" id="$3"
+      state="$(cat "${DOCKER_STATE_DIR}/${id}")"
+      if [[ "${format}" == *'{{.Id}}'* ]]; then
+        printf '%s|%s\n' "${id}" "${state}"
+      else
+        printf '%s\n' "${state}"
+      fi
+    else
+      [[ -f "${DOCKER_STATE_DIR}/${1}" ]]
+    fi
+    ;;
+  start) [[ "${FAIL_DOCKER_ACTION:-}" != start ]]; printf 'true|false\n' >"${DOCKER_STATE_DIR}/$1" ;;
+  stop) [[ "${FAIL_DOCKER_ACTION:-}" != stop ]]; printf 'false|false\n' >"${DOCKER_STATE_DIR}/${@: -1}" ;;
+  pause) [[ "${FAIL_DOCKER_ACTION:-}" != pause ]]; printf 'true|true\n' >"${DOCKER_STATE_DIR}/$1" ;;
+  unpause) [[ "${FAIL_DOCKER_ACTION:-}" != unpause ]]; printf 'true|false\n' >"${DOCKER_STATE_DIR}/$1" ;;
+  rm) [[ "${FAIL_DOCKER_ACTION:-}" != rm ]]; rm -f "${DOCKER_STATE_DIR}/${@: -1}" ;;
+  *) exit 72 ;;
+esac
+FAKE_DOCKER_STATE
+chmod 0700 "${state_bin}/docker"
+printf 'true|false\n' >"${state_root}/running"
+printf 'true|false\n' >"${state_root}/stopped"
+printf 'true|false\n' >"${state_root}/paused"
+state_cleanup_output="$(
+  (
+    export PATH="${state_bin}:${PATH}" DOCKER_STATE_DIR="${state_root}"
+    # shellcheck disable=SC1090
+    source "${SCRIPT}"
+    EVIDENCE_ROOT="${fixture}/state-cleanup-evidence"
+    mkdir -p "${EVIDENCE_ROOT}"
+    printf '%s\n' 'running|true|false' 'stopped|false|false' 'paused|true|true' \
+      >"${EVIDENCE_ROOT}/containers.state.before"
+    CHAIN_ASSERTIONS_PASSED=true
+    cleanup_owned_resources
+  ) 2>&1
+)"
+[[ "$(cat "${state_root}/running")" == 'true|false' ]]
+[[ "$(cat "${state_root}/stopped")" == 'false|false' ]]
+[[ "$(cat "${state_root}/paused")" == 'true|true' ]]
+grep -Fq 'assertions and cleanup verified' <<<"${state_cleanup_output}" \
+  || fail "running/stopped/paused state restoration did not produce final PASS"
+
+printf 'true|false\n' >"${state_root}/stopped"
+set +e
+stop_failure_output="$(
+  (
+    export PATH="${state_bin}:${PATH}" DOCKER_STATE_DIR="${state_root}" FAIL_DOCKER_ACTION=stop
+    # shellcheck disable=SC1090
+    source "${SCRIPT}"
+    EVIDENCE_ROOT="${fixture}/stop-cleanup-failure"
+    mkdir -p "${EVIDENCE_ROOT}"
+    printf '%s\n' 'stopped|false|false' >"${EVIDENCE_ROOT}/containers.state.before"
+    CHAIN_ASSERTIONS_PASSED=true
+    cleanup_owned_resources
+  ) 2>&1
+)"
+stop_failure_status="$?"
+set -e
+[[ "${stop_failure_status}" -ne 0 ]] || fail "pre-existing container stop failure was accepted"
+[[ "${stop_failure_output}" != *'assertions and cleanup verified'* ]] \
+  || fail "gate printed PASS after container-state restoration failed"
 
 mkdir -p "${fixture}/evidence"
 printf '%s\n' 'core-startup-root-cause' >"${fixture}/evidence/core-service.log"

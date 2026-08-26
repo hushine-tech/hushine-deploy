@@ -45,6 +45,10 @@ for literal in \
   '/api/runtimes' \
   '/run-strategy' \
   'strategy_indicator_chunks' \
+  'futures_funding_rates_testusdt' \
+  'assert_funding_income_once' \
+  'assert_blocked_worker_heartbeat' \
+  "snapshot_json #>> '{futures,last_applied_income_entry_id}'" \
   'protocol_version' \
   'strategy-debugger-cli' \
   '--expected-shas' \
