@@ -1,6 +1,6 @@
 # 用户手册
 
-最后核验：2026-08-25。
+最后核验：2026-08-27。
 
 ## 1. 登录与 Portfolio
 
@@ -61,6 +61,11 @@ Session Detail 用于查看：
 Indicator 在运行中增量写入。每 1024 点封存一块；不足 1024 点的尾块会更新同一行，
 没有新点时不会重复写。Session 正常结束或 worker restart 前会封存剩余尾块。
 
+Backtest 的 Funding 时间线和缺数据行为见 [`user-manual/backtest.md`](user-manual/backtest.md)；
+Demo/Live 对账见 [`user-manual/demo-live.md`](user-manual/demo-live.md)。
+当前页面尚无独立 Funding Income 明细表；wallet 展示已应用结果，actual/calculated/delta/
+pending 是 canonical Income 审计字段，不要根据 wallet 差额反推这些事实。
+
 ## 7. Stop、恢复与调试重启
 
 - Stop-only：停止 Strategy，不创建平仓订单。
@@ -75,7 +80,8 @@ Indicator 在运行中增量写入。每 1024 点封存一块；不足 1024 点�
 
 在 Notification Management 绑定 Telegram，确认 channel 后开启需要的事件。订单成功、
 失败、风险拒绝、Session lifecycle 和需要人工恢复的 Futures leverage rollback 可发送
-通知。相同 recovery operation 会去重；发送失败保留平台记录以便重试。
+通知。相同 recovery operation 会去重；发送失败保留平台记录以便重试。当前没有独立的
+Funding Income 用户通知类别；Funding reconciliation 告警先由运维日志和状态页承载。
 
 ## 9. 下单模式
 

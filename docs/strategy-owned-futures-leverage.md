@@ -1,6 +1,6 @@
 # 策略主导的 Futures 杠杆
 
-最后核验：2026-08-25。
+最后核验：2026-08-27。
 
 ## 用户声明
 
@@ -77,7 +77,6 @@ Start 使用 preparation worker 和正式 session worker 两个阶段：
   不占用 live admission。
 - `environment=1` Demo：Preview 只读；用户确认 Start 后才允许设置并 readback Binance。
 - `environment=2` Live：仍受 rollout guard 保护。
-- strategy-debugger-cli：使用相同 resolver 和模拟 Futures wallet，不提供额外 override。
 
 Hosted、Self-hosted 和 Bare worker 都只通过 RuntimeChannel 访问平台；不会收到 Binance
 credential、数据库、Kafka、core/order 或 notification endpoint。

@@ -12,7 +12,7 @@
 - Jaeger: http://127.0.0.1:16686
 - OTLP HTTP/gRPC: 127.0.0.1:4318 / 127.0.0.1:4317
 
-先执行 make local-bootstrap，再检查 Elasticsearch 与 Jaeger 的安全健康端点。远端只能通过 CODE_CENSUS_ES_URL 和 CODE_CENSUS_JAEGER_URL 显式覆盖，不能依赖曾经的固定 .10 地址。
+先执行 make local-bootstrap，再检查 Elasticsearch 与 Jaeger 的安全健康端点。远端只能通过 CODE_CENSUS_ES_URL 和 CODE_CENSUS_JAEGER_URL 显式覆盖，不能依赖历史共享网络固定地址。
 
 ~~~bash
 SOURCE_ROOT=/absolute/path/to/hushine

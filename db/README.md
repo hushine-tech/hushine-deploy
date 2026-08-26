@@ -1,6 +1,6 @@
 # 数据库初始化与所有权
 
-最后核验：2026-08-25。
+最后核验：2026-08-27。
 
 当前系统只支持从空数据库一次性创建当前 schema。每个 owner 仓库只保留
 `0000_create_schema_migrations.sql`（需要 ledger 的服务）和
@@ -21,6 +21,12 @@ make local-infra-up
 make local-ensure-dbs
 make local-ensure-dbs
 ```
+
+本机流程不读取共享网络的 source-default 数据库地址。`local-ensure-dbs` 显式把标准
+`PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE_ADMIN` 绑定到本机 Docker；手工
+执行 owner runner 前先 `source scripts/local-env.sh`，由它把 canonical
+`DATABASE_*`、`TIMESCALE_*` 与依赖地址覆盖为 loopback。不要省略这些覆盖后直接依赖
+各服务的默认配置。
 
 第一次执行必须创建全部数据库和对象；第二次执行必须由 migration ledger 判断为
 已应用并成为无副作用操作。不要对来源不明或包含其他 schema 版本的数据库直接执行。

@@ -1,6 +1,6 @@
 # Binance Spot USDT
 
-最后核验：2026-08-25。
+最后核验：2026-08-27。
 
 本文描述当前分支的 Binance Spot USDT 代码契约。它是实现与运维说明，
 不是“已完成真实交易所发布验收”的证明。Backtest、离线、UI、过滤器、停止与
@@ -76,8 +76,8 @@ Spot metadata cache 的 key 包含 endpoint、environment 和 symbol，TTL 为 5
 - MAX_POSITION / EXCHANGE_MAX_NUM_ORDERS / MAX_ASSET
 - symbol status、Spot permission set、account `canTrade`、订单类型与 USDT quote
 
-未知或无法安全解释的交易规则会 fail closed。Backtest、Hosted、strategy-library 与
-debugger 共享同一份机器生成 golden vectors；任何实现不得通过网络动态补规则。
+未知或无法安全解释的交易规则会 fail closed。Backtest、Hosted 与 strategy-library
+共享同一份机器生成 golden vectors；任何实现不得通过网络动态补规则。
 
 ## 下单、成交与钱包
 

@@ -1,5 +1,7 @@
 # Local Docker Environment
 
+最后核验：2026-08-27。
+
 目标：在不依赖任何共享远端主机的情况下，用本机 Docker 提供基础设施，业务服务仍从源码本机运行。
 
 ## 组件
@@ -23,6 +25,10 @@ make local-start
 migrations。生成器会把 DB/Kafka/Jaeger 切到本机，生成本地 RuntimeChannel 开发
 证书并保持 mTLS 开启；不会向 runtime 注入 DB、Kafka、core-service 或 order.v1
 地址。
+
+本机命令不以各服务的 source-default 地址为依据。`local-ensure-dbs` 显式提供本机
+`PG*` 参数；手工执行 `make ensure-dbs` 前先 `source scripts/local-env.sh`，覆盖
+canonical `DATABASE_*`、`TIMESCALE_*`、Kafka、tracing 与服务依赖地址为 loopback。
 
 本地 control-panel 默认开启 hosted runtime 覆盖率收集：
 
@@ -130,3 +136,5 @@ make dev CONFIG=./config.local.yaml LOG_CONFIG=./log-config.local.json
 - `source scripts/local-env.sh` 适合跑 `make ensure-dbs` 等命令；业务服务建议使用 `CONFIG=./config.local.yaml`，因为日志 Kafka 和 tracing endpoint 在配置文件里。
 - 如果本机设置了 `http_proxy` / `https_proxy`，本地启动目标会自动设置 `NO_PROXY=127.0.0.1,localhost,::1`，避免 gRPC / OTLP / HTTP 调用本机服务时被代理劫持。
 - 当前 scraper 本地配置保留 control-plane 模式，静态 forward collector 仍关闭，避免本机 Kafka/DB 被无需求流量打满。
+- Funding/Income 的同步、Mock 和告警说明见
+  [`operations/funding-income.md`](operations/funding-income.md)。

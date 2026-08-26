@@ -33,6 +33,23 @@ printf '%s\n' \
   >"${fixture}/api/current.proto"
 printf '%s\n' 'SELECT values_json FROM strategy_indicators;' >"${fixture}/db/current.sql"
 printf '%s\n' 'def init(output_dir: str, *types: Type) -> Logger:' >"${fixture}/src/logger.py"
+printf '%s\n' \
+  'const incomeEndpoint = "/fapi/v1/income"' \
+  'const signedQuery = "incomeType=FUNDING_FEE"' \
+  'fundingAmount := -signedQty * markPrice * fundingRate' \
+  >"${fixture}/src/generic_funding.go"
+printf '%s\n' \
+  'nextFundingTime := fundingTime.Add(8 * time.Hour)' \
+  >"${fixture}/src/funding_clock.go"
+printf '%s\n' \
+  'func Listen(handle func(context.Context, UserDataOrderEvent)) {}' \
+  >"${fixture}/src/order_only_stream.go"
+printf '%s\n' \
+  'Use strategy-debugger-cli as the current supported runtime.' \
+  >"${fixture}/docs/runtime.md"
+printf '%s\n' \
+  'CREATE TABLE funding_fee_entries (id BIGINT PRIMARY KEY);' \
+  >"${fixture}/db/funding_ledger.sql"
 
 before="$(hash_fixture)"
 set +e
@@ -57,7 +74,14 @@ for expected in \
   '/api/current.proto:1:rpc UpdatePortfolioSnapshot(UpdatePortfolioSnapshotRequest) returns (UpdatePortfolioSnapshotResponse);' \
   '/api/current.proto:2:bool include_revoked = 2;' \
   '/db/current.sql:1:SELECT values_json FROM strategy_indicators;' \
-  '/src/logger.py:1:def init(output_dir: str, *types: Type) -> Logger:'; do
+  '/src/logger.py:1:def init(output_dir: str, *types: Type) -> Logger:' \
+  '/src/generic_funding.go:1:const incomeEndpoint = "/fapi/v1/income"' \
+  '/src/generic_funding.go:2:const signedQuery = "incomeType=FUNDING_FEE"' \
+  '/src/generic_funding.go:3:fundingAmount := -signedQty * markPrice * fundingRate' \
+  '/src/funding_clock.go:1:nextFundingTime := fundingTime.Add(8 * time.Hour)' \
+  '/src/order_only_stream.go:1:func Listen(handle func(context.Context, UserDataOrderEvent)) {}' \
+  '/docs/runtime.md:1:Use strategy-debugger-cli as the current supported runtime.' \
+  '/db/funding_ledger.sql:1:CREATE TABLE funding_fee_entries (id BIGINT PRIMARY KEY);'; do
   grep -Fq -- "${expected}" <<<"${output}" \
     || fail "candidate output omitted ${expected}"
 done
@@ -66,6 +90,7 @@ rm -rf -- "${fixture:?}"/*
 mkdir -p \
   "${fixture}/src" \
   "${fixture}/docs" \
+  "${fixture}/db" \
   "${fixture}/gen" \
   "${fixture}/generated" \
   "${fixture}/vendor/example" \
@@ -73,6 +98,8 @@ mkdir -p \
   "${fixture}/tests" \
   "${fixture}/fixtures" \
   "${fixture}/testdata" \
+  "${fixture}/core-service/internal/exchange/binance" \
+  "${fixture}/scraper/internal/exchange/binance" \
   "${fixture}/docs/superpowers/plans" \
   "${fixture}/census-runs/current"
 
@@ -103,6 +130,23 @@ printf '%s\n' '# Legacy dated decision record' \
   >"${fixture}/docs/superpowers/plans/2026-08-24-history.md"
 printf '%s\n' '# Compatibility census artifact' \
   >"${fixture}/census-runs/current/inventory.md"
+printf '%s\n' \
+  'const incomeEndpoint = "/fapi/v1/income"' \
+  'const signedQuery = "incomeType=FUNDING_FEE"' \
+  'fundingAmount := -signedQty * markPrice * fundingRate' \
+  >"${fixture}/core-service/internal/exchange/binance/funding.go"
+printf '%s\n' \
+  'const fundingEndpoint = "/fapi/v1/fundingRate"' \
+  >"${fixture}/scraper/internal/exchange/binance/funding.go"
+printf '%s\n' \
+  'func Listen(handle func(context.Context, UserDataEvent)) {}' \
+  >"${fixture}/src/canonical_stream.go"
+printf '%s\n' \
+  'CREATE TABLE venue_income_entries (income_entry_id BIGINT PRIMARY KEY);' \
+  >"${fixture}/db/venue_income.sql"
+printf '%s\n' \
+  '# Historical strategy-debugger-cli decision' \
+  >"${fixture}/docs/superpowers/plans/2026-08-26-debugger-history.md"
 
 before="$(hash_fixture)"
 output="$("${SCANNER}" "${fixture}" 2>&1)" \

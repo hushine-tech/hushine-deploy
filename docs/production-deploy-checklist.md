@@ -1,6 +1,6 @@
 # 基础运维与部署 Checklist
 
-最后核验：2026-08-25。
+最后核验：2026-08-27。
 
 本文覆盖数据库、Kafka、ELK、Jaeger、服务和 Runtime 镜像的当前启动路径。数据库只
 支持从空库创建当前 baseline；Live trading 仍受 rollout guard 保护。
@@ -71,9 +71,9 @@ make db-schema-bundle
 ## 5. Runtime 依赖和镜像
 
 公开 Python 依赖唯一手写源为
-`strategy-library/hushine_strategy/runtime_dependencies.toml`。修改后重新生成
-strategy-service/debugger 投影和 lock，并验证 normal/coverage 镜像具有相同 profile、
-version、digest 和源码 commit，但不同 build ID。
+`strategy-library/hushine_strategy/runtime_dependencies.toml`。当前 Runtime 发布只验收
+strategy-service 的安装闭包，并验证 normal/coverage 镜像具有相同 profile、version、
+digest 和源码 commit，但不同 build ID。
 
 ```bash
 export RUNTIME_DEPENDENCY_BASE_SHA=<immutable-40-char-commit>
@@ -138,6 +138,11 @@ BTC/ETH/ZEC 多输入。
 Mock Binance 验收必须覆盖 Spot 与 Futures 的 MARKET/LIMIT、GTC/IOC/FOK（Futures 还
 包括当前 GTX/GTD 支持）、full/partial/expired/rejected/rate-limit，以及 exact decimal、
 fees、risk filter、recovery 和 liquidation lifecycle。
+
+Funding/Income 还必须覆盖 Account Update + REST 合并、REST-only repair、重复/延迟
+Income、Backtest 同时刻先结算后 Kline、Spot 零 Funding、blocked Worker 和 worker-only
+restart。调度、告警与受保护的真实 Demo gate 见
+[`operations/funding-income.md`](operations/funding-income.md)。
 
 ## 8. ELK 与 Jaeger
 

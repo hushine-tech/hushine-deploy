@@ -1,6 +1,6 @@
 # Runtime 操作流程
 
-最后核验：2026-08-25。
+最后核验：2026-08-27。
 
 Futures 杠杆的完整声明、页面、持久化和故障语义见
 [`strategy-owned-futures-leverage.md`](strategy-owned-futures-leverage.md)。
@@ -11,15 +11,14 @@ Futures 杠杆的完整声明、页面、持久化和故障语义见
 ## Runtime Python 依赖契约
 
 `strategy-library/hushine_strategy/runtime_dependencies.toml` 是唯一手写的
-Runtime Python 依赖清单，包含 schema、profile 名称、profile 版本、Hosted /
-Debugger Python 约束，以及每个公开 import root。`strategy-service` 和
-`strategy-debugger-cli` 的 `pyproject.toml` 生成区块、直接依赖与各自
-`uv.lock` 都是该清单的投影，不能直接在生成区块中加依赖。
+Runtime Python 依赖清单，包含 schema、profile 名称、profile 版本、Runtime Python
+约束以及每个公开 import root。当前运行路径以 strategy-service 的安装闭包和 Runtime
+镜像为准，不能直接在生成区块中增加依赖。
 
 清单变更规则：
 
 1. 修改 manifest，并把 `profile_version` 提升到严格更大的 SemVer。
-2. 用 checker 的 write 模式重新生成两个项目投影，再分别更新 lock。
+2. 用 checker 的 write 模式重新生成 strategy-service 投影，再更新 lock。
 3. 以明确的、40 位且本地可解析的已部署 commit 作为
    `RUNTIME_DEPENDENCY_BASE_SHA`；禁止用 `main`、`origin/main` 或 `HEAD` 代替。
 4. 首次引入时 baseline 必须解析成功但不含 manifest，checker 只接受 schema
@@ -33,7 +32,7 @@ cd strategy-service
 PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
 ```
 
-这条命令用于源码开发，不能证明镜像或 debugger 的安装闭包。安装态检查必须
+这条命令用于源码开发，不能证明 Runtime 镜像的安装闭包。安装态检查必须
 清除 `PYTHONPATH` / `PYTHONHOME` / `VIRTUAL_ENV` 并使用 `python -I`。
 
 ## Runtime 启动、HELLO 与当前断线语义
@@ -128,8 +127,7 @@ Preview 和 Start 都通过 `runtime_id` 选择 Runtime：
 
 `environment=0` 使用同一 resolver 和模拟 Futures wallet，不调用 Binance、不取 live
 admission；`environment=1` 才执行上面的 Binance Demo 读写；`environment=2` 继续
-rollout guarded。strategy-debugger-cli 与 Backtest 保持 resolver/模拟钱包一致，也不
-提供 leverage override。
+rollout guarded。Backtest 不提供 leverage override。
 
 rollback 全部确认时不创建可运行 Session，并释放 operation admission。rollback
 无法确认时返回 `LEVERAGE_ROLLBACK_FAILED`，operation/admission 保持
@@ -286,47 +284,5 @@ Spot 的完整 ownership、过滤器、订单、停止与 reconciliation 见
 所有 Session 必须持有非空 `runtime_id`。状态、停止和恢复 API 对缺少绑定的请求
 fail closed，不能在多 Runtime 场景选择默认 Runtime。
 
-## Debugger 与 AGENTS.md rollout handoff
-
-用户 debugger 的标准 bootstrap、profile 检查和修复命令是：
-
-```bash
-cd strategy-debugger-cli
-uv run --no-project --python 3.13 python init.py
-$HOME/hushine-debug-workspace/.venv/bin/python -I \
-  -m hushine_debugger.cli profile --json
-$HOME/hushine-debug-workspace/.venv/bin/hushine-debug repair \
-  --dir "$HOME/hushine-debug-workspace"
-```
-
-下面的 block 由 workspace owner 在协调发布完成后原样同步到根
-`AGENTS.md`；根目录不是 Git，本变更不会静默修改它：
-
-```bash
-# strategy-service source-development regression (not installed closure)
-cd strategy-service
-PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
-
-# installed/frozen Runtime and debugger gates; no source shadowing
-cd ..
-env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV \
-  strategy-service/.venv/bin/python -I \
-  -m hushine_strategy.runtime_dependencies verify-installed \
-  --python-constraint 3.13 --json
-env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV \
-  strategy-debugger-cli/.venv/bin/python -I \
-  -m hushine_debugger.cli profile --json
-
-# standalone debugger bootstrap on Python 3.12/3.13/3.14
-cd strategy-debugger-cli
-INDEX_TREE="$(git write-tree)" \
-  bash scripts/bootstrap-standalone.test.sh \
-  --library-repo ../strategy-library \
-  --expected-library-commit "$(git -C ../strategy-library rev-parse HEAD)"
-```
-
-`with-local-strategy-library-git.sh` 只是在未发布 commit 上做 pre-push 验收的
-bare-mirror transport。它不能进入 `pyproject.toml`、`uv.lock`、用户 bootstrap
-命令或发布文档。协调 push 完成后还必须在无 sibling checkout、无 Git URL
-rewrite、全新 HOME/uv cache 的网络环境重跑 bootstrap；该 gate 通过前 release
-仍处于 blocked 状态，不能先单独发布 strategy-library。
+Funding Income 的 RuntimeChannel 数据面、持久化 cursor、blocked Worker 与恢复边界见
+[`architecture/runtime-channel.md`](architecture/runtime-channel.md)。
