@@ -108,8 +108,9 @@ runtime_coverage_container_owned() {
 }
 
 runtime_coverage_reject_internal_env_names() {
-  local env_names="$1" forbidden
-  forbidden="$(grep -Ei '(^|_)(DATABASE|DB|KAFKA|MARKET_DATA|PORTFOLIO|ORDER|ACCOUNT|CORE_SERVICE)(_|$)|(^|_)API_(KEY|SECRET)($|_)' <<<"${env_names}" || true)"
+  local env_names="$1" candidates forbidden
+  candidates="$(grep -Ev '^HUSHINE_RUNTIME_CORE_SERVICE_COMMIT$' <<<"${env_names}" || true)"
+  forbidden="$(grep -Ei '(^|_)(DATABASE|DB|KAFKA|MARKET_DATA|PORTFOLIO|ORDER|ACCOUNT|CORE_SERVICE)(_|$)|(^|_)API_(KEY|SECRET)($|_)' <<<"${candidates}" || true)"
   if [[ -n "${forbidden}" ]]; then
     runtime_coverage_error "hosted runtime received forbidden internal environment names: $(tr '\n' ' ' <<<"${forbidden}" | sed 's/[[:space:]]*$//')"
     return 1

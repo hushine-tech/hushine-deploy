@@ -238,7 +238,7 @@ if runtime_coverage_require_python_hits "${zero_python_coverage}"; then
   fail "zero-hit Python coverage was accepted"
 fi
 
-safe_runtime_env_names=$'GOCOVERDIR\nHUSHINE_RUNTIME_COVERAGE_DIR\nRUNTIME_CHANNEL_GRPC_ADDR\nRUNTIME_CREDENTIAL_JSON\nRUNTIME_CHANNEL_TLS_BUNDLE_JSON'
+safe_runtime_env_names=$'GOCOVERDIR\nHUSHINE_RUNTIME_COVERAGE_DIR\nHUSHINE_RUNTIME_CORE_SERVICE_COMMIT\nHUSHINE_RUNTIME_GOLANG_LIB_COMMIT\nRUNTIME_CHANNEL_GRPC_ADDR\nRUNTIME_CREDENTIAL_JSON\nRUNTIME_CHANNEL_TLS_BUNDLE_JSON'
 unsafe_runtime_env_names=$'RUNTIME_CHANNEL_GRPC_ADDR\nKAFKA_BROKERS\nDATABASE_PASSWORD\nORDER_SERVICE_GRPC_ADDR\nEXCHANGE_API_SECRET'
 runtime_coverage_reject_internal_env_names "${safe_runtime_env_names}" \
   || fail "safe RuntimeChannel-only environment names were rejected"

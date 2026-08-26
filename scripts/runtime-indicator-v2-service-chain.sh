@@ -870,6 +870,37 @@ print(source, end="")
 PY
 }
 
+journal_runtime_container() {
+  local owner_file="$1" container_name="$2" runtime="$3" user_id="$4"
+  local image_id="$5" runtime_root="$6" output_root="$7" resource_name="$8"
+  local container_id run_label
+  container_id="$(docker container inspect --format '{{.Id}}' "${container_name}")" \
+    || die "provisioned Runtime container is unavailable for ownership journal"
+  run_label="$(runtime_coverage_expected_run_label "${output_root}")"
+  atomic_json "${owner_file}" \
+    --arg container_id "${container_id}" \
+    --arg container_name "${container_name}" \
+    --arg image_id "${image_id}" \
+    --arg runtime_id "${runtime}" \
+    --arg user_id "${user_id}" \
+    --arg coverage_run_id "${run_label}" \
+    --arg coverage_mount_source "${runtime_root}" \
+    --arg resource_name "${resource_name}" \
+    '.runtime = {
+      container_id:$container_id,
+      container_name:$container_name,
+      image_id:$image_id,
+      runtime_id:$runtime_id,
+      user_id:$user_id,
+      coverage_run_id:$coverage_run_id,
+      coverage_mount_source:$coverage_mount_source,
+      resource_name:$resource_name
+    }' \
+    "${owner_file}"
+  validate_owner_file "${owner_file}" \
+    || die "runtime owner journal is invalid"
+}
+
 provision_acceptance_run() {
   local ports="$1" owner="$2" generation="$3" image_id="$4"
   local handler_http api username password signup login token user_id
@@ -944,6 +975,11 @@ provision_acceptance_run() {
     || die "hosted Runtime was not newly provisioned"
 
   source "${DEPLOY_ROOT}/scripts/lib/runtime_coverage.sh"
+  runtime_root="${STATE_DIR}/coverage/runtimes/${runtime}"
+  journal_runtime_container \
+    "${STATE_DIR}/owner.json" "hushine-runtime-${runtime}" "${runtime}" \
+    "${user_id}" "${image_id}" "${runtime_root}" "${STATE_DIR}/coverage" \
+    "${runtime_name}"
   runtime_coverage_prepare_output_root "${STATE_DIR}/coverage"
   runtime_coverage_validate_layout "${STATE_DIR}/coverage" "${runtime}"
   runtime_root="${RUNTIME_COVERAGE_RUNTIME_ROOT}"

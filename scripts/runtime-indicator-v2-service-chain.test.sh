@@ -616,6 +616,7 @@ provision_body="$(
   declare -f provision_acceptance_run
 )"
 for literal in \
+  'journal_runtime_container' \
   'RUNTIME_COVERAGE_CONTAINER_ID' \
   'RUNTIME_COVERAGE_CONTAINER_IMAGE_ID' \
   'RUNTIME_COVERAGE_RUN_LABEL' \
@@ -625,6 +626,10 @@ for literal in \
   grep -Fq "${literal}" <<<"${provision_body}" \
     || fail "runtime owner journal is missing identity field: ${literal}"
 done
+journal_line="$(grep -nF 'journal_runtime_container' <<<"${provision_body}" | head -1 | cut -d: -f1)"
+validation_line="$(grep -nF 'runtime_coverage_validate_container' <<<"${provision_body}" | head -1 | cut -d: -f1)"
+[[ -n "${journal_line}" && -n "${validation_line}" && "${journal_line}" -lt "${validation_line}" ]] \
+  || fail "provisioned Runtime is not ownership-journaled before fallible validation"
 
 start_body="$(
   export HUSHINE_SOURCE_ROOT="${fake_source}"
