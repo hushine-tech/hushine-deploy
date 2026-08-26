@@ -379,7 +379,7 @@ probe_started_runtime_channel_mtls() {
     -CAkey "${DEPLOY_ROOT}/certs/runtime-client-ca.key" \
     -CAserial "${EVIDENCE_ROOT}/runtime-client-ca.srl" -CAcreateserial \
     -out "${EVIDENCE_ROOT}/runtime-client.pem" >/dev/null 2>&1
-  openssl s_client -quiet -verify_return_error \
+  openssl s_client -verify_return_error \
     -connect "127.0.0.1:${RUNTIME_GRPC_PORT}" \
     -servername runtime-channel.local \
     -CAfile "${DEPLOY_ROOT}/certs/runtime-channel-ca.pem" \
