@@ -629,6 +629,9 @@ provision_body="$(
   source "${SCRIPT}"
   declare -f provision_acceptance_run
 )"
+if grep -Fq 'leverage:20' <<<"${provision_body}"; then
+  fail "venue bootstrap still sends the removed per-position leverage field"
+fi
 for literal in \
   'journal_runtime_container' \
   'RUNTIME_COVERAGE_CONTAINER_ID' \
@@ -644,6 +647,17 @@ journal_line="$(grep -nF 'journal_runtime_container' <<<"${provision_body}" | he
 validation_line="$(grep -nF 'runtime_coverage_validate_container' <<<"${provision_body}" | head -1 | cut -d: -f1)"
 [[ -n "${journal_line}" && -n "${validation_line}" && "${journal_line}" -lt "${validation_line}" ]] \
   || fail "provisioned Runtime is not ownership-journaled before fallible validation"
+
+supervise_body="$(
+  export HUSHINE_SOURCE_ROOT="${fake_source}"
+  source "${SCRIPT}"
+  declare -f supervise
+)"
+if grep -Fq 'provisioned="$(provision_acceptance_run' <<<"${supervise_body}"; then
+  fail "provisioning still runs inside an errexit-suppressing command substitution"
+fi
+grep -Fq 'provision_acceptance_run "${ports}" "${owner}" "${generation}" "${image_id}"' <<<"${supervise_body}" \
+  || fail "supervisor does not invoke provisioning as a fail-fast simple command"
 
 start_body="$(
   export HUSHINE_SOURCE_ROOT="${fake_source}"

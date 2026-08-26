@@ -950,7 +950,6 @@ provision_acceptance_run() {
           symbol:"TESTUSDT",
           direction:0,
           initial_balance:100000,
-          leverage:20,
           fee_rate:0.0004
         }]
       }
@@ -1259,7 +1258,7 @@ supervise() {
 
   local suffix owner generation databases ports sources source_dirty
   local evidence_eligible source_evidence image_provenance image_id cert_dir jwt_secret
-  local provisioned processes
+  local provisioned provision_file processes
   suffix="$(date -u +%m%d%H%M%S)_$$_$(openssl rand -hex 3)"
   owner="$(openssl rand -hex 32)"
   generation="generation-$(openssl rand -hex 16)"
@@ -1308,7 +1307,23 @@ supervise() {
   write_control_config "${databases}" "${ports}" "${cert_dir}" "${STATE_DIR}/coverage"
   jwt_secret="chain-jwt-${owner}"
   start_services "${databases}" "${ports}" "${jwt_secret}"
-  provisioned="$(provision_acceptance_run "${ports}" "${owner}" "${generation}" "${image_id}")"
+  provision_file="${STATE_DIR}/provisioned.json"
+  provision_acceptance_run "${ports}" "${owner}" "${generation}" "${image_id}" \
+    >"${provision_file}"
+  chmod 0600 "${provision_file}"
+  jq -e '
+    type == "object"
+    and keys == ["api", "portfolio_id", "runtime_id", "runtime_root", "session_id", "strategy_id", "user_id", "venue_id"]
+    and (.user_id | type == "number")
+    and (.portfolio_id | type == "number")
+    and (.venue_id | type == "number")
+    and (.strategy_id | type == "number")
+    and (.runtime_id | type == "string" and length > 0)
+    and (.session_id | type == "string" and length > 0)
+    and (.runtime_root | type == "string" and startswith("/"))
+  ' "${provision_file}" >/dev/null \
+    || die "acceptance provisioning returned invalid state"
+  provisioned="$(jq -c . "${provision_file}")"
   processes="$(<"${STATE_DIR}/pids.json")"
   write_chain_json "${phase}" "${owner}" "${generation}" "${databases}" "${ports}" \
     "${processes}" "${sources}" "${source_dirty}" "${evidence_eligible}" \
