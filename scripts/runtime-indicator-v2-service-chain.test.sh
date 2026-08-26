@@ -433,7 +433,8 @@ jq -nc '{
 chmod 0600 "${assertions}"
 (
   source "${SCRIPT}"
-  validate_barrier_ack "${ack}" "${release_state}/chain.json" 1023
+  validate_barrier_ack "${ack}" "${release_state}/chain.json" 1023 \
+    || exit 1
   validate_transition_assertion \
     "${assertions}" "${release_state}/chain.json" open-1023 1023
 ) || fail "valid barrier acknowledgement/assertion pair was rejected"
