@@ -156,6 +156,30 @@ set -e
 grep -Fq 'cleanup failed' <<<"${database_cleanup_output}" \
   || fail "owned-database cleanup failure omitted its diagnostic"
 
+incomplete_evidence="${fixture}/incomplete-assertions-evidence"
+mkdir -p "${incomplete_evidence}"
+printf '%s\n' 'business-chain-root-cause' >"${incomplete_evidence}/business-chain.log"
+set +e
+incomplete_output="$(
+  (
+    export PATH="${cleanup_bin}:${PATH}"
+    # shellcheck disable=SC1090
+    source "${SCRIPT}"
+    EVIDENCE_ROOT="${incomplete_evidence}"
+    CHAIN_ASSERTIONS_PASSED=false
+    cleanup_owned_resources
+  ) 2>&1
+)"
+incomplete_status="$?"
+set -e
+[[ "${incomplete_status}" -ne 0 ]] || fail "incomplete business assertions were accepted"
+[[ -f "${incomplete_evidence}/business-chain.log" ]] \
+  || fail "business failure evidence was removed after successful cleanup"
+[[ "${incomplete_output}" != *'assertions and cleanup verified'* ]] \
+  || fail "gate printed PASS before business assertions completed"
+grep -Fq 'business assertions did not complete' <<<"${incomplete_output}" \
+  || fail "incomplete business assertions omitted their diagnostic"
+
 state_bin="${fixture}/state-bin"
 state_root="${fixture}/docker-state"
 mkdir -p "${state_bin}" "${state_root}"

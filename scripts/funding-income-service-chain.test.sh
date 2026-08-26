@@ -110,11 +110,14 @@ cleanup_owned_resources() {
   if [[ "${cleanup_rc}" -ne 0 ]]; then
     echo "funding-income service-chain cleanup failed; evidence retained at ${EVIDENCE_ROOT}" >&2
     [[ "${rc}" -ne 0 ]] || rc=1
+  elif [[ "${rc}" -eq 0 && "${CHAIN_ASSERTIONS_PASSED}" != "true" ]]; then
+    echo "funding-income service-chain business assertions did not complete; evidence retained at ${EVIDENCE_ROOT}" >&2
+    rc=1
+  elif [[ "${rc}" -ne 0 ]]; then
+    echo "funding-income service-chain failed; cleanup verified; evidence retained at ${EVIDENCE_ROOT}" >&2
   else
     [[ -z "${EVIDENCE_ROOT}" ]] || rm -rf -- "${EVIDENCE_ROOT}"
-    if [[ "${rc}" -eq 0 && "${CHAIN_ASSERTIONS_PASSED}" == "true" ]]; then
-      echo "funding-income service-chain: PASS (assertions and cleanup verified)"
-    fi
+    echo "funding-income service-chain: PASS (assertions and cleanup verified)"
   fi
   exit "${rc}"
 }
@@ -530,6 +533,7 @@ run_real_runtime_worker_chain() {
   local state_dir="${EVIDENCE_ROOT}/runtime-worker-chain" script status=0 stop_status=0
   script="${DEPLOY_ROOT}/scripts/runtime-indicator-v2-service-chain.sh"
   mkdir -m 0700 -p "${state_dir}"
+  state_dir="$(cd -- "${state_dir}" && pwd -P)"
   set +e
   "${script}" start --phase pre --state-dir "${state_dir}"
   status="$?"
