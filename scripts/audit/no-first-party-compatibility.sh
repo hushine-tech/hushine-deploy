@@ -150,10 +150,11 @@ append_path_candidates \
   '(?i:strategy-debugger-cli|package[ -]?v2)' \
   "${current_guidance_paths[@]}"
 
-# The current baseline has one Income/Funding ledger table. The awk allowlist
-# below admits only its exact canonical table name.
+# The current baseline has one Income/Funding ledger table. Match the final
+# identifier through an optional quoted/unquoted schema and quoted table name,
+# while excluding only the exact canonical table name in the same forms.
 append_candidates \
-  '(?is:CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+(?!venue_income_entries\b)[A-Za-z0-9_]*(?:income|funding|ledger)[A-Za-z0-9_]*)' \
+  '(?is:CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+(?:(?:"[A-Za-z_][A-Za-z0-9_]*"|[A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)?(?!"?venue_income_entries"?(?:\s|\())(?:"[A-Za-z0-9_]*(?:income|funding|ledger)[A-Za-z0-9_]*"|[A-Za-z0-9_]*(?:income|funding|ledger)[A-Za-z0-9_]*))' \
   --multiline \
   --pcre2 \
   --glob '*.sql'
@@ -166,10 +167,18 @@ awk '
     text = $0
     sub(/^[^:]+:[0-9]+:/, "", text)
     lower = tolower(text)
+    support_claim = lower
+    gsub(/not[[:space:]]+supported[[:space:]]+as[[:space:]]+(a[[:space:]]+)?current[[:space:]]+[[:alnum:]_-]+/, "", support_claim)
+    gsub(/not[[:space:]]+supported/, "", support_claim)
+    contradicts_deprecation = \
+      support_claim ~ /(^|[^[:alnum:]_])(supported|required)([^[:alnum:]_]|$)/ || \
+      support_claim ~ /current[[:space:]]+(capability|workflow|runtime|path|product)/ || \
+      text ~ /仍[^。；]*(支持|必需|必须|当前)/
 
     if (lower ~ /(strategy-debugger-cli|package[ -]?v2)/ &&
         (lower ~ /(deprecated|not[[:space:]]+supported)/ ||
-         text ~ /(已弃用|不再支持|不受支持|不是当前受支持)/)) next
+         text ~ /(已弃用|不再支持|不受支持|不是当前受支持)/) &&
+        !contradicts_deprecation) next
 
     if (text ~ /Jaeger Thrift HTTP receiver \(legacy\)/) next
     if (text ~ /Jaeger gRPC native receiver \(legacy\)/) next

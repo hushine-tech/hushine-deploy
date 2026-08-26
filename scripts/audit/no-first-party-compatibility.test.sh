@@ -18,6 +18,7 @@ hash_fixture() {
 mkdir -p "${fixture}/src" "${fixture}/api" "${fixture}/db" "${fixture}/docs"
 printf '%s\n' \
   'Use strategy-debugger-cli for the current local offline replay workflow.' \
+  'strategy-debugger-cli is deprecated, but remains supported and required.' \
   >"${fixture}/README.md"
 printf '%s\n' \
   'Agents must validate the current Package V2 offline workflow.' \
@@ -74,6 +75,15 @@ printf '%s\n' \
   'CREATE TABLE funding_fee_entries (id BIGINT PRIMARY KEY);' \
   >"${fixture}/db/funding_ledger.sql"
 printf '%s\n' \
+  'CREATE TABLE "funding_fee_entries" (id BIGINT PRIMARY KEY);' \
+  >"${fixture}/db/quoted_funding_ledger.sql"
+printf '%s\n' \
+  'CREATE TABLE public.funding_fee_entries (id BIGINT PRIMARY KEY);' \
+  >"${fixture}/db/schema_funding_ledger.sql"
+printf '%s\n' \
+  'CREATE TABLE "public"."funding_fee_entries" (id BIGINT PRIMARY KEY);' \
+  >"${fixture}/db/quoted_schema_funding_ledger.sql"
+printf '%s\n' \
   'CREATE TABLE' \
   '  funding_fee_audit_entries (' \
   '    id BIGINT PRIMARY KEY' \
@@ -92,8 +102,10 @@ after="$(hash_fixture)"
 [[ "${before}" == "${after}" ]] \
   || fail "scanner modified an input fixture"
 
+missing_expected=()
 for expected in \
   '/README.md:1:Use strategy-debugger-cli for the current local offline replay workflow.' \
+  '/README.md:2:strategy-debugger-cli is deprecated, but remains supported and required.' \
   '/AGENTS.md:1:Agents must validate the current Package V2 offline workflow.' \
   '/src/legacy.go:1:// legacy Hushine route' \
   '/api/deprecated.proto:1:// deprecated Hushine RPC' \
@@ -116,10 +128,15 @@ for expected in \
   '/docs/runtime.md:1:Use strategy-debugger-cli as the current supported runtime.' \
   '/docs/offline.md:1:Package-v2 offline replay is a current supported capability.' \
   '/db/funding_ledger.sql:1:CREATE TABLE funding_fee_entries (id BIGINT PRIMARY KEY);' \
+  '/db/quoted_funding_ledger.sql:1:CREATE TABLE "funding_fee_entries" (id BIGINT PRIMARY KEY);' \
+  '/db/schema_funding_ledger.sql:1:CREATE TABLE public.funding_fee_entries (id BIGINT PRIMARY KEY);' \
+  '/db/quoted_schema_funding_ledger.sql:1:CREATE TABLE "public"."funding_fee_entries" (id BIGINT PRIMARY KEY);' \
   '/db/multiline_funding_ledger.sql:'; do
   grep -Fq -- "${expected}" <<<"${output}" \
-    || fail "candidate output omitted ${expected}"
+    || missing_expected+=("${expected}")
 done
+[[ ${#missing_expected[@]} -eq 0 ]] \
+  || fail "candidate output omitted: ${missing_expected[*]}"
 
 rm -rf -- "${fixture:?}"/*
 mkdir -p \
@@ -194,6 +211,15 @@ printf '%s\n' \
 printf '%s\n' \
   'CREATE TABLE venue_income_entries (income_entry_id BIGINT PRIMARY KEY);' \
   >"${fixture}/db/venue_income.sql"
+printf '%s\n' \
+  'CREATE TABLE "venue_income_entries" (income_entry_id BIGINT PRIMARY KEY);' \
+  >"${fixture}/db/quoted_venue_income.sql"
+printf '%s\n' \
+  'CREATE TABLE public.venue_income_entries (income_entry_id BIGINT PRIMARY KEY);' \
+  >"${fixture}/db/schema_venue_income.sql"
+printf '%s\n' \
+  'CREATE TABLE "public"."venue_income_entries" (income_entry_id BIGINT PRIMARY KEY);' \
+  >"${fixture}/db/quoted_schema_venue_income.sql"
 printf '%s\n' \
   'CREATE TABLE' \
   '  venue_income_entries (' \
