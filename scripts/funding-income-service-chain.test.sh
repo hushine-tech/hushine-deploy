@@ -4,6 +4,7 @@ set -euo pipefail
 DEPLOY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SOURCE_ROOT="${HUSHINE_SOURCE_ROOT:-$(cd -- "${DEPLOY_ROOT}/.." && pwd -P)}"
 COMPOSE_FILE="${DEPLOY_ROOT}/deploy/local/docker-compose.yml"
+LOCAL_PG_ADMIN_DSN="postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
 REQUIRED_REPOSITORIES=(core-service scraper control-panel-service strategy-service hushine-deploy)
 OWNED_PIDS=()
 OWNED_CONTAINERS=()
@@ -188,6 +189,7 @@ run_approved_assertions() {
     || die "production Timescale Income test skipped"
   echo "assertions: fresh Portfolio schema is complete and idempotent"
   (cd "${SOURCE_ROOT}/core-service" && \
+    HUSHINE_TEST_PG_ADMIN_DSN="${LOCAL_PG_ADMIN_DSN}" \
     go test -v -tags=integration ./internal/storage/migrations \
       -run '^TestPortfolioBaselineFreshBootstrapIsCompleteAndIdempotent$' -count=1 \
       | tee "${EVIDENCE_ROOT}/fresh-schema-test.log")

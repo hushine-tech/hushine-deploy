@@ -73,6 +73,8 @@ make -C "${DEPLOY_ROOT}" -n funding-income-service-chain >/dev/null \
   || fail "Makefile service-chain entry point is missing"
 make -C "${DEPLOY_ROOT}" -n funding-income-demo-smoke >/dev/null \
   || fail "Makefile Demo smoke entry point is missing"
+grep -Fq 'HUSHINE_TEST_PG_ADMIN_DSN="${LOCAL_PG_ADMIN_DSN}"' "${SCRIPT}" \
+  || fail "fresh-schema assertion does not receive the owned local admin DSN"
 
 mkdir -p "${fixture}/evidence"
 printf '%s\n' 'core-startup-root-cause' >"${fixture}/evidence/core-service.log"
