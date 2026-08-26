@@ -386,9 +386,11 @@ probe_started_runtime_channel_mtls() {
     -cert "${EVIDENCE_ROOT}/runtime-client.pem" \
     -key "${EVIDENCE_ROOT}/runtime-client.key" \
     </dev/null >"${EVIDENCE_ROOT}/runtime-channel-mtls.log" 2>&1 || true
-  grep -Fq 'Verification: OK' "${EVIDENCE_ROOT}/runtime-channel-mtls.log" \
-    || grep -Fq 'Verify return code: 0 (ok)' "${EVIDENCE_ROOT}/runtime-channel-mtls.log" \
-    || die "started RuntimeChannel did not complete an authenticated mTLS handshake"
+  if ! grep -Fq 'Verification: OK' "${EVIDENCE_ROOT}/runtime-channel-mtls.log" \
+    && ! grep -Fq 'Verify return code: 0 (ok)' "${EVIDENCE_ROOT}/runtime-channel-mtls.log"; then
+    cat "${EVIDENCE_ROOT}/runtime-channel-mtls.log" >&2
+    die "started RuntimeChannel did not complete an authenticated mTLS handshake"
+  fi
   echo "probe: started RuntimeChannel accepted an mTLS client"
 }
 
