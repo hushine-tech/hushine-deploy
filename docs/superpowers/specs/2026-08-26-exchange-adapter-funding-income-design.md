@@ -2,7 +2,7 @@
 
 日期：2026-08-26
 
-状态：设计已在对话中批准；等待用户对书面版本复核后编写实施计划
+状态：设计和书面版本均已批准；实施计划已完成
 
 ## 1. 背景
 
@@ -171,9 +171,15 @@ settlement_asset
 margin_mode
 position_mode
 position_legs[] { symbol, position_side, signed_qty_decimal }
+actual_amount_decimal     optional; Demo/Live exchange Income total
 ```
 
-标准结果包含逐腿金额、汇总金额、精确十进制文本和 Adapter 版本。公式与舍入属于 Adapter。
+标准结果包含计算逐腿金额、应用逐腿金额、计算汇总、应用汇总、reconciliation delta、精确十进制文本和
+Adapter 版本。公式、舍入以及真实账单总额向 Hedge/Isolated 各腿的分配都属于 Adapter。
+
+Backtest 不传 `actual_amount_decimal`，应用逐腿金额等于计算逐腿金额。Demo/Live 传入交易所 Income
+实际总额；若交易所只给一个汇总金额，Adapter 必须以计算逐腿金额为分配依据处理交易所舍入差，且保证
+所有应用逐腿金额之和严格等于真实总额。通用 Coordinator 不自行选择交易所舍入或分摊规则。
 
 Binance USDT 线性合约的当前规则由 Binance Adapter 实现：
 
@@ -369,6 +375,12 @@ Adapter calculated amount。Account Update 本身不产生最终 Income，也不
 账户快照可以用于风险门控和 reconciliation，但若该快照已包含 Funding 变化，不得再把快照差额作为
 第二笔 Income 应用。
 
+`venue_wallet_states.snapshot_json` 中每个 Venue 的 canonical Futures Wallet 必须保存
+`last_applied_income_entry_id`。Runtime 投递按 `income_entry_id` 升序；Worker 仅应用 ID 大于该游标的
+Entry，并在同一次 canonical wallet snapshot 更新中推进游标。该游标随钱包快照恢复，不能只保存在
+Worker 进程内存中，因此 Worker 重启、RuntimeChannel 重放和确认丢失都不会造成二次应用。本轮不为该
+游标新增数据库表。
+
 ## 9. Demo/Live 同步策略
 
 IncomeHistoryReader 只服务活动或刚结束且仍在结算 grace window 内的 Session Venue。Session 结束后，
@@ -401,7 +413,8 @@ Session Worker 线程中。因此用户断点或长循环不得影响：
 - Session 状态和通知。
 
 Worker 阻塞期间，平台保存 canonical Income Event。Worker 恢复后按 `income_entry_id` 顺序补投，Worker
-也按该 ID 幂等应用。不能因为 Worker 暂时不可用而把平台已确认 Income 回滚。
+以 canonical wallet snapshot 中持久化的 `last_applied_income_entry_id` 幂等应用。不能因为 Worker 暂时
+不可用而把平台已确认 Income 回滚。
 
 Backtest 只在模拟时间推进时触发 Funding；用户代码阻塞意味着模拟时间未推进，不影响 Agent 心跳。
 
