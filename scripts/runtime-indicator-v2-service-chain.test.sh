@@ -12,6 +12,20 @@ fail() {
 [[ -x "${SCRIPT}" ]] || fail "executable service-chain script is missing"
 bash -n "${SCRIPT}" || fail "service-chain script is not valid Bash"
 
+set +e
+api_failure_output="$(
+  (
+    source "${SCRIPT}"
+    curl() { return 22; }
+    api_json POST 'http://127.0.0.1:1/api/failure-contract' '' '{}'
+  ) 2>&1
+)"
+api_failure_status="$?"
+set -e
+[[ "${api_failure_status}" -ne 0 ]] || fail "failed API request was accepted"
+grep -Fq 'API POST http://127.0.0.1:1/api/failure-contract failed' <<<"${api_failure_output}" \
+  || fail "failed API request omitted its endpoint diagnostic"
+
 for function_name in pg_admin pg_database; do
   function_body="$(
     source "${SCRIPT}"

@@ -199,7 +199,9 @@ api_json() {
   if [[ -n "${body}" ]]; then
     args+=(-H "Content-Type: application/json" --data-binary "${body}")
   fi
-  curl "${args[@]}" "${url}"
+  if ! curl "${args[@]}" "${url}"; then
+    die "API ${method} ${url} failed"
+  fi
 }
 
 source_sha_json() {
