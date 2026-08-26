@@ -74,6 +74,10 @@ for literal in \
     || fail "required contract literal is missing: ${literal}"
 done
 
+if grep -Fq 'strategy_path' "${SCRIPT}"; then
+  fail "service-chain sends the removed strategy_path compatibility field"
+fi
+
 for forbidden in \
   'HUSHINE_INDICATOR_V2_BARRIER_FILE=' \
   'CORE_SERVICE_GRPC_ADDR=' \

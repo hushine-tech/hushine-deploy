@@ -1044,7 +1044,6 @@ provision_acceptance_run() {
       --argjson start_time_ms "${START_TIME_MS}" \
       --argjson end_time_ms "${END_TIME_MS}" \
       '{
-        strategy_path:"",
         interval:"1m",
         start_time_ms:$start_time_ms,
         end_time_ms:$end_time_ms,
