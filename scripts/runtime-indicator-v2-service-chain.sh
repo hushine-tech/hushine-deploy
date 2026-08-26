@@ -194,14 +194,27 @@ wait_http() {
 
 api_json() {
   local method="$1" url="$2" token="${3:-}" body="${4:-}"
-  local args=(-fsS -X "${method}" -H "Accept: application/json")
+  local args=(-sS -X "${method}" -H "Accept: application/json")
+  local response_file http_code response_root
   [[ -z "${token}" ]] || args+=(-H "Authorization: Bearer ${token}")
   if [[ -n "${body}" ]]; then
     args+=(-H "Content-Type: application/json" --data-binary "${body}")
   fi
-  if ! curl "${args[@]}" "${url}"; then
+  response_root="${TMPDIR:-/tmp}"
+  if [[ -n "${STATE_DIR:-}" && -d "${STATE_DIR}/logs" ]]; then
+    response_root="${STATE_DIR}/logs"
+  fi
+  response_file="$(mktemp "${response_root%/}/api-response.XXXXXX")"
+  chmod 0600 "${response_file}"
+  if ! http_code="$(curl "${args[@]}" -o "${response_file}" -w '%{http_code}' "${url}")"; then
+    rm -f -- "${response_file}"
     die "API ${method} ${url} failed"
   fi
+  if [[ ! "${http_code}" =~ ^2[0-9][0-9]$ ]]; then
+    die "API ${method} ${url} returned HTTP ${http_code}; response retained at ${response_file}"
+  fi
+  cat "${response_file}"
+  rm -f -- "${response_file}"
 }
 
 source_sha_json() {
