@@ -1,6 +1,6 @@
 # Hushine Deploy
 
-Last verified: 2026-08-24.
+Last verified: 2026-08-27.
 
 Deployment, database, smoke-test, and operator documentation for the Hushine
 multi-repository system.
@@ -25,7 +25,6 @@ git clone git@github.com:hushine-tech/quant-frontend.git gateway/quant-frontend
 git clone git@github.com:hushine-tech/scraper.git scraper
 git clone git@github.com:hushine-tech/strategy-service.git strategy-service
 git clone git@github.com:hushine-tech/strategy-library.git strategy-library
-git clone git@github.com:hushine-tech/strategy-debugger-cli.git strategy-debugger-cli
 git clone git@github.com:hushine-tech/golang-lib.git golang-lib
 ```
 
@@ -47,7 +46,6 @@ hushine/
   scraper/
   strategy-service/
   strategy-library/
-  strategy-debugger-cli/
   golang-lib/
 ```
 
@@ -55,20 +53,20 @@ hushine/
 
 | Directory | GitHub repo | Language | Port(s) |
 |---|---|---|---|
-| `core-service` | `hushine-tech/core-service` | Go | HTTP `:18080` under `restart.sh`, gRPC `:50051`; serves `portfolio.v1` and `order.v1` |
+| `core-service` | `hushine-tech/core-service` | Go | HTTP `:8080`, gRPC `:50051`; serves `portfolio.v1` and `order.v1` |
 | `control-panel-service` | `hushine-tech/control-panel-service` | Go | control gRPC `:50054`, RuntimeChannel `:50055`, HTTP `:8082` |
 | `gateway/quant-handler` | `hushine-tech/quant-handler` | Go | HTTP `:8090` |
 | `gateway/quant-frontend` | `hushine-tech/quant-frontend` | React | `:5173` |
 | `scraper` | `hushine-tech/scraper` | Go | market-data collector |
 | `strategy-service` | `hushine-tech/strategy-service` | Go runtime-agent + Python session worker | connects outbound to RuntimeChannel `:50055`; no product listener |
 | `strategy-library` | `hushine-tech/strategy-library` | Python | shared strategy utilities |
-| `strategy-debugger-cli` | `hushine-tech/strategy-debugger-cli` | Python | local offline strategy import/replay and IDE debugging |
 | `golang-lib` | `hushine-tech/golang-lib` | Go | shared logging/middleware |
 
 ## Quick Start
 
-The reproducible development path is the isolated local stack. It does not
-depend on the retired/shared `192.168.88.10` host:
+The reproducible development path is the isolated local stack. It explicitly
+overrides canonical infrastructure settings to loopback/local Docker and never
+relies on service source defaults or a shared-network database host:
 
 ```bash
 IMAGE_TAG=dev make runtime-image  # normal + coverage runtime images
@@ -137,8 +135,8 @@ Futures leverage is declared in strategy `ORDER_TARGETS[].leverage` or
 class-level `LEVERAGE`, with platform default `1x`. Start Demo, Backtest, and
 Resume do not have a leverage input. Preview is read-only; Demo applies and
 confirms per-symbol Binance leverage only after Start, before the final worker
-is created. Backtest/debugger use simulated wallet facts and never call
-Binance. Live (`environment=2`) remains rollout guarded.
+is created. Backtest uses simulated wallet facts and never calls Binance. Live
+(`environment=2`) remains rollout guarded.
 
 ## Runtime Smoke
 

@@ -16,6 +16,12 @@ hash_fixture() {
 }
 
 mkdir -p "${fixture}/src" "${fixture}/api" "${fixture}/db" "${fixture}/docs"
+printf '%s\n' \
+  'Use strategy-debugger-cli for the current local offline replay workflow.' \
+  >"${fixture}/README.md"
+printf '%s\n' \
+  'Agents must validate the current Package V2 offline workflow.' \
+  >"${fixture}/AGENTS.md"
 printf '%s\n' '// legacy Hushine route' >"${fixture}/src/legacy.go"
 printf '%s\n' '// deprecated Hushine RPC' >"${fixture}/api/deprecated.proto"
 printf '%s\n' '-- compatibility Hushine column' >"${fixture}/db/compatibility.sql"
@@ -45,11 +51,34 @@ printf '%s\n' \
   'func Listen(handle func(context.Context, UserDataOrderEvent)) {}' \
   >"${fixture}/src/order_only_stream.go"
 printf '%s\n' \
+  'func Listen(' \
+  '  handle func(' \
+  '    context.Context,' \
+  '    UserDataOrderEvent,' \
+  '  ),' \
+  ') {}' \
+  >"${fixture}/src/multiline_order_only_stream.go"
+printf '%s\n' \
+  'nextFundingTime :=' \
+  '  fundingTime.Add(' \
+  '    8 * time.Hour,' \
+  '  )' \
+  >"${fixture}/src/multiline_funding_clock.go"
+printf '%s\n' \
   'Use strategy-debugger-cli as the current supported runtime.' \
   >"${fixture}/docs/runtime.md"
 printf '%s\n' \
+  'Package-v2 offline replay is a current supported capability.' \
+  >"${fixture}/docs/offline.md"
+printf '%s\n' \
   'CREATE TABLE funding_fee_entries (id BIGINT PRIMARY KEY);' \
   >"${fixture}/db/funding_ledger.sql"
+printf '%s\n' \
+  'CREATE TABLE' \
+  '  funding_fee_audit_entries (' \
+  '    id BIGINT PRIMARY KEY' \
+  '  );' \
+  >"${fixture}/db/multiline_funding_ledger.sql"
 
 before="$(hash_fixture)"
 set +e
@@ -64,6 +93,8 @@ after="$(hash_fixture)"
   || fail "scanner modified an input fixture"
 
 for expected in \
+  '/README.md:1:Use strategy-debugger-cli for the current local offline replay workflow.' \
+  '/AGENTS.md:1:Agents must validate the current Package V2 offline workflow.' \
   '/src/legacy.go:1:// legacy Hushine route' \
   '/api/deprecated.proto:1:// deprecated Hushine RPC' \
   '/db/compatibility.sql:1:-- compatibility Hushine column' \
@@ -80,8 +111,12 @@ for expected in \
   '/src/generic_funding.go:3:fundingAmount := -signedQty * markPrice * fundingRate' \
   '/src/funding_clock.go:1:nextFundingTime := fundingTime.Add(8 * time.Hour)' \
   '/src/order_only_stream.go:1:func Listen(handle func(context.Context, UserDataOrderEvent)) {}' \
+  '/src/multiline_order_only_stream.go:' \
+  '/src/multiline_funding_clock.go:' \
   '/docs/runtime.md:1:Use strategy-debugger-cli as the current supported runtime.' \
-  '/db/funding_ledger.sql:1:CREATE TABLE funding_fee_entries (id BIGINT PRIMARY KEY);'; do
+  '/docs/offline.md:1:Package-v2 offline replay is a current supported capability.' \
+  '/db/funding_ledger.sql:1:CREATE TABLE funding_fee_entries (id BIGINT PRIMARY KEY);' \
+  '/db/multiline_funding_ledger.sql:'; do
   grep -Fq -- "${expected}" <<<"${output}" \
     || fail "candidate output omitted ${expected}"
 done
@@ -102,6 +137,13 @@ mkdir -p \
   "${fixture}/scraper/internal/exchange/binance" \
   "${fixture}/docs/superpowers/plans" \
   "${fixture}/census-runs/current"
+
+printf '%s\n' \
+  'strategy-debugger-cli is deprecated and is not supported as a current runtime.' \
+  >"${fixture}/README.md"
+printf '%s\n' \
+  'Package V2 offline replay is deprecated and not supported.' \
+  >"${fixture}/AGENTS.md"
 
 printf '%s\n' 'if scope == "historical" {}' >"${fixture}/src/current.go"
 printf '%s\n' \
@@ -142,8 +184,22 @@ printf '%s\n' \
   'func Listen(handle func(context.Context, UserDataEvent)) {}' \
   >"${fixture}/src/canonical_stream.go"
 printf '%s\n' \
+  'func Listen(' \
+  '  handle func(' \
+  '    context.Context,' \
+  '    UserDataEvent,' \
+  '  ),' \
+  ') {}' \
+  >"${fixture}/src/multiline_canonical_stream.go"
+printf '%s\n' \
   'CREATE TABLE venue_income_entries (income_entry_id BIGINT PRIMARY KEY);' \
   >"${fixture}/db/venue_income.sql"
+printf '%s\n' \
+  'CREATE TABLE' \
+  '  venue_income_entries (' \
+  '    income_entry_id BIGINT PRIMARY KEY' \
+  '  );' \
+  >"${fixture}/db/multiline_venue_income.sql"
 printf '%s\n' \
   '# Historical strategy-debugger-cli decision' \
   >"${fixture}/docs/superpowers/plans/2026-08-26-debugger-history.md"

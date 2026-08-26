@@ -83,6 +83,26 @@ append_candidates() {
   esac
 }
 
+append_path_candidates() {
+  local pattern="$1"
+  shift
+  local paths=("$@")
+  local rg_status
+  [[ ${#paths[@]} -gt 0 ]] || return 0
+  set +e
+  rg --line-number --with-filename --no-heading --color never -- \
+    "${pattern}" "${paths[@]}" >>"${raw_candidates}"
+  rg_status=$?
+  set -e
+  case "${rg_status}" in
+    0 | 1) ;;
+    *)
+      echo "compatibility audit current-guidance scan failed" >&2
+      exit 2
+      ;;
+  esac
+}
+
 append_candidates \
   "${candidate_pattern}" \
   --glob '*.{go,py,proto,sql,md,rst,sh,bash,yaml,yml,toml,ts,tsx,js,mjs,cjs}' \
@@ -97,27 +117,45 @@ append_candidates \
   --glob '!**/internal/exchange/binance/**'
 
 # Reject only Funding-derived eight-hour arithmetic; unrelated eight-hour
-# certificate/debug-package durations remain valid current behavior.
+# durations remain valid current behavior. Multiline matching closes the
+# formatting escape without scanning past four source lines.
 append_candidates \
-  '(?i:(next_?[[:alnum:]]*funding|funding_?[[:alnum:]]*time)[^;]*(8[[:space:]]*\*[[:space:]]*time\.Hour|timedelta\([[:space:]]*hours[[:space:]]*=[[:space:]]*8[[:space:]]*\)))' \
+  '(?i:(next_?[[:alnum:]]*funding|funding_?[[:alnum:]]*time)[^\n;]*(\n[^\n;]*){0,4}(8[[:space:]]*\*[[:space:]]*time\.Hour|timedelta\([[:space:]]*hours[[:space:]]*=[[:space:]]*8[[:space:]]*\)))' \
+  --multiline \
   --glob '*.{go,py}'
 
 # The canonical stream callback carries UserDataEvent. A callback typed to the
 # order payload would silently restore the superseded order-only contract.
 append_candidates \
   'func[[:space:]]*\([^)]*UserDataOrderEvent' \
+  --multiline \
   --glob '*.{go,proto}'
 
 # Dated Superpowers artifacts are already excluded above. Current user-facing
-# documentation must not present the retired debugger CLI as a supported path.
+# docs and the deploy repository root guidance must not present the retired
+# debugger CLI or Package V2 offline replay as a supported path. When scanning
+# a workspace root, only the deploy child root files are added; sibling
+# repository READMEs are outside this deploy-documentation policy.
 append_candidates \
-  'strategy-debugger-cli' \
+  '(?i:strategy-debugger-cli|package[ -]?v2)' \
   --glob '**/docs/**'
+current_guidance_paths=()
+for guidance_root in "${workspace_root}" "${workspace_root}/hushine-deploy"; do
+  for guidance_name in README.md AGENTS.md; do
+    guidance_path="${guidance_root}/${guidance_name}"
+    [[ -f "${guidance_path}" ]] && current_guidance_paths+=("${guidance_path}")
+  done
+done
+append_path_candidates \
+  '(?i:strategy-debugger-cli|package[ -]?v2)' \
+  "${current_guidance_paths[@]}"
 
 # The current baseline has one Income/Funding ledger table. The awk allowlist
 # below admits only its exact canonical table name.
 append_candidates \
-  '(?i:CREATE[[:space:]]+TABLE([[:space:]]+IF[[:space:]]+NOT[[:space:]]+EXISTS)?[[:space:]]+[A-Za-z0-9_]*(income|funding|ledger)[A-Za-z0-9_]*)' \
+  '(?is:CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+(?!venue_income_entries\b)[A-Za-z0-9_]*(?:income|funding|ledger)[A-Za-z0-9_]*)' \
+  --multiline \
+  --pcre2 \
   --glob '*.sql'
 
 # These are current, externally owned protocol terms or current governance and
@@ -127,13 +165,17 @@ awk '
   {
     text = $0
     sub(/^[^:]+:[0-9]+:/, "", text)
+    lower = tolower(text)
+
+    if (lower ~ /(strategy-debugger-cli|package[ -]?v2)/ &&
+        (lower ~ /(deprecated|not[[:space:]]+supported)/ ||
+         text ~ /(已弃用|不再支持|不受支持|不是当前受支持)/)) next
 
     if (text ~ /Jaeger Thrift HTTP receiver \(legacy\)/) next
     if (text ~ /Jaeger gRPC native receiver \(legacy\)/) next
     if (text ~ /Protocol\/migration\/history removal requires a separate compatibility decision\./) next
     if (text ~ /^[[:space:]]*Historical market data (is|remains) a current product function\.[[:space:]]*$/) next
     if (text ~ /scope[[:space:]]*==[[:space:]]*"historical"/) next
-    if (text ~ /^[[:space:]]*CREATE[[:space:]]+TABLE([[:space:]]+IF[[:space:]]+NOT[[:space:]]+EXISTS)?[[:space:]]+venue_income_entries([[:space:]]|\()/) next
 
     print
   }

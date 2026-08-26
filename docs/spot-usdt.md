@@ -127,7 +127,7 @@ preplan，再发送第一张订单：
 |---|---|---|
 | Backtest Spot USDT | Hosted worker、精确过滤器、Spot wallet、混合/多流 | 受 `backtest_spot_usdt` 控制 |
 | Demo Spot USDT | 官方 REST/WS、真实 order/fill/account reconciliation | 受 `demo_spot_usdt` 控制，仍需真实 Demo gate |
-| Offline Spot USDT | package v2、多输入、多 interval、Spot/Futures 混合路由 | 受 `offline_spot_usdt` 控制 |
+| Offline replay | 已弃用，不是当前受支持的产品能力 | 仅保留兼容性回归，不作为 release capability |
 | UI | asset wallet、route-aware run/stop/order history、结构化错误 | 只展示 effective capability |
 | Live Spot USDT | 代码路径保持 fail closed | 即使配置为 true 仍返回 `SPOT_LIVE_ROLLOUT_GUARD` |
 | Binance Futures | 原有路径保留 | 每次 Spot 验收必须跑 Futures 回归 |
@@ -158,15 +158,16 @@ bash scripts/acceptance/observe_spot_demo.test.sh
 ./scripts/verify_spot_usdt.sh all-local
 ```
 
-`all-local` 固定运行 backtest、offline、UI、filters、stop 和 Futures，明确不运行
-外部 Demo。`release` 会先运行 `all-local`，再要求 absolute coverage root、run-owned
-Demo Venue 和 observer evidence；缺任何前置条件都以稳定 blocked reason 非零退出。
+`all-local` 固定运行 backtest、UI、filters、stop、Futures 和已弃用 offline 路径的兼容性
+回归，明确不运行外部 Demo；通过该回归不表示 offline 是受支持的产品能力。`release` 会先
+运行 `all-local`，再要求 absolute coverage root、run-owned Demo Venue 和 observer
+evidence；缺任何前置条件都以稳定 blocked reason 非零退出。
 
 ## 部署
 
 从空数据库按 core-service → control-panel-service → instrumented Runtime image →
 quant-handler → quant-frontend 启动。先保持四个 capability 关闭，完成每层 smoke 后
-再分别开启 Backtest、Demo、offline；Live 不开启。
+再分别开启 Backtest、Demo；Live 不开启，offline 不作为产品 capability 开启。
 
 当前 baseline 不提供旧数据库升级或 schema 回滚。开发/测试环境需要换用当前 schema
 时重建数据库；需要保留的数据必须先导出并走独立、显式的数据迁移流程。

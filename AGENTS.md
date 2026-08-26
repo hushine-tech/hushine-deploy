@@ -25,7 +25,7 @@ Hushine is a multi-repository quantitative cryptocurrency platform. The portal u
 - Route orders only through core-service `order.v1` and explicit Portfolio/Venue facts.
 - Self-hosted/bare runtimes do not receive internal DB, Kafka, account, or order addresses.
 - User strategies declare `INPUTS` and `ORDER_TARGETS`; order side is BUY/SELL.
-- Local user debugging uses strategy-debugger-cli offline replay; bare/debugger runtime is an internal guarded capability.
+- Local offline package replay is not a current supported product capability; bare/debugger runtime remains an internal guarded capability.
 - `environment=2` remains rollout-guarded.
 
 ## Build and Test
@@ -33,7 +33,7 @@ Hushine is a multi-repository quantitative cryptocurrency platform. The portal u
 - Root orchestration: `make ensure-dbs`, `make build`, `make dev`, `make start`, `make stop`, `make test`.
 - Go repositories: `go test ./...` and `go vet ./...` from each repository.
 - strategy-service: `PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q`, `go test ./...`, and both tracked shell tests.
-- strategy-library and strategy-debugger-cli: run each repository's pytest suite in its managed environment.
+- strategy-library: run its pytest suite in its managed environment.
 - quant-frontend: `npm run build` and every `scripts/*.test.mjs` test.
 - OpenSpec: `openspec validate --all --strict --no-interactive` from the workspace root.
 

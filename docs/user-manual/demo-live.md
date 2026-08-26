@@ -21,7 +21,8 @@ canonical Income 审计字段：
 
 - `actual`：交易所账单，Demo/Live 钱包实际应用值；
 - `calculated`：平台按真实 Funding fact 和逐腿持仓算出的审计值；
-- `delta`：`actual - calculated`，非零时保留并告警，不覆盖 calculated；
+- `delta`：`actual - calculated`，非零时持久化且不覆盖 calculated；当前尚无非零 delta
+  检测告警；
 - `pending`：已知 settlement，但 actual 尚未出现；pending 不更新策略钱包。
 
 当前 portal 尚未提供独立 Funding Income 明细表；Session wallet 只显示 applied 结果，
@@ -52,6 +53,8 @@ Income replay 通过持久化 wallet cursor 幂等；不要在数据库中把旧
 5. 发送 test notification，并检查 last delivery status/error。
 
 Plan、用户偏好、channel binding 或 sender 任一未就绪时，delivery 会延后或失败并保留状态。
-当前没有独立的 Funding Income 用户通知类别；Funding pending/delta/grace 先由平台 Income
-状态与运维告警承载。不要在通知、日志或截图中粘贴 exchange secret、Telegram token 或
-Runtime credential。
+当前没有独立的 Funding Income 用户通知类别。Funding pending/delta 由平台 Income 状态
+持久化，但尚无专门检测告警；现有结构化错误日志只覆盖 poller sweep/terminal error、
+24 小时 grace 到期和 Funding Account handler error。外部或手工账户变化也尚无专门检测/
+告警。不要在通知、日志或截图中粘贴 exchange secret、Telegram token 或 Runtime
+credential。
