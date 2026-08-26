@@ -174,7 +174,7 @@ provisioning:
 notification:
   enabled: false
   kafka:
-    brokers: ["${DB_HOST}:19092"]
+    brokers: ["${DB_HOST}:9092"]
     topic: "notification.events"
     client_id: "control-panel-service-e2e"
 

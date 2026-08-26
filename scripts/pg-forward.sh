@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 LISTEN_HOST="${PG_FORWARD_LISTEN_HOST:-127.0.0.1}"
 LISTEN_PORT="${PG_FORWARD_LISTEN_PORT:-15432}"
-TARGET_HOST="${PG_FORWARD_TARGET_HOST:-192.168.88.10}"
+TARGET_HOST="${PG_FORWARD_TARGET_HOST:-}"
 TARGET_PORT="${PG_FORWARD_TARGET_PORT:-5432}"
 LABEL="${PG_FORWARD_LABEL:-com.hushine.pg-forward-${LISTEN_PORT}}"
 PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
@@ -44,6 +44,10 @@ EOF
 }
 
 write_plist() {
+	[[ -n "${TARGET_HOST}" ]] || {
+	  echo "PG_FORWARD_TARGET_HOST is required for a remote database forward" >&2
+	  return 2
+	}
   mkdir -p "${HOME}/Library/LaunchAgents" "${LOG_DIR}"
   cat > "${PLIST}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

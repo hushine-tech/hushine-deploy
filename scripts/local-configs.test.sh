@@ -26,6 +26,8 @@ grep -Fq 'ES_URL="${ES_URL:-http://127.0.0.1:9200}"' \
   "${DEPLOY_ROOT}/scripts/verify_tracing.sh"
 grep -Fq 'DB_HOST="${E2E_DB_HOST:-127.0.0.1}"' \
   "${DEPLOY_ROOT}/scripts/e2e_full_flow.sh"
+grep -Fq 'brokers: ["${DB_HOST}:9092"]' \
+  "${DEPLOY_ROOT}/scripts/e2e_full_flow.sh"
 grep -Fq 'build_strategy_runtime.sh" --allow-dirty dev' \
   "${DEPLOY_ROOT}/scripts/e2e_full_flow.sh"
 if grep -En '192\.168\.88\.10' \

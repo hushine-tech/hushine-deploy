@@ -7,7 +7,7 @@
 当前可复现基线使用本机隔离栈：
 
 - PostgreSQL/TimescaleDB: 127.0.0.1:5432
-- Kafka: 127.0.0.1:19092
+- Kafka: 127.0.0.1:9092
 - Elasticsearch: http://127.0.0.1:9200
 - Jaeger: http://127.0.0.1:16686
 - OTLP HTTP/gRPC: 127.0.0.1:4318 / 127.0.0.1:4317

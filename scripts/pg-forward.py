@@ -40,7 +40,7 @@ def main():
     parser = argparse.ArgumentParser(description="TCP forwarder for local PostgreSQL access.")
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--listen-port", type=int, default=15432)
-    parser.add_argument("--target-host", default="192.168.88.10")
+    parser.add_argument("--target-host", required=True)
     parser.add_argument("--target-port", type=int, default=5432)
     args = parser.parse_args()
 

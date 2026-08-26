@@ -4,7 +4,7 @@
 # Runs a strategy-runtime container in outbound RuntimeChannel mode. For a
 # remote host that simulates the user's own Docker runtime, set:
 #
-#   REMOTE_HOST=192.168.88.10 REMOTE_USER=hushine-tech \
+#   REMOTE_HOST=<runtime-host> REMOTE_USER=hushine-tech \
 #   RUNTIME_CHANNEL_ADDR=<mac-lan-ip>:50055 \
 #   CREDENTIAL_FILE=/path/to/downloaded/runtime.cred \
 #   scripts/smoke_d3_self_hosted_runtime.sh

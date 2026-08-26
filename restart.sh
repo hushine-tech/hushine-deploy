@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键重启当前机器上的 Hushine 应用服务。
 # 约定：应用服务跑在本机；第三方依赖（PostgreSQL / Kafka / OTLP 等）
-# 由 DEP_HOST 提供，默认 192.168.88.10。
+# 由显式 DEP_HOST 提供；远程依赖地址不使用隐式默认值。
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -24,7 +24,11 @@ if [ -f "${REPO_ROOT}/.env.local" ]; then
   set +a
 fi
 
-DEP_HOST="${DEP_HOST:-192.168.88.10}"
+DEP_HOST="${DEP_HOST:-}"
+if [ -z "${DEP_HOST}" ]; then
+  echo "DEP_HOST is required; use make local-start for loopback local infrastructure." >&2
+  exit 2
+fi
 REMOTE_RUNTIME_USER="${REMOTE_RUNTIME_USER:-hushine-tech}"
 CONTROL_PANEL_ADDR="${CONTROL_PANEL_ADDR:-127.0.0.1:50054}"
 APP_CONFIG="${APP_CONFIG:-./config.local.yaml}"

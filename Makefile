@@ -26,7 +26,7 @@ LOCAL_RUNTIME_COVERAGE_DIR ?= $(SOURCE_ROOT)/.coverage/runtime-agent
 LOCAL_RUNTIME_COVERAGE_IMAGE ?= hushine/strategy-runtime:executor-coverage-dev
 LOCAL_RUNTIME_COVERAGE_ENV := env RUNTIME_COVERAGE_ENABLED=true RUNTIME_COVERAGE_OUTPUT_DIR="$(LOCAL_RUNTIME_COVERAGE_DIR)" RUNTIME_COVERAGE_IMAGE="$(LOCAL_RUNTIME_COVERAGE_IMAGE)"
 
-.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle local-configs local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted runtime-dependency-envs runtime-dependency-contract runtime-images-verify runtime-dependency-acceptance test-runtime-indicator-v2 no-first-party-compatibility code-census-static code-census-snapshot code-census-unit-coverage code-census-session-start code-census-session-stop code-census-full
+.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle local-configs local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted runtime-dependency-envs runtime-dependency-contract runtime-images-verify runtime-dependency-acceptance test-runtime-indicator-v2 funding-income-service-chain funding-income-demo-smoke no-first-party-compatibility code-census-static code-census-snapshot code-census-unit-coverage code-census-session-start code-census-session-stop code-census-full
 
 help:
 	@echo "Targets:"
@@ -49,6 +49,8 @@ help:
 	@echo "  runtime-dependency-contract   — verify manifest projections against immutable RUNTIME_DEPENDENCY_BASE_SHA"
 	@echo "  runtime-dependency-acceptance — rebuild and verify the paired normal/coverage runtime images"
 	@echo "  test-runtime-indicator-v2 — run the database, Agent, blocked-worker, gateway, and portal V2 gate"
+	@echo "  funding-income-service-chain — run the local Funding/Income full service-chain gate"
+	@echo "  funding-income-demo-smoke — run a guarded read-only Binance Demo Income query"
 	@echo "  smoke-hosted-runtime      — EnsureHostedRuntime smoke (requires USER_ID)"
 	@echo "  smoke-self-hosted-runtime — self-hosted RuntimeChannel smoke (requires CREDENTIAL_FILE)"
 	@echo "  no-first-party-compatibility — inventory first-party compatibility candidates"
@@ -219,6 +221,12 @@ runtime-dependency-acceptance: runtime-dependency-contract runtime-images-verify
 
 test-runtime-indicator-v2:
 	@HUSHINE_SOURCE_ROOT="$(SOURCE_ROOT)" bash $(DEPLOY_ROOT)/scripts/runtime-indicator-v2-smoke.sh
+
+funding-income-service-chain:
+	@HUSHINE_SOURCE_ROOT="$(SOURCE_ROOT)" bash $(DEPLOY_ROOT)/scripts/funding-income-service-chain.test.sh
+
+funding-income-demo-smoke:
+	@HUSHINE_SOURCE_ROOT="$(SOURCE_ROOT)" bash $(DEPLOY_ROOT)/scripts/funding-income-demo-smoke.sh
 
 no-first-party-compatibility:
 	@bash $(DEPLOY_ROOT)/scripts/audit/no-first-party-compatibility.sh "$(SOURCE_ROOT)"
