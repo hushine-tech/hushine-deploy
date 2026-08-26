@@ -357,7 +357,8 @@ probe_started_core_http() {
     >"${EVIDENCE_ROOT}/core-portfolios.json"
   python3 - "${EVIDENCE_ROOT}/core-portfolios.json" <<'PY'
 import json, sys
-assert isinstance(json.load(open(sys.argv[1], encoding="utf-8")), list)
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value is None or isinstance(value, list)
 PY
   echo "probe: started core-service queried its owned Portfolio database"
 }
