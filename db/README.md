@@ -41,13 +41,19 @@ make local-ensure-dbs
 
 | 数据库 | Owner | Baseline | 主要对象 |
 |---|---|---|---|
-| `portfolio` | core-service | `internal/storage/migrations/0001_current_schema_baseline.sql` | Portfolio、Venue、Strategy、Session、wallet snapshot、notification、reconciliation、Spot risk、Indicator V2、strategy leverage launch/admission/facts/outbox |
+| `portfolio` | core-service | `internal/storage/migrations/0001_current_schema_baseline.sql` | Portfolio、Venue、Strategy、Session、wallet snapshot、Venue Income、notification、reconciliation、Spot risk、Indicator V2、strategy leverage launch/admission/facts/outbox |
 | `order` | core-service order 模块 | `internal/order/storage/migrations/0001_current_schema_baseline.sql` | intent、attempt、order、fill、lifecycle、recovery、Spot close/admission |
 | `control_panel` | control-panel-service | `internal/storage/migrations/0001_current_schema_baseline.sql` | Runtime registry/credential/channel/command、market-data stream/request/lease、Session subscription/cleanup outbox |
 | `{exchange}_{year}` | scraper | `internal/storage/migrations/0001_current_schema_baseline.sql` | TimescaleDB 扩展和 migration ledger；symbol/interval 表在首次写入时按当前命名创建 |
 
 数据库之间不复制 owner 状态：交易和钱包事实属于 core-service，Runtime 与
 market-data 控制状态属于 control-panel-service，行情数据属于 scraper 年库。
+
+`venue_income_entries` 是 portfolio 库中唯一的 Venue Income 历史表。每条 Income
+以发生时间 `occurred_at` 归属到写入时明确的 `(session_id, venue_id)`，并由该
+Session/Venue 复合外键保护；同一 Venue 被后续 Session 使用时，迟到的 Income 不得
+改归属到新 Session。`venue_wallet_states` 仍只保存 Venue 当前钱包状态；系统不设
+wallet ledger，也不设 Funding 子表或第二张 Income 表。
 
 ## 手工审阅 bundle
 

@@ -1375,6 +1375,53 @@ CREATE TABLE IF NOT EXISTS strategy_session_target_facts (
 
 
 --
+-- Name: venue_income_entries; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS venue_income_entries (
+    income_entry_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    venue_id BIGINT NOT NULL,
+    income_type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    external_transaction_id TEXT,
+    settlement_key TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL,
+    calculated_amount NUMERIC(38,18) NOT NULL,
+    exchange_amount NUMERIC(38,18),
+    applied_amount NUMERIC(38,18) NOT NULL,
+    reconciliation_delta NUMERIC(38,18) NOT NULL,
+    calculation_details JSONB NOT NULL DEFAULT '[]'::jsonb,
+    raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT venue_income_entries_session_venue_fkey
+      FOREIGN KEY (session_id, venue_id)
+      REFERENCES session_venues(session_id, venue_id) ON DELETE CASCADE,
+    CONSTRAINT chk_venue_income_source CHECK (source IN ('exchange', 'backtest')),
+    CONSTRAINT chk_venue_income_status CHECK (status IN ('pending_actual', 'confirmed', 'calculated')),
+    CONSTRAINT chk_venue_income_details_array CHECK (jsonb_typeof(calculation_details) = 'array'),
+    CONSTRAINT chk_venue_income_raw_object CHECK (jsonb_typeof(raw_payload) = 'object')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_venue_income_external_transaction
+ON venue_income_entries (venue_id, income_type, external_transaction_id)
+WHERE external_transaction_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_venue_income_settlement
+ON venue_income_entries (session_id, venue_id, income_type, settlement_key);
+
+CREATE INDEX IF NOT EXISTS idx_venue_income_session_delivery
+ON venue_income_entries (session_id, income_entry_id);
+
+CREATE INDEX IF NOT EXISTS idx_venue_income_route_time
+ON venue_income_entries (venue_id, income_type, occurred_at);
+
+
+--
 -- Name: strategy_leverage_notification_outbox; Type: TABLE; Schema: public; Owner: -
 --
 
