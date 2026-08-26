@@ -85,10 +85,10 @@ PY
   done
 }
 
-start_owned() {
-  local name="$1"
-  shift
-  "$@" >"${EVIDENCE_ROOT}/${name}.log" 2>&1 &
+start_owned_in() {
+  local name="$1" working_directory="$2"
+  shift 2
+  (cd -- "${working_directory}" && exec "$@") >"${EVIDENCE_ROOT}/${name}.log" 2>&1 &
   OWNED_PIDS+=("$!")
 }
 
@@ -128,10 +128,11 @@ build_and_start_services() {
   (cd "${SOURCE_ROOT}/control-panel-service" && go build -trimpath -o "${EVIDENCE_ROOT}/control-panel-service" ./cmd/control-panel-service)
   (cd "${SOURCE_ROOT}/scraper" && go build -trimpath -o "${EVIDENCE_ROOT}/scraper" ./cmd/scraper)
 
-  start_owned mock-binance "${EVIDENCE_ROOT}/mock-binance" -addr "127.0.0.1:${mock_port}"
+  start_owned_in mock-binance "${SOURCE_ROOT}/core-service" \
+    "${EVIDENCE_ROOT}/mock-binance" -addr "127.0.0.1:${mock_port}"
   wait_tcp "${mock_port}" "Mock Binance"
 
-  start_owned core-service env \
+  start_owned_in core-service "${SOURCE_ROOT}/core-service" env \
     SERVER_HTTP_ADDR="127.0.0.1:${core_http}" \
     SERVER_GRPC_ADDR="127.0.0.1:${core_grpc}" \
     BINANCE_FUTURES_REST_BASE_URL="http://127.0.0.1:${mock_port}" \
@@ -140,7 +141,7 @@ build_and_start_services() {
     "${EVIDENCE_ROOT}/core-service" -config "${SOURCE_ROOT}/core-service/config.local.yaml"
   wait_tcp "${core_grpc}" "core-service"
 
-  start_owned control-panel-service env \
+  start_owned_in control-panel-service "${SOURCE_ROOT}/control-panel-service" env \
     SERVER_HTTP_ADDR="127.0.0.1:${control_http}" \
     SERVER_GRPC_ADDR="127.0.0.1:${control_grpc}" \
     RUNTIME_CHANNEL_SERVER_GRPC_ADDR="127.0.0.1:${runtime_grpc}" \
@@ -160,7 +161,7 @@ text = source.read_text(encoding="utf-8")
 text = text.replace('market_data_control_panel_grpc: "127.0.0.1:50054"', f'market_data_control_panel_grpc: "127.0.0.1:{port}"')
 target.write_text(text, encoding="utf-8")
 PY
-  start_owned scraper "${EVIDENCE_ROOT}/scraper" \
+  start_owned_in scraper "${SOURCE_ROOT}/scraper" "${EVIDENCE_ROOT}/scraper" \
     -config "${scraper_config}" -log-config "${SOURCE_ROOT}/scraper/log-config.local.json"
   sleep 2
   kill -0 "${OWNED_PIDS[${#OWNED_PIDS[@]}-1]}" 2>/dev/null \

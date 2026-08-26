@@ -93,4 +93,17 @@ set -e
 grep -Fq 'core-startup-root-cause' <<<"${readiness_output}" \
   || fail "readiness failure omitted the owned service log"
 
+(
+  export HUSHINE_SOURCE_ROOT="${fixture}"
+  # shellcheck disable=SC1090
+  source "${SCRIPT}"
+  EVIDENCE_ROOT="${fixture}/evidence"
+  start_owned_in core-probe "${fixture}/core-service" sh -c \
+    'pwd -P >"$1"' _ "${fixture}/service.cwd"
+  wait "${OWNED_PIDS[0]}"
+)
+expected_service_cwd="$(cd -- "${fixture}/core-service" && pwd -P)"
+[[ "$(cat "${fixture}/service.cwd")" == "${expected_service_cwd}" ]] \
+  || fail "owned service did not start from its repository working directory"
+
 echo "funding-income service-chain contract: PASS"
