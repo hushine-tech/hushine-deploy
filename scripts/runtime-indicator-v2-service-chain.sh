@@ -98,8 +98,16 @@ pg_database() {
 }
 
 database_exists() {
-  local database="$1"
-  [[ "$(pg_admin -Atc "SELECT count(*) FROM pg_database WHERE datname = '${database}'")" == "1" ]]
+  local database="$1" result
+  safe_database_name "${database}" || return 2
+  if ! result="$(pg_admin -Atc "SELECT count(*) FROM pg_database WHERE datname = '${database}'")"; then
+    return 2
+  fi
+  case "${result}" in
+    1) return 0 ;;
+    0) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 database_comment() {
@@ -317,23 +325,28 @@ golang_lib_is_clean() {
 }
 
 validate_runtime_image_provenance() {
-  local sources="$1" evidence_eligible="$2" labels strategy library golang
+  local sources="$1" evidence_eligible="$2" labels strategy library golang core build_prefix
   [[ "${evidence_eligible}" == "true" || "${evidence_eligible}" == "false" ]] \
     || return 1
   labels="$(runtime_image_labels_json)" || return 1
   strategy="$(jq -er '.["strategy-service"]' <<<"${sources}")" || return 1
   library="$(jq -er '.["strategy-library"]' <<<"${sources}")" || return 1
+  core="$(jq -er '.["core-service"]' <<<"${sources}")" || return 1
   golang="$(golang_lib_sha)" || return 1
+  build_prefix="${strategy:0:12}-${library:0:12}-${golang:0:12}-${core:0:12}-"
   jq -e \
     --arg strategy "${strategy}" \
     --arg library "${library}" \
     --arg golang "${golang}" \
+    --arg core "${core}" \
+    --arg build_prefix "${build_prefix}" \
     --argjson evidence_eligible "${evidence_eligible}" \
     '
       type == "object"
       and .["org.hushine.runtime.strategy-service.commit"] == $strategy
       and .["org.hushine.runtime.strategy-library.commit"] == $library
       and .["org.hushine.runtime.golang-lib.commit"] == $golang
+      and .["org.hushine.runtime.core-service.commit"] == $core
       and (.["org.hushine.runtime.source-dirty"] == "true"
         or .["org.hushine.runtime.source-dirty"] == "false")
       and (
@@ -343,7 +356,7 @@ validate_runtime_image_provenance() {
       and (.["org.hushine.runtime.source-state.sha256"]
         | test("^[0-9a-f]{64}$"))
       and (.["org.hushine.runtime.image-build-id"]
-        | type == "string" and length > 0)
+        | type == "string" and startswith($build_prefix))
     ' <<<"${labels}" >/dev/null || return 1
   if [[ "${evidence_eligible}" == "true" ]]; then
     golang_lib_is_clean || return 1
@@ -353,6 +366,7 @@ validate_runtime_image_provenance() {
     strategy_service_commit:.["org.hushine.runtime.strategy-service.commit"],
     strategy_library_commit:.["org.hushine.runtime.strategy-library.commit"],
     golang_lib_commit:.["org.hushine.runtime.golang-lib.commit"],
+    core_service_commit:.["org.hushine.runtime.core-service.commit"],
     source_state_sha256:.["org.hushine.runtime.source-state.sha256"],
     image_build_id:.["org.hushine.runtime.image-build-id"]
   }' <<<"${labels}"
@@ -432,12 +446,17 @@ validate_owner_file() {
 }
 
 remove_owned_runtime_container() {
-  local owner_file="$1" container_id inspect
+  local owner_file="$1" container_id inspect lookup_status
   jq -e 'has("runtime")' "${owner_file}" >/dev/null || return 0
   container_id="$(jq -er .runtime.container_id "${owner_file}")" || return 1
-  if ! inspect="$(docker container inspect "${container_id}" 2>/dev/null)"; then
+  if container_exists "${container_id}"; then
+    :
+  else
+    lookup_status="$?"
+    [[ "${lookup_status}" -eq 1 ]] || return 1
     return 0
   fi
+  inspect="$(docker container inspect "${container_id}" 2>/dev/null)" || return 1
   jq -e --slurpfile owner "${owner_file}" '
     $owner[0].runtime as $expected
     | .[0] as $actual
@@ -456,7 +475,25 @@ remove_owned_runtime_container() {
       )
   ' <<<"${inspect}" >/dev/null || return 1
   docker rm -f "${container_id}" >/dev/null 2>&1 || return 1
-  ! docker container inspect "${container_id}" >/dev/null 2>&1
+  if container_exists "${container_id}"; then
+    return 1
+  fi
+  lookup_status="$?"
+  [[ "${lookup_status}" -eq 1 ]]
+}
+
+container_exists() {
+  local container_id="$1" result
+  [[ "${container_id}" =~ ^[0-9a-f]{64}$ ]] || return 2
+  if ! result="$(docker container ls -a --no-trunc \
+      --filter "id=${container_id}" --format '{{.ID}}' 2>/dev/null)"; then
+    return 2
+  fi
+  case "${result}" in
+    "${container_id}") return 0 ;;
+    "") return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 expected_source_shas() {
@@ -528,7 +565,11 @@ create_owned_databases() {
 
   for database in "${database_names[@]}"; do
     safe_database_name "${database}" || die "unsafe generated database name: ${database}"
-    database_exists "${database}" && die "refusing pre-existing chain database: ${database}"
+    if database_exists "${database}"; then
+      die "refusing pre-existing chain database: ${database}"
+    elif [[ "$?" -ne 1 ]]; then
+      die "could not verify generated database absence: ${database}"
+    fi
   done
 
   for database in "${database_names[@]}"; do
@@ -1237,6 +1278,13 @@ cleanup_supervisor() {
           "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${database}' AND pid <> pg_backend_pid()" \
           >/dev/null 2>&1 || cleanup_ok=false
         pg_admin -c "DROP DATABASE ${database}" >/dev/null 2>&1 || cleanup_ok=false
+        if database_exists "${database}"; then
+          cleanup_ok=false
+        elif [[ "$?" -ne 1 ]]; then
+          cleanup_ok=false
+        fi
+      elif [[ "$?" -ne 1 ]]; then
+        cleanup_ok=false
       fi
     done
   fi

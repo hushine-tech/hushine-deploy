@@ -171,21 +171,29 @@ jq -e '
   || fail "explicit dirty debug mode was not marked ineligible for sealing"
 git -C "${fake_source}/core-service" restore tracked.txt
 
+fixture_strategy_sha="$(jq -r '.["strategy-service"]' <<<"${source_sha_map}")"
+fixture_library_sha="$(jq -r '.["strategy-library"]' <<<"${source_sha_map}")"
+fixture_core_sha="$(jq -r '.["core-service"]' <<<"${source_sha_map}")"
+fixture_golang_sha='ffffffffffffffffffffffffffffffffffffffff'
+fixture_build_id="${fixture_strategy_sha:0:12}-${fixture_library_sha:0:12}-${fixture_golang_sha:0:12}-${fixture_core_sha:0:12}-1.0.0-executor-coverage"
 (
   export HUSHINE_SOURCE_ROOT="${fake_source}"
   source "${SCRIPT}"
   runtime_image_labels_json() {
     jq -nc \
-      --arg strategy "$(jq -r '.["strategy-service"]' <<<"${source_sha_map}")" \
-      --arg library "$(jq -r '.["strategy-library"]' <<<"${source_sha_map}")" \
+      --arg strategy "${fixture_strategy_sha}" \
+      --arg library "${fixture_library_sha}" \
+      --arg core "${fixture_core_sha}" \
+      --arg build_id "${fixture_build_id}" \
       '{
         "org.hushine.runtime.source-dirty":"false",
         "org.hushine.runtime.strategy-service.commit":$strategy,
         "org.hushine.runtime.strategy-library.commit":$library,
         "org.hushine.runtime.golang-lib.commit":"ffffffffffffffffffffffffffffffffffffffff",
+        "org.hushine.runtime.core-service.commit":$core,
         "org.hushine.runtime.source-state.sha256":
           "1111111111111111111111111111111111111111111111111111111111111111",
-        "org.hushine.runtime.image-build-id":"fixture-build"
+        "org.hushine.runtime.image-build-id":$build_id
       }'
   }
   golang_lib_sha() {
@@ -200,16 +208,47 @@ if (
   source "${SCRIPT}"
   runtime_image_labels_json() {
     jq -nc \
-      --arg strategy "$(jq -r '.["strategy-service"]' <<<"${source_sha_map}")" \
-      --arg library "$(jq -r '.["strategy-library"]' <<<"${source_sha_map}")" \
+      --arg strategy "${fixture_strategy_sha}" \
+      --arg library "${fixture_library_sha}" \
+      --arg build_id "${fixture_strategy_sha:0:12}-${fixture_library_sha:0:12}-${fixture_golang_sha:0:12}-000000000000-1.0.0-executor-coverage" \
+      '{
+        "org.hushine.runtime.source-dirty":"false",
+        "org.hushine.runtime.strategy-service.commit":$strategy,
+        "org.hushine.runtime.strategy-library.commit":$library,
+        "org.hushine.runtime.golang-lib.commit":"ffffffffffffffffffffffffffffffffffffffff",
+        "org.hushine.runtime.core-service.commit":"0000000000000000000000000000000000000000",
+        "org.hushine.runtime.source-state.sha256":
+          "1111111111111111111111111111111111111111111111111111111111111111",
+        "org.hushine.runtime.image-build-id":$build_id
+      }'
+  }
+  golang_lib_sha() {
+    printf '%s\n' ffffffffffffffffffffffffffffffffffffffff
+  }
+  golang_lib_is_clean() { return 0; }
+  validate_runtime_image_provenance "${source_sha_map}" true >/dev/null
+); then
+  fail "Runtime image provenance accepted a forged core-service label/build-id segment"
+fi
+
+if (
+  export HUSHINE_SOURCE_ROOT="${fake_source}"
+  source "${SCRIPT}"
+  runtime_image_labels_json() {
+    jq -nc \
+      --arg strategy "${fixture_strategy_sha}" \
+      --arg library "${fixture_library_sha}" \
+      --arg core "${fixture_core_sha}" \
+      --arg build_id "${fixture_build_id}" \
       '{
         "org.hushine.runtime.source-dirty":"true",
         "org.hushine.runtime.strategy-service.commit":$strategy,
         "org.hushine.runtime.strategy-library.commit":$library,
         "org.hushine.runtime.golang-lib.commit":"ffffffffffffffffffffffffffffffffffffffff",
+        "org.hushine.runtime.core-service.commit":$core,
         "org.hushine.runtime.source-state.sha256":
           "1111111111111111111111111111111111111111111111111111111111111111",
-        "org.hushine.runtime.image-build-id":"fixture-build"
+        "org.hushine.runtime.image-build-id":$build_id
       }'
   }
   golang_lib_sha() {
@@ -673,6 +712,86 @@ set -e
 jq -e '.status == "cleanup_failed" and .cleanup.complete == false' \
   "${cleanup_state}/chain.json" >/dev/null \
   || fail "aggregated cleanup failure was not persisted"
+
+database_query_failure_state="${test_root}/cleanup-database-query-failure"
+mkdir -m 0700 -p "${database_query_failure_state}/logs"
+jq -nc '{
+  owner_token:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  databases:{portfolio:"p",order:"o",control_panel:"c",market:"m"}
+}' >"${database_query_failure_state}/owner.json"
+jq -nc '{
+  owner_token:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  status:"running"
+}' >"${database_query_failure_state}/chain.json"
+chmod 0600 \
+  "${database_query_failure_state}/owner.json" \
+  "${database_query_failure_state}/chain.json"
+set +e
+(
+  source "${SCRIPT}"
+  STATE_DIR="${database_query_failure_state}"
+  validate_owner_file() { return 0; }
+  release_acceptance_barrier() { return 0; }
+  remove_owned_runtime_container() { return 0; }
+  safe_database_name() { return 0; }
+  pg_admin() { return 70; }
+  cleanup_supervisor
+)
+database_query_failure_status="$?"
+set -e
+[[ "${database_query_failure_status}" -ne 0 ]] \
+  || fail "PostgreSQL cleanup query failure was treated as database absence"
+jq -e '.status == "cleanup_failed" and .cleanup.complete == false' \
+  "${database_query_failure_state}/chain.json" >/dev/null \
+  || fail "PostgreSQL cleanup query failure was not persisted"
+
+container_query_failure_state="${test_root}/cleanup-container-query-failure"
+mkdir -m 0700 -p "${container_query_failure_state}/logs"
+jq -nc '{
+  owner_token:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  databases:{portfolio:"p",order:"o",control_panel:"c",market:"m"},
+  runtime:{
+    container_id:"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    container_name:"hushine-runtime-rt-aaaaaaaaaaaaaaaaaaaaaaaa",
+    image_id:"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    runtime_id:"rt-aaaaaaaaaaaaaaaaaaaaaaaa",
+    user_id:"1",
+    coverage_run_id:"run",
+    coverage_mount_source:"/tmp/coverage",
+    resource_name:"indicator-chain-test"
+  }
+}' >"${container_query_failure_state}/owner.json"
+jq -nc '{
+  owner_token:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  status:"running"
+}' >"${container_query_failure_state}/chain.json"
+chmod 0600 \
+  "${container_query_failure_state}/owner.json" \
+  "${container_query_failure_state}/chain.json"
+set +e
+(
+  source "${SCRIPT}"
+  STATE_DIR="${container_query_failure_state}"
+  validate_owner_file() { return 0; }
+  release_acceptance_barrier() { return 0; }
+  safe_database_name() { return 0; }
+  database_exists() { return 1; }
+  docker() {
+    if [[ "${1:-} ${2:-}" == "container ls" ]]; then
+      printf '%s\n' cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      return 0
+    fi
+    return 70
+  }
+  cleanup_supervisor
+)
+container_query_failure_status="$?"
+set -e
+[[ "${container_query_failure_status}" -ne 0 ]] \
+  || fail "Docker inspect failure was treated as Runtime container absence"
+jq -e '.status == "cleanup_failed" and .cleanup.complete == false' \
+  "${container_query_failure_state}/chain.json" >/dev/null \
+  || fail "Docker inspect failure was not persisted"
 
 provision_body="$(
   export HUSHINE_SOURCE_ROOT="${fake_source}"

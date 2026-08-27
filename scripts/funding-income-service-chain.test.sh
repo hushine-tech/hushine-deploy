@@ -22,6 +22,8 @@ CONTROL_HTTP_PORT=""
 CONTROL_GRPC_PORT=""
 RUNTIME_GRPC_PORT=""
 CHAIN_ASSERTIONS_PASSED=false
+NESTED_RUNTIME_CHAIN_STATE_DIR=""
+NESTED_RUNTIME_CHAIN_SCRIPT="${DEPLOY_ROOT}/scripts/runtime-indicator-v2-service-chain.sh"
 
 die() {
   echo "funding-income service-chain: $*" >&2
@@ -59,9 +61,43 @@ cleanup_owned_processes() {
   return "${result}"
 }
 
+cleanup_nested_runtime_chain() {
+  local state_dir="${NESTED_RUNTIME_CHAIN_STATE_DIR}" status
+  [[ -n "${state_dir}" ]] || return 0
+  [[ -n "${EVIDENCE_ROOT}" \
+    && "${state_dir}" == "${EVIDENCE_ROOT}/runtime-worker-chain" \
+    && -d "${state_dir}" \
+    && ! -L "${state_dir}" \
+    && -f "${state_dir}/chain.json" \
+    && ! -L "${state_dir}/chain.json" ]] || {
+      echo "funding-income service-chain cleanup failed: nested Runtime chain state is incomplete" >&2
+      return 1
+    }
+  status="$(jq -er '.status' "${state_dir}/chain.json" 2>/dev/null)" || {
+    echo "funding-income service-chain cleanup failed: read nested Runtime chain status" >&2
+    return 1
+  }
+  if [[ "${status}" == "running" ]]; then
+    if ! "${NESTED_RUNTIME_CHAIN_SCRIPT}" stop --state-dir "${state_dir}"; then
+      echo "funding-income service-chain cleanup failed: stop nested Runtime chain" >&2
+      return 1
+    fi
+  elif [[ "${status}" != "stopped" ]]; then
+    echo "funding-income service-chain cleanup failed: nested Runtime chain status ${status}" >&2
+    return 1
+  fi
+  jq -e '.status == "stopped" and .cleanup.complete == true' \
+    "${state_dir}/chain.json" >/dev/null 2>&1 || {
+      echo "funding-income service-chain cleanup failed: verify nested supervisor/container/database cleanup" >&2
+      return 1
+    }
+  NESTED_RUNTIME_CHAIN_STATE_DIR=""
+}
+
 cleanup_owned_resources() {
   local rc="$?" cleanup_rc=0 container id was_running was_paused now_running now_paused
   trap - EXIT HUP INT TERM
+  cleanup_nested_runtime_chain || cleanup_rc=1
   cleanup_owned_processes || cleanup_rc=1
   drop_owned_databases || cleanup_rc=1
   if [[ -n "${EVIDENCE_ROOT}" && -f "${EVIDENCE_ROOT}/containers.all.before" ]]; then
@@ -553,10 +589,13 @@ run_approved_assertions() {
 }
 
 run_real_runtime_worker_chain() {
-  local state_dir="${EVIDENCE_ROOT}/runtime-worker-chain" script status=0 stop_status=0
-  script="${DEPLOY_ROOT}/scripts/runtime-indicator-v2-service-chain.sh"
+  local state_dir script status=0 stop_status=0
+  NESTED_RUNTIME_CHAIN_STATE_DIR="${EVIDENCE_ROOT}/runtime-worker-chain"
+  state_dir="${NESTED_RUNTIME_CHAIN_STATE_DIR}"
+  script="${NESTED_RUNTIME_CHAIN_SCRIPT}"
   mkdir -m 0700 -p "${state_dir}"
   state_dir="$(cd -- "${state_dir}" && pwd -P)"
+  NESTED_RUNTIME_CHAIN_STATE_DIR="${state_dir}"
   set +e
   "${script}" start --phase pre --state-dir "${state_dir}"
   status="$?"
@@ -565,9 +604,8 @@ run_real_runtime_worker_chain() {
       && "${script}" await finalized-1024-plus-tail --state-dir "${state_dir}"
     status="$?"
   fi
-  if [[ -f "${state_dir}/chain.json" ]] \
-    && [[ "$(jq -r '.status // ""' "${state_dir}/chain.json" 2>/dev/null)" == "running" ]]; then
-    "${script}" stop --state-dir "${state_dir}"
+  if [[ -f "${state_dir}/chain.json" ]]; then
+    cleanup_nested_runtime_chain
     stop_status="$?"
   fi
   set -e

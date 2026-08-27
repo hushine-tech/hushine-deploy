@@ -295,4 +295,45 @@ expected_service_cwd="$(cd -- "${fixture}/core-service" && pwd -P)"
 [[ "$(cat "${fixture}/service.cwd")" == "${expected_service_cwd}" ]] \
   || fail "owned service did not start from its repository working directory"
 
+nested_signal_state="${fixture}/nested-signal-evidence/runtime-worker-chain"
+mkdir -m 0700 -p "${nested_signal_state}"
+jq -nc '{status:"running",cleanup:null}' >"${nested_signal_state}/chain.json"
+chmod 0600 "${nested_signal_state}/chain.json"
+nested_stop_marker="${fixture}/nested-stop.marker"
+fake_nested_script="${fixture}/fake-runtime-chain.sh"
+cat >"${fake_nested_script}" <<'FAKE_NESTED_CHAIN'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "stop" && "${2:-}" == "--state-dir" ]]
+state_dir="${3:?}"
+printf '%s\n' stopped >"${NESTED_STOP_MARKER:?}"
+temporary="${state_dir}/chain.json.tmp"
+jq '.status="stopped" | .cleanup={complete:true}' \
+  "${state_dir}/chain.json" >"${temporary}"
+mv -f "${temporary}" "${state_dir}/chain.json"
+FAKE_NESTED_CHAIN
+chmod 0700 "${fake_nested_script}"
+set +e
+(
+  export NESTED_STOP_MARKER="${nested_stop_marker}"
+  # shellcheck disable=SC1090
+  source "${SCRIPT}"
+  EVIDENCE_ROOT="${fixture}/nested-signal-evidence"
+  NESTED_RUNTIME_CHAIN_STATE_DIR="${nested_signal_state}"
+  NESTED_RUNTIME_CHAIN_SCRIPT="${fake_nested_script}"
+  CHAIN_ASSERTIONS_PASSED=false
+  trap cleanup_owned_resources EXIT HUP INT TERM
+  kill -TERM "${BASHPID}"
+  sleep 1
+)
+nested_signal_status="$?"
+set -e
+[[ "${nested_signal_status}" -ne 0 ]] \
+  || fail "signal-interrupted outer chain unexpectedly succeeded"
+[[ -f "${nested_stop_marker}" ]] \
+  || fail "TERM/HUP cleanup did not stop the persisted nested Runtime chain"
+jq -e '.status == "stopped" and .cleanup.complete == true' \
+  "${nested_signal_state}/chain.json" >/dev/null \
+  || fail "TERM/HUP cleanup did not verify nested supervisor/container/database cleanup"
+
 echo "funding-income service-chain contract: PASS"
