@@ -634,6 +634,46 @@ grep -Fq 'terminate_owned_process' <<<"${cleanup_body}" \
 grep -Fq 'remove_owned_runtime_container' <<<"${cleanup_body}" \
   || fail "cleanup does not use the full runtime-container ownership check"
 
+cleanup_state="${test_root}/cleanup-api-failure"
+mkdir -m 0700 -p "${cleanup_state}/logs"
+jq -nc '{
+  owner_token:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  databases:{portfolio:"p",order:"o",control_panel:"c",market:"m"}
+}' >"${cleanup_state}/owner.json"
+jq -nc '{
+  owner_token:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  urls:{handler:"http://127.0.0.1:1"},
+  session_id:"session",runtime_id:"runtime",status:"running"
+}' >"${cleanup_state}/chain.json"
+jq -nc '{token:"token"}' >"${cleanup_state}/auth.json"
+chmod 0600 \
+  "${cleanup_state}/owner.json" \
+  "${cleanup_state}/chain.json" \
+  "${cleanup_state}/auth.json"
+set +e
+(
+  source "${SCRIPT}"
+  STATE_DIR="${cleanup_state}"
+  validate_owner_file() { return 0; }
+  release_acceptance_barrier() { return 0; }
+  api_json() { exit 77; }
+  remove_owned_runtime_container() {
+    printf '%s\n' removed >"${cleanup_state}/container-removed"
+  }
+  safe_database_name() { return 0; }
+  database_exists() { return 1; }
+  cleanup_supervisor
+)
+cleanup_api_status="$?"
+set -e
+[[ "${cleanup_api_status}" -ne 0 ]] \
+  || fail "cleanup accepted failed stop/end API requests"
+[[ -f "${cleanup_state}/container-removed" ]] \
+  || fail "failed cleanup API request prevented later owned-resource cleanup"
+jq -e '.status == "cleanup_failed" and .cleanup.complete == false' \
+  "${cleanup_state}/chain.json" >/dev/null \
+  || fail "aggregated cleanup failure was not persisted"
+
 provision_body="$(
   export HUSHINE_SOURCE_ROOT="${fake_source}"
   source "${SCRIPT}"

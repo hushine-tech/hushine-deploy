@@ -1195,12 +1195,14 @@ cleanup_supervisor() {
     session="$(jq -r .session_id "${STATE_DIR}/chain.json")"
     runtime="$(jq -r .runtime_id "${STATE_DIR}/chain.json")"
     auth="$(jq -r .token "${STATE_DIR}/auth.json")"
-    api_json POST "${api}/api/strategy-sessions/${session}/stop" "${auth}" \
-      '{"stop_action":"STOP_ONLY"}' \
-      >"${STATE_DIR}/stop-session.json" 2>"${STATE_DIR}/logs/stop-session.log" \
+    (
+      api_json POST "${api}/api/strategy-sessions/${session}/stop" "${auth}" \
+        '{"stop_action":"STOP_ONLY"}'
+    ) >"${STATE_DIR}/stop-session.json" 2>"${STATE_DIR}/logs/stop-session.log" \
       || cleanup_ok=false
-    api_json DELETE "${api}/api/runtimes/${runtime}" "${auth}" \
-      >"${STATE_DIR}/end-runtime.json" 2>"${STATE_DIR}/logs/end-runtime.log" \
+    (
+      api_json DELETE "${api}/api/runtimes/${runtime}" "${auth}"
+    ) >"${STATE_DIR}/end-runtime.json" 2>"${STATE_DIR}/logs/end-runtime.log" \
       || cleanup_ok=false
   fi
 
