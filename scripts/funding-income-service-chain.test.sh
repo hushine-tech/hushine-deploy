@@ -216,8 +216,7 @@ drop_owned_databases() {
     [[ "${database}" =~ ^hushine_funding_chain_[a-z0-9_]+$ ]] || continue
     docker compose -f "${COMPOSE_FILE}" exec -T timescaledb \
       psql -X -q -U postgres -d postgres -v ON_ERROR_STOP=1 \
-      -v owned_db="${database}" -c \
-      "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'owned_db' AND pid <> pg_backend_pid();" \
+      -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${database}' AND pid <> pg_backend_pid();" \
       >/dev/null 2>&1 || {
         echo "funding-income service-chain cleanup failed: terminate owned database sessions ${database}" >&2
         result=1

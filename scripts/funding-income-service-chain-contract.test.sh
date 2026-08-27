@@ -95,6 +95,11 @@ grep -Fq 'SCRAPER_DATABASE_PREFIX="${OWNED_MARKET_PREFIX}"' "${SCRIPT}" \
   || fail "service-chain migrations do not use owned market-data databases"
 grep -Fq 'drop_owned_databases' "${SCRIPT}" \
   || fail "owned database cleanup is missing"
+if grep -Fq ":'owned_db'" "${SCRIPT}"; then
+  fail "owned database cleanup uses an unsubstituted psql variable in -c SQL"
+fi
+grep -Fq "WHERE datname = '\${database}'" "${SCRIPT}" \
+  || fail "owned database cleanup does not use its validated database identity"
 for real_probe in \
   'probe_started_mock_adapter' \
   'probe_started_core_http' \
