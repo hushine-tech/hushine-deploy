@@ -297,6 +297,7 @@ expected_service_cwd="$(cd -- "${fixture}/core-service" && pwd -P)"
 
 nested_signal_state="${fixture}/nested-signal-evidence/runtime-worker-chain"
 mkdir -m 0700 -p "${nested_signal_state}"
+nested_signal_state="$(cd -- "${nested_signal_state}" && pwd -P)"
 jq -nc '{status:"running",cleanup:null}' >"${nested_signal_state}/chain.json"
 chmod 0600 "${nested_signal_state}/chain.json"
 nested_stop_marker="${fixture}/nested-stop.marker"
@@ -335,5 +336,26 @@ set -e
 jq -e '.status == "stopped" and .cleanup.complete == true' \
   "${nested_signal_state}/chain.json" >/dev/null \
   || fail "TERM/HUP cleanup did not verify nested supervisor/container/database cleanup"
+
+canonical_evidence="${fixture}/canonical-evidence"
+canonical_state="${canonical_evidence}/runtime-worker-chain"
+evidence_alias="${fixture}/evidence-alias"
+mkdir -m 0700 -p "${canonical_state}"
+canonical_state="$(cd -- "${canonical_state}" && pwd -P)"
+ln -s "${canonical_evidence}" "${evidence_alias}"
+jq -nc '{status:"running",cleanup:null}' >"${canonical_state}/chain.json"
+chmod 0600 "${canonical_state}/chain.json"
+canonical_stop_marker="${fixture}/canonical-stop.marker"
+(
+  export NESTED_STOP_MARKER="${canonical_stop_marker}"
+  # shellcheck disable=SC1090
+  source "${SCRIPT}"
+  EVIDENCE_ROOT="${evidence_alias}"
+  NESTED_RUNTIME_CHAIN_STATE_DIR="${canonical_state}"
+  NESTED_RUNTIME_CHAIN_SCRIPT="${fake_nested_script}"
+  cleanup_nested_runtime_chain
+) || fail "nested cleanup rejected equivalent canonical evidence/state paths"
+[[ -f "${canonical_stop_marker}" ]] \
+  || fail "canonical nested cleanup did not stop the Runtime chain"
 
 echo "funding-income service-chain contract: PASS"

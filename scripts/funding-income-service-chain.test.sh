@@ -62,10 +62,17 @@ cleanup_owned_processes() {
 }
 
 cleanup_nested_runtime_chain() {
-  local state_dir="${NESTED_RUNTIME_CHAIN_STATE_DIR}" status
+  local state_dir="${NESTED_RUNTIME_CHAIN_STATE_DIR}" status evidence_root
   [[ -n "${state_dir}" ]] || return 0
-  [[ -n "${EVIDENCE_ROOT}" \
-    && "${state_dir}" == "${EVIDENCE_ROOT}/runtime-worker-chain" \
+  [[ -n "${EVIDENCE_ROOT}" && -d "${EVIDENCE_ROOT}" ]] || {
+    echo "funding-income service-chain cleanup failed: nested Runtime evidence root is unavailable" >&2
+    return 1
+  }
+  evidence_root="$(cd -- "${EVIDENCE_ROOT}" && pwd -P)" || {
+    echo "funding-income service-chain cleanup failed: canonicalize nested Runtime evidence root" >&2
+    return 1
+  }
+  [[ "${state_dir}" == "${evidence_root}/runtime-worker-chain" \
     && -d "${state_dir}" \
     && ! -L "${state_dir}" \
     && -f "${state_dir}/chain.json" \
