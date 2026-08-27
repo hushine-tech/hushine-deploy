@@ -2,7 +2,7 @@
 
 日期：2026-08-28
 
-状态：交互设计已批准；书面设计待最终审阅
+状态：设计已批准；进入实施
 
 ## 1. 背景
 
@@ -313,4 +313,3 @@ LONG/SHORT、非法 Hedge + BOTH，确认后两者在 Session 启动或第一条
 - One-way/Hedge × Cross/Isolated 全矩阵通过，特别是 `Hedge + Isolated`。
 - Spot/Futures 的 GTC、IOC、FOK 和部分/全部成交 mock 场景通过。
 - 空数据库一次部署可用，相关仓库测试、构建和静态检查全部通过。
-
