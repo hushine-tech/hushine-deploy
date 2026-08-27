@@ -155,6 +155,9 @@ set -e
   || fail "owned-database drop failure did not fail the gate"
 grep -Fq 'cleanup failed' <<<"${database_cleanup_output}" \
   || fail "owned-database cleanup failure omitted its diagnostic"
+grep -Fq 'drop owned database hushine_funding_chain_contract_portfolio' \
+  <<<"${database_cleanup_output}" \
+  || fail "owned-database cleanup failure omitted the failed operation"
 
 incomplete_evidence="${fixture}/incomplete-assertions-evidence"
 mkdir -p "${incomplete_evidence}"
@@ -252,6 +255,8 @@ set -e
 [[ "${stop_failure_status}" -ne 0 ]] || fail "pre-existing container stop failure was accepted"
 [[ "${stop_failure_output}" != *'assertions and cleanup verified'* ]] \
   || fail "gate printed PASS after container-state restoration failed"
+grep -Fq 'restore stopped container stopped' <<<"${stop_failure_output}" \
+  || fail "container-state restoration failure omitted the failed operation"
 
 mkdir -p "${fixture}/evidence"
 printf '%s\n' 'core-startup-root-cause' >"${fixture}/evidence/core-service.log"

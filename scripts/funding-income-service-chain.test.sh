@@ -65,7 +65,10 @@ cleanup_owned_resources() {
   cleanup_owned_processes || cleanup_rc=1
   drop_owned_databases || cleanup_rc=1
   if [[ -n "${EVIDENCE_ROOT}" && -f "${EVIDENCE_ROOT}/containers.all.before" ]]; then
-    record_local_container_changes || cleanup_rc=1
+    if ! record_local_container_changes; then
+      echo "funding-income service-chain cleanup failed: record local container changes" >&2
+      cleanup_rc=1
+    fi
   fi
   for container in "${CREATED_CONTAINERS[@]}"; do
     if ! docker rm -f "${container}" >/dev/null 2>&1 \
@@ -86,17 +89,29 @@ cleanup_owned_resources() {
         docker inspect -f '{{.State.Running}}|{{.State.Paused}}' "${id}" 2>/dev/null
       )
       if [[ "${was_running}" == "true" ]]; then
-        docker start "${id}" >/dev/null 2>&1 || cleanup_rc=1
+        if ! docker start "${id}" >/dev/null 2>&1; then
+          echo "funding-income service-chain cleanup failed: restore running container ${id}" >&2
+          cleanup_rc=1
+        fi
       else
-        docker stop --time 10 "${id}" >/dev/null 2>&1 || cleanup_rc=1
+        if ! docker stop --time 10 "${id}" >/dev/null 2>&1; then
+          echo "funding-income service-chain cleanup failed: restore stopped container ${id}" >&2
+          cleanup_rc=1
+        fi
       fi
       IFS='|' read -r now_running now_paused < <(
         docker inspect -f '{{.State.Running}}|{{.State.Paused}}' "${id}" 2>/dev/null
       )
       if [[ "${was_paused}" == "true" && "${now_paused}" != "true" ]]; then
-        docker pause "${id}" >/dev/null 2>&1 || cleanup_rc=1
+        if ! docker pause "${id}" >/dev/null 2>&1; then
+          echo "funding-income service-chain cleanup failed: restore paused container ${id}" >&2
+          cleanup_rc=1
+        fi
       elif [[ "${was_paused}" != "true" && "${now_paused}" == "true" ]]; then
-        docker unpause "${id}" >/dev/null 2>&1 || cleanup_rc=1
+        if ! docker unpause "${id}" >/dev/null 2>&1; then
+          echo "funding-income service-chain cleanup failed: restore unpaused container ${id}" >&2
+          cleanup_rc=1
+        fi
       fi
       IFS='|' read -r now_running now_paused < <(
         docker inspect -f '{{.State.Running}}|{{.State.Paused}}' "${id}" 2>/dev/null
@@ -203,13 +218,22 @@ drop_owned_databases() {
       psql -X -q -U postgres -d postgres -v ON_ERROR_STOP=1 \
       -v owned_db="${database}" -c \
       "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'owned_db' AND pid <> pg_backend_pid();" \
-      >/dev/null 2>&1 || result=1
+      >/dev/null 2>&1 || {
+        echo "funding-income service-chain cleanup failed: terminate owned database sessions ${database}" >&2
+        result=1
+      }
     docker compose -f "${COMPOSE_FILE}" exec -T timescaledb \
-      dropdb -U postgres --if-exists "${database}" >/dev/null 2>&1 || result=1
+      dropdb -U postgres --if-exists "${database}" >/dev/null 2>&1 || {
+        echo "funding-income service-chain cleanup failed: drop owned database ${database}" >&2
+        result=1
+      }
     remaining="$(docker compose -f "${COMPOSE_FILE}" exec -T timescaledb \
       psql -X -At -U postgres -d postgres -v ON_ERROR_STOP=1 \
       -c "SELECT count(*) FROM pg_database WHERE datname='${database}';" 2>/dev/null)" \
-      || result=1
+      || {
+        echo "funding-income service-chain cleanup failed: verify owned database removal ${database}" >&2
+        result=1
+      }
     if [[ "${remaining}" != "0" ]]; then
       echo "funding-income service-chain cleanup failed: owned database remains: ${database}" >&2
       result=1
