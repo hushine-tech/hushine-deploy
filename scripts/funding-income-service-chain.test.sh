@@ -101,8 +101,23 @@ cleanup_nested_runtime_chain() {
   NESTED_RUNTIME_CHAIN_STATE_DIR=""
 }
 
+docker_container_exists() {
+  local container="$1" containers
+  [[ "${container}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 2
+  containers="$(docker container ls -a --no-trunc --format '{{.ID}}')" || return 2
+  if grep -Fqx "${container}" <<<"${containers}"; then
+    return 0
+  fi
+  return 1
+}
+
+docker_container_state() {
+  docker inspect -f '{{.State.Running}}|{{.State.Paused}}' "$1" 2>/dev/null
+}
+
 cleanup_owned_resources() {
   local rc="$?" cleanup_rc=0 container id was_running was_paused now_running now_paused
+  local lookup_status state
   trap - EXIT HUP INT TERM
   cleanup_nested_runtime_chain || cleanup_rc=1
   cleanup_owned_processes || cleanup_rc=1
@@ -114,23 +129,37 @@ cleanup_owned_resources() {
     fi
   fi
   for container in "${CREATED_CONTAINERS[@]}"; do
-    if ! docker rm -f "${container}" >/dev/null 2>&1 \
-      || docker inspect "${container}" >/dev/null 2>&1; then
+    if ! docker rm -f "${container}" >/dev/null 2>&1; then
       echo "funding-income service-chain cleanup failed: remove created container ${container}" >&2
       cleanup_rc=1
+      continue
+    fi
+    if docker_container_exists "${container}"; then
+      echo "funding-income service-chain cleanup failed: created container remains ${container}" >&2
+      cleanup_rc=1
+    else
+      lookup_status="$?"
+      if [[ "${lookup_status}" -ne 1 ]]; then
+        echo "funding-income service-chain cleanup failed: verify created container removal ${container}" >&2
+        cleanup_rc=1
+      fi
     fi
   done
   if [[ -n "${EVIDENCE_ROOT}" && -f "${EVIDENCE_ROOT}/containers.state.before" ]]; then
     while IFS='|' read -r id was_running was_paused; do
       [[ -n "${id}" ]] || continue
-      if ! docker inspect "${id}" >/dev/null 2>&1; then
-        echo "funding-income service-chain cleanup failed: pre-existing container disappeared: ${id}" >&2
+      if docker_container_exists "${id}"; then
+        :
+      else
+        lookup_status="$?"
+        if [[ "${lookup_status}" -eq 1 ]]; then
+          echo "funding-income service-chain cleanup failed: pre-existing container disappeared: ${id}" >&2
+        else
+          echo "funding-income service-chain cleanup failed: query pre-existing container: ${id}" >&2
+        fi
         cleanup_rc=1
         continue
       fi
-      IFS='|' read -r now_running now_paused < <(
-        docker inspect -f '{{.State.Running}}|{{.State.Paused}}' "${id}" 2>/dev/null
-      )
       if [[ "${was_running}" == "true" ]]; then
         if ! docker start "${id}" >/dev/null 2>&1; then
           echo "funding-income service-chain cleanup failed: restore running container ${id}" >&2
@@ -142,9 +171,12 @@ cleanup_owned_resources() {
           cleanup_rc=1
         fi
       fi
-      IFS='|' read -r now_running now_paused < <(
-        docker inspect -f '{{.State.Running}}|{{.State.Paused}}' "${id}" 2>/dev/null
-      )
+      if ! state="$(docker_container_state "${id}")"; then
+        echo "funding-income service-chain cleanup failed: read restored container state ${id}" >&2
+        cleanup_rc=1
+        continue
+      fi
+      IFS='|' read -r now_running now_paused <<<"${state}"
       if [[ "${was_paused}" == "true" && "${now_paused}" != "true" ]]; then
         if ! docker pause "${id}" >/dev/null 2>&1; then
           echo "funding-income service-chain cleanup failed: restore paused container ${id}" >&2
@@ -156,9 +188,12 @@ cleanup_owned_resources() {
           cleanup_rc=1
         fi
       fi
-      IFS='|' read -r now_running now_paused < <(
-        docker inspect -f '{{.State.Running}}|{{.State.Paused}}' "${id}" 2>/dev/null
-      )
+      if ! state="$(docker_container_state "${id}")"; then
+        echo "funding-income service-chain cleanup failed: verify restored container state ${id}" >&2
+        cleanup_rc=1
+        continue
+      fi
+      IFS='|' read -r now_running now_paused <<<"${state}"
       if [[ "${now_running}|${now_paused}" != "${was_running}|${was_paused}" ]]; then
         echo "funding-income service-chain cleanup failed: container state ${id}=${now_running}|${now_paused}, want ${was_running}|${was_paused}" >&2
         cleanup_rc=1
@@ -240,16 +275,18 @@ append_unique() {
 }
 
 record_local_container_changes() {
-  local container
+  local container containers running
+  containers="$(docker compose -f "${COMPOSE_FILE}" ps -a -q)" || return 1
   while IFS= read -r container; do
     [[ -n "${container}" ]] || continue
     if ! cut -d'|' -f1 "${EVIDENCE_ROOT}/containers.state.before" | grep -Fqx "${container}"; then
       append_unique CREATED_CONTAINERS "${container}"
-    elif ! grep -Fqx "${container}" "${EVIDENCE_ROOT}/containers.running.before" \
-      && docker inspect -f '{{.State.Running}}' "${container}" 2>/dev/null | grep -Fqx true; then
-      append_unique STARTED_EXISTING_CONTAINERS "${container}"
+    elif ! grep -Fqx "${container}" "${EVIDENCE_ROOT}/containers.running.before"; then
+      running="$(docker inspect -f '{{.State.Running}}' "${container}" 2>/dev/null)" \
+        || return 1
+      [[ "${running}" != "true" ]] || append_unique STARTED_EXISTING_CONTAINERS "${container}"
     fi
-  done < <(docker compose -f "${COMPOSE_FILE}" ps -a -q)
+  done <<<"${containers}"
 }
 
 drop_owned_databases() {

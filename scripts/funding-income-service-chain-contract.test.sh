@@ -141,6 +141,57 @@ set -e
 grep -Fq 'cleanup failed' <<<"${cleanup_failure_output}" \
   || fail "cleanup failure did not emit a diagnostic"
 
+record_query_evidence="${fixture}/record-query-failure"
+mkdir -p "${record_query_evidence}"
+: >"${record_query_evidence}/containers.state.before"
+: >"${record_query_evidence}/containers.running.before"
+set +e
+(
+  # shellcheck disable=SC1090
+  source "${SCRIPT}"
+  EVIDENCE_ROOT="${record_query_evidence}"
+  docker() {
+    [[ "${1:-} ${2:-}" != "compose ${COMPOSE_FILE}" ]] || return 70
+    return 70
+  }
+  record_local_container_changes
+)
+record_query_status="$?"
+set -e
+[[ "${record_query_status}" -ne 0 ]] \
+  || fail "Docker compose container-list failure was treated as an empty list"
+
+final_query_bin="${fixture}/final-query-bin"
+mkdir -p "${final_query_bin}"
+cat >"${final_query_bin}/docker" <<'FAKE_DOCKER_FINAL_QUERY'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "rm" ]]; then
+  exit 0
+fi
+exit 70
+FAKE_DOCKER_FINAL_QUERY
+chmod 0700 "${final_query_bin}/docker"
+set +e
+final_query_output="$(
+  (
+    export PATH="${final_query_bin}:${PATH}"
+    # shellcheck disable=SC1090
+    source "${SCRIPT}"
+    EVIDENCE_ROOT="${fixture}/final-query-evidence"
+    mkdir -p "${EVIDENCE_ROOT}"
+    CREATED_CONTAINERS=(cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc)
+    CHAIN_ASSERTIONS_PASSED=true
+    cleanup_owned_resources
+  ) 2>&1
+)"
+final_query_status="$?"
+set -e
+[[ "${final_query_status}" -ne 0 ]] \
+  || fail "post-removal Docker query failure was treated as container absence"
+[[ "${final_query_output}" != *'assertions and cleanup verified'* ]] \
+  || fail "gate printed PASS after post-removal Docker query failed"
+
 set +e
 database_cleanup_output="$(
   (
@@ -197,8 +248,16 @@ set -euo pipefail
 action="$1"
 shift
 case "${action}" in
+  container)
+    [[ "${1:-}" == "ls" ]]
+    for state_file in "${DOCKER_STATE_DIR}"/*; do
+      [[ -f "${state_file}" ]] || continue
+      basename "${state_file}"
+    done
+    ;;
   inspect)
     if [[ "${1:-}" == "-f" ]]; then
+      [[ "${FAIL_DOCKER_ACTION:-}" != inspect ]]
       format="$2" id="$3"
       state="$(cat "${DOCKER_STATE_DIR}/${id}")"
       if [[ "${format}" == *'{{.Id}}'* ]]; then
@@ -262,6 +321,26 @@ set -e
   || fail "gate printed PASS after container-state restoration failed"
 grep -Fq 'restore stopped container stopped' <<<"${stop_failure_output}" \
   || fail "container-state restoration failure omitted the failed operation"
+
+set +e
+inspect_failure_output="$(
+  (
+    export PATH="${state_bin}:${PATH}" DOCKER_STATE_DIR="${state_root}" FAIL_DOCKER_ACTION=inspect
+    # shellcheck disable=SC1090
+    source "${SCRIPT}"
+    EVIDENCE_ROOT="${fixture}/inspect-cleanup-failure"
+    mkdir -p "${EVIDENCE_ROOT}"
+    printf '%s\n' 'running|true|false' >"${EVIDENCE_ROOT}/containers.state.before"
+    CHAIN_ASSERTIONS_PASSED=true
+    cleanup_owned_resources
+  ) 2>&1
+)"
+inspect_failure_status="$?"
+set -e
+[[ "${inspect_failure_status}" -ne 0 ]] \
+  || fail "pre-existing container state-query failure was accepted"
+grep -Fq 'read restored container state running' <<<"${inspect_failure_output}" \
+  || fail "container state-query failure omitted the failed operation"
 
 mkdir -p "${fixture}/evidence"
 printf '%s\n' 'core-startup-root-cause' >"${fixture}/evidence/core-service.log"
