@@ -1388,11 +1388,16 @@ SELECT
   COALESCE(max(applied_amount), 0)
 FROM exact_income;")"
   IFS='|' read -r count income_id cursor status source income_type applied <<<"${result}"
-  [[ "${count}" == "1" && "${income_id}" =~ ^[1-9][0-9]*$ ]]
-  [[ "${cursor}" == "${income_id}" ]]
-  [[ "${status}" == "calculated" && "${source}" == "backtest" ]]
-  [[ "${income_type}" == "FUNDING_FEE" ]]
-  [[ "${applied}" != "0" && "${applied}" != "0.000000000000000000" ]]
+  if [[ "${count}" != "1" \
+    || ! "${income_id}" =~ ^[1-9][0-9]*$ \
+    || "${cursor}" != "${income_id}" \
+    || "${status}" != "calculated" \
+    || "${source}" != "backtest" \
+    || "${income_type}" != "FUNDING_FEE" \
+    || "${applied}" == "0" \
+    || "${applied}" == "0.000000000000000000" ]]; then
+    die "Funding Income durable row mismatch: count=${count} income_id=${income_id} cursor=${cursor} status=${status} source=${source} income_type=${income_type} applied=${applied}"
+  fi
   echo "runtime Indicator V2 service-chain: Funding Income wallet-once PASS"
 }
 

@@ -61,6 +61,7 @@ for literal in \
   'strategy_indicator_chunks' \
   'futures_funding_rates_testusdt' \
   'assert_funding_income_once' \
+  'Funding Income durable row mismatch:' \
   'assert_blocked_worker_heartbeat' \
   "snapshot_json #>> '{futures,last_applied_income_entry_id}'" \
   'protocol_version' \
