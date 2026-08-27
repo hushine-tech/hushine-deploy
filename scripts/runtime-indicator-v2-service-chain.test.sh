@@ -62,6 +62,7 @@ for literal in \
   'futures_funding_rates_testusdt' \
   'assert_funding_income_once' \
   'Funding Income durable row mismatch:' \
+  'sequence in {4, 900, 1438}' \
   'assert_blocked_worker_heartbeat' \
   "snapshot_json #>> '{futures,last_applied_income_entry_id}'" \
   'protocol_version' \
@@ -550,17 +551,17 @@ valid_orders="$(jq -nc \
       quote_qty_unresolved:false,fee:"0.000041600000000000",fee_asset:"USDT"
     },
     {
-      time_ms:($start + 9 * 60000 + 59999),
+      time_ms:($start + 900 * 60000 + 59999),
       symbol:"TESTUSDT",side:2,intent_status:1,reject_code:"",
       order_status:3,orig_qty:"0.001000000000000000",
       executed_qty:"0.001000000000000000",
-      avg_price:"109.000000000000000000",
-      cumulative_quote_qty:"0.109000000000000000",
+      avg_price:"100.000000000000000000",
+      cumulative_quote_qty:"0.100000000000000000",
       error_code:"",error_message:"",recovery_status:"",
       fill_status:1,qty:"0.001000000000000000",
-      fill_price:"109.000000000000000000",
-      quote_qty:"0.109000000000000000",
-      quote_qty_unresolved:false,fee:"0.000043600000000000",fee_asset:"USDT"
+      fill_price:"100.000000000000000000",
+      quote_qty:"0.100000000000000000",
+      quote_qty_unresolved:false,fee:"0.000040000000000000",fee_asset:"USDT"
     },
     {
       time_ms:($start + 1438 * 60000 + 59999),

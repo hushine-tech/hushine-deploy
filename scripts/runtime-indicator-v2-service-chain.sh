@@ -658,9 +658,9 @@ SELECT create_hypertable(
 INSERT INTO futures_funding_rates_testusdt (
     time, symbol, market, exchange, funding_rate, mark_price, next_funding_time
 ) VALUES (
-    '2025-01-01T00:06:00Z', 'TESTUSDT', 'futures', 'binance',
-    0.001000000000000000, 106.000000000000000000,
-    '2025-01-01T08:06:00Z'
+    '2025-01-01T08:20:00Z', 'TESTUSDT', 'futures', 'binance',
+    0.001000000000000000, 100.000000000000000000,
+    '2025-01-01T16:20:00Z'
 ) ON CONFLICT (time, symbol) DO NOTHING;
 SQL
   pg_database "${control}" >/dev/null <<'SQL'
@@ -876,6 +876,8 @@ replacements = {
         f"ACCEPTANCE_BARRIER_OWNER_TOKEN = {json.dumps(owner)}",
     'ACCEPTANCE_BARRIER_GENERATION = ""':
         f"ACCEPTANCE_BARRIER_GENERATION = {json.dumps(generation)}",
+    'if sequence in {4, 9, 1438}:':
+        'if sequence in {4, 900, 1438}:',
 }
 for old, new in replacements.items():
     if source.count(old) != 1:
@@ -1555,17 +1557,17 @@ assert_cutover_orders() {
         fee_asset:"USDT"
       },
       {
-        time_ms:($start + 9 * 60000 + 59999),
+        time_ms:($start + 900 * 60000 + 59999),
         symbol:"TESTUSDT",side:2,intent_status:1,reject_code:"",
         order_status:3,orig_qty:"0.001000000000000000",
         executed_qty:"0.001000000000000000",
-        avg_price:"109.000000000000000000",
-        cumulative_quote_qty:"0.109000000000000000",
+        avg_price:"100.000000000000000000",
+        cumulative_quote_qty:"0.100000000000000000",
         error_code:"",error_message:"",recovery_status:"",
         fill_status:1,qty:"0.001000000000000000",
-        fill_price:"109.000000000000000000",
-        quote_qty:"0.109000000000000000",
-        quote_qty_unresolved:false,fee:"0.000043600000000000",
+        fill_price:"100.000000000000000000",
+        quote_qty:"0.100000000000000000",
+        quote_qty_unresolved:false,fee:"0.000040000000000000",
         fee_asset:"USDT"
       },
       {
@@ -1616,11 +1618,11 @@ assert_cutover_markers() {
               shape:"arrowUp"
             },
             {
-              sequence:9,
-              offset:9,
-              time_ms:($start + 9 * 60000),
+              sequence:900,
+              offset:900,
+              time_ms:($start + 900 * 60000),
               text:"SELL",
-              price:109,
+              price:100,
               color:"#dc2626",
               position:"aboveBar",
               shape:"arrowDown"
