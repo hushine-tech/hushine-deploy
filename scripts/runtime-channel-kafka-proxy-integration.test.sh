@@ -5,6 +5,7 @@ DEPLOY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SOURCE_ROOT="${HUSHINE_SOURCE_ROOT:-$(cd "${DEPLOY_ROOT}/.." && pwd -P)}"
 PROXY="${DEPLOY_ROOT}/scripts/runtime-channel-kafka-hold-proxy.py"
 HELPER="${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.go"
+HELPER_TEST="${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration_test.go"
 KAFKA_CONTAINER="${HUSHINE_RUNTIME_RESTART_KAFKA_CONTAINER:-hushine-local-kafka-1}"
 STATE="$(mktemp -d "${TMPDIR:-/tmp}/runtime-channel-kafka-proxy-integration.XXXXXX")"
 owner="$(openssl rand -hex 32)"
@@ -12,29 +13,67 @@ topic="runtime.restart.acceptance.${owner}"
 proxy_pid=0
 producer_pid=0
 topic_created=false
+shared_offsets_before=""
 
-topic_exists() {
-  docker exec "${KAFKA_CONTAINER}" kafka-topics \
-    --bootstrap-server 127.0.0.1:9092 --describe --topic "${topic}" \
-    >/dev/null 2>&1
+topic_observation() {
+  local output
+  if ! output="$(docker exec "${KAFKA_CONTAINER}" /usr/bin/timeout 10 \
+      kafka-topics --bootstrap-server 127.0.0.1:9092 --list \
+      2>"${STATE}/topic-observation.err")"; then
+    printf 'observation_error\n'
+    return
+  fi
+  if grep -Fxq -- "${topic}" <<<"${output}"; then
+    printf 'present\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
+shared_end_offsets() {
+  local output
+  output="$(docker exec "${KAFKA_CONTAINER}" /usr/bin/timeout 10 \
+    kafka-get-offsets --bootstrap-server 127.0.0.1:9092 \
+    --topic notification.events --time -1 2>"${STATE}/shared-offsets.err")" \
+    || fail "could not reliably observe shared notification end offsets"
+  [[ -n "${output}" ]] || fail "shared notification end-offset observation was empty"
+  while IFS= read -r line; do
+    [[ "${line}" =~ ^notification\.events:[0-9]+:[0-9]+$ ]] \
+      || fail "shared notification end-offset output was malformed"
+  done <<<"${output}"
+  LC_ALL=C sort <<<"${output}"
 }
 
 delete_owned_topic() {
-  local deadline
+  local deadline observation
   [[ "${topic_created}" == "true" ]] || return 0
   [[ "${owner}" =~ ^[0-9a-f]{64}$ && "${topic}" == "runtime.restart.acceptance.${owner}" ]] \
     || return 1
-  if topic_exists; then
-    docker exec "${KAFKA_CONTAINER}" kafka-topics \
+  observation="$(topic_observation)"
+  case "${observation}" in
+    absent) topic_created=false; return 0 ;;
+    present) ;;
+    observation_error) return 1 ;;
+    *) return 1 ;;
+  esac
+  if ! docker exec "${KAFKA_CONTAINER}" /usr/bin/timeout 10 kafka-topics \
       --bootstrap-server 127.0.0.1:9092 --delete --topic "${topic}" \
-      >/dev/null || return 1
+      >/dev/null; then
+    return 1
   fi
   deadline=$((SECONDS + 15))
-  while topic_exists; do
-    (( SECONDS < deadline )) || return 1
-    sleep 0.1
+  while true; do
+    observation="$(topic_observation)"
+    case "${observation}" in
+      absent) topic_created=false; return 0 ;;
+      present)
+        (( SECONDS < deadline )) || return 1
+        sleep 0.1
+        ;;
+      observation_error) return 1 ;;
+      *) return 1 ;;
+    esac
   done
-  topic_created=false
 }
 
 cleanup() {
@@ -76,14 +115,22 @@ count_correlation() {
 }
 
 [[ -f "${HELPER}" ]] || fail "missing committed Sarama helper: ${HELPER}"
+[[ -f "${HELPER_TEST}" ]] || fail "missing committed Sarama helper test: ${HELPER_TEST}"
 docker inspect "${KAFKA_CONTAINER}" >/dev/null 2>&1 || fail "Kafka container is unavailable"
-! topic_exists || fail "refuse to reuse pre-existing Kafka topic"
+chmod 0700 "${STATE}"
+shared_offsets_before="$(shared_end_offsets)"
+[[ "$(topic_observation)" == "absent" ]] \
+  || fail "owned Kafka topic was present or could not be reliably observed before creation"
 topic_created=true
-docker exec "${KAFKA_CONTAINER}" kafka-topics \
+docker exec "${KAFKA_CONTAINER}" /usr/bin/timeout 10 kafka-topics \
   --bootstrap-server 127.0.0.1:9092 --create --topic "${topic}" \
   --partitions 1 --replication-factor 1 >/dev/null \
   || fail "could not create unique owned Kafka topic"
-chmod 0700 "${STATE}"
+[[ "$(topic_observation)" == "present" ]] \
+  || fail "created owned Kafka topic was absent or could not be reliably observed"
+(cd "${SOURCE_ROOT}/control-panel-service" && go test "${HELPER}" "${HELPER_TEST}") \
+  >"${STATE}/helper-test.out" 2>"${STATE}/helper-test.err" \
+  || fail "Sarama helper owner-topic Go test failed"
 python3 "${PROXY}" --target-port 9092 --control-dir "${STATE}" \
   >"${STATE}/proxy.log" 2>&1 &
 proxy_pid=$!
@@ -128,5 +175,9 @@ grep -Fq "sarama_proxy_publish=PASS correlation=${correlation}" "${STATE}/produc
   || fail "correlation was published more than once after release"
 
 delete_owned_topic || fail "could not delete unique owned Kafka topic within the bounded wait"
+[[ "$(topic_observation)" == "absent" ]] \
+  || fail "owned Kafka topic absence was not reliable after deletion"
+[[ "$(shared_end_offsets)" == "${shared_offsets_before}" ]] \
+  || fail "shared notification end offsets changed during the owned-topic integration"
 
 echo "runtime-channel Kafka proxy integration: PASS"

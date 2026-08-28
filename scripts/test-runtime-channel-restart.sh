@@ -878,55 +878,120 @@ control_runtime_config() {
   jq -r '.kafka_proxy.config // "./config.local.yaml"' "${STATE_DIR}/live-state.json"
 }
 
-kafka_topic_exists() {
-  docker exec "${KAFKA_CONTAINER}" kafka-topics \
-    --bootstrap-server 127.0.0.1:9092 --describe --topic "$1" \
-    >/dev/null 2>&1
+kafka_topic_observation() {
+  local topic="$1" output error_file="${STATE_DIR}/kafka-topic-observation.err"
+  if ! output="$(docker exec "${KAFKA_CONTAINER}" /usr/bin/timeout 10 \
+      kafka-topics --bootstrap-server 127.0.0.1:9092 --list \
+      2>"${error_file}")"; then
+    chmod 0600 "${error_file}" 2>/dev/null || true
+    printf 'observation_error\n'
+    return
+  fi
+  chmod 0600 "${error_file}" 2>/dev/null || true
+  if grep -Fxq -- "${topic}" <<<"${output}"; then
+    printf 'present\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
+observe_owned_kafka_topic() {
+  local raw observation
+  if [[ -n "${DRIVER}" ]]; then
+    raw="$(run_action observe-kafka-topic)" || return 1
+    jq -e '.observation | IN("present","absent")' <<<"${raw}" >/dev/null || return 1
+    printf '%s\n' "${raw}"
+    return
+  fi
+  observation="$(kafka_topic_observation "$(state_get .kafka_topic)")"
+  [[ "${observation}" != "observation_error" ]] || return 1
+  jq -nc --arg observation "${observation}" '{observation:$observation}'
+}
+
+validate_kafka_topic_fact() {
+  local raw observation topic_state
+  raw="$(observe_owned_kafka_topic)" \
+    || die "owned Kafka topic could not be reliably observed before cleanup mutation"
+  observation="$(jq -er .observation <<<"${raw}")"
+  topic_state="$(state_get .kafka_topic_state)"
+  case "${topic_state}" in
+    planned|deleted)
+      [[ "${observation}" == "absent" ]] \
+        || die "Kafka topic manifest state ${topic_state} contradicts the external broker fact"
+      ;;
+    create_requested|created)
+      ;;
+    *) die "Kafka topic manifest state is invalid" ;;
+  esac
 }
 
 create_owned_kafka_topic() {
-  local owner topic
+  local owner topic observation
   owner="$(state_get .owner_token)"
   topic="$(state_get .kafka_topic)"
   [[ "${topic}" == "runtime.restart.acceptance.${owner}" ]] \
     || die "owned Kafka topic does not match the manifest owner"
   [[ "$(state_get .kafka_topic_state)" == "planned" ]] \
     || die "owned Kafka topic is not in the planned state"
-  ! kafka_topic_exists "${topic}" \
-    || die "refuse to reuse pre-existing Kafka topic: ${topic}"
+  observation="$(kafka_topic_observation "${topic}")"
+  case "${observation}" in
+    absent) ;;
+    present) die "refuse to reuse pre-existing Kafka topic: ${topic}" ;;
+    observation_error) die "could not reliably observe Kafka before topic creation" ;;
+    *) die "invalid Kafka topic observation before creation" ;;
+  esac
   state_update '.kafka_topic_state="create_requested"'
-  docker exec "${KAFKA_CONTAINER}" kafka-topics \
+  docker exec "${KAFKA_CONTAINER}" /usr/bin/timeout 10 kafka-topics \
     --bootstrap-server 127.0.0.1:9092 --create --topic "${topic}" \
     --partitions 1 --replication-factor 1 >/dev/null \
     || die "could not create the harness-owned Kafka topic"
-  kafka_topic_exists "${topic}" \
-    || die "harness-owned Kafka topic was not visible after creation"
+  observation="$(kafka_topic_observation "${topic}")"
+  [[ "${observation}" == "present" ]] \
+    || die "harness-owned Kafka topic was absent or could not be reliably observed after creation"
   state_update '.kafka_topic_state="created"'
 }
 
 delete_owned_kafka_topic() {
-  local owner topic topic_state deadline
+  local owner topic topic_state observation deadline
   owner="$(state_get .owner_token)"
   topic="$(state_get .kafka_topic)"
   [[ "${topic}" == "runtime.restart.acceptance.${owner}" ]] || return 1
   topic_state="$(state_get .kafka_topic_state)"
   if [[ "${topic_state}" == "planned" ]]; then
+    [[ "$(kafka_topic_observation "${topic}")" == "absent" ]] || return 1
     state_update '.kafka_topic_state="deleted"'
     return 0
   fi
-  [[ "${topic_state}" != "deleted" ]] || return 0
+  if [[ "${topic_state}" == "deleted" ]]; then
+    [[ "$(kafka_topic_observation "${topic}")" == "absent" ]]
+    return
+  fi
   [[ "${topic_state}" == "create_requested" || "${topic_state}" == "created" ]] || return 1
-  if kafka_topic_exists "${topic}"; then
-    docker exec "${KAFKA_CONTAINER}" kafka-topics \
+  observation="$(kafka_topic_observation "${topic}")"
+  case "${observation}" in
+    absent) state_update '.kafka_topic_state="deleted"'; return 0 ;;
+    present) ;;
+    observation_error) return 1 ;;
+    *) return 1 ;;
+  esac
+  if ! docker exec "${KAFKA_CONTAINER}" /usr/bin/timeout 10 kafka-topics \
       --bootstrap-server 127.0.0.1:9092 --delete --topic "${topic}" \
-      >/dev/null || return 1
+      >/dev/null; then
+    return 1
   fi
   deadline=$((SECONDS + 15))
-  while kafka_topic_exists "${topic}"; do
-    (( SECONDS < deadline )) || return 1
-    sleep 0.1
+  while true; do
+    observation="$(kafka_topic_observation "${topic}")"
+    case "${observation}" in
+      absent) state_update '.kafka_topic_state="deleted"'; return 0 ;;
+      present)
+        (( SECONDS < deadline )) || return 1
+        sleep 0.1
+        ;;
+      observation_error) return 1 ;;
+      *) return 1 ;;
+    esac
   done
-  state_update '.kafka_topic_state="deleted"'
 }
 
 start_kafka_hold_proxy() {
@@ -1628,6 +1693,7 @@ cleanup_once() {
   [[ "${CLEANED_UP}" == "false" ]] || return 0
   CLEANED_UP=true
   validate_cleanup_manifest
+  validate_kafka_topic_fact
   restored="$(run_action restore-control-panel)" || die "control-panel baseline restoration failed"
   jq -e '.baseline_restored == true' <<<"${restored}" >/dev/null \
     || die "control-panel baseline restoration evidence is invalid"

@@ -41,6 +41,9 @@ case "${action}" in
       normal:{provisioning:"ready",runtime_id:"selfhosted-abcdefghijklmnopqrstuv",credential_key_id:"abcdefghijklmnopqrstuv",container_name:"hushine-runtime-restart-normal-0123456789",runtime_root:"CONTRACT_RUNTIME_ROOT",portfolio_id:101,venue_id:201,strategy_id:301,session_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
     }' | sed "s#CONTRACT_RUNTIME_ROOT#${RUNTIME_RESTART_CONTRACT_STATE}/runtimes/normal#" >"${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
     chmod 0600 "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
+    jq -er .kafka_topic "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" \
+      >"${RUNTIME_RESTART_CONTRACT_STATE}/contract-kafka-topic"
+    chmod 0600 "${RUNTIME_RESTART_CONTRACT_STATE}/contract-kafka-topic"
     [[ "${RUNTIME_RESTART_DRIVER_PARTIAL_AT:-}" != "kafka-topic-create" ]] || exit 97
     jq -nc '{ok:true}'
     ;;
@@ -126,6 +129,17 @@ case "${action}" in
   assert-terminal-resume-rejected)
     jq -nc '{resume_rejected:true,grpc_code:"FailedPrecondition",safe_stop:true,reconnect_attempts:1,reconnect_storm:false,agent_exit_code:1,matching_failure_rows:[{failure_code:"failed_precondition",attempt_count:1}]}'
     ;;
+  observe-kafka-topic)
+    [[ "${scenario}" != "kafka_observation_error" ]] || exit 94
+    observation=absent
+    if [[ -f "${RUNTIME_RESTART_CONTRACT_STATE}/contract-kafka-topic" ]]; then
+      expected="$(jq -er .kafka_topic "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json")"
+      actual="$(<"${RUNTIME_RESTART_CONTRACT_STATE}/contract-kafka-topic")"
+      [[ "${actual}" == "${expected}" ]] || exit 93
+      observation=present
+    fi
+    jq -nc --arg observation "${observation}" '{observation:$observation}'
+    ;;
   validate-cleanup-ownership)
     jq -nc --slurpfile states "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" '($states[0]) as $state | {
       relationships_valid:(
@@ -151,6 +165,10 @@ case "${action}" in
     for step in kafka_topic order portfolio control market; do
       if ! jq -e --arg step "${step}" '.cleanup_progress[$step] == true' \
           "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" >/dev/null; then
+        if [[ "${step}" == "kafka_topic" ]]; then
+          rm -f -- "${RUNTIME_RESTART_CONTRACT_STATE}/contract-kafka-topic"
+          [[ "${scenario}" != "cleanup_after_kafka_delete" ]] || exit 95
+        fi
         temporary="${RUNTIME_RESTART_CONTRACT_STATE}/cleanup.tmp"
         jq --arg step "${step}" '.cleanup_progress[$step]=true' \
           "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" >"${temporary}"
@@ -176,16 +194,34 @@ chmod 0700 "${FIXTURE}/driver"
 [[ -x "${HARNESS}" ]] || fail "missing executable harness: ${HARNESS}"
 [[ -x "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.test.sh" ]] \
   || fail "missing executable real Kafka proxy integration"
+[[ -f "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration_test.go" ]] \
+  || fail "missing Kafka helper owner-topic test"
 grep -Fq 'github.com/IBM/sarama' "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.go" \
   || fail "Kafka proxy integration does not use the production Sarama client"
 grep -Fq 'sarama.NewSyncProducer' "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.go" \
   || fail "Kafka proxy integration does not exercise SyncProducer"
 if rg -n 'notification\.events' \
     "${HARNESS}" \
-    "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.go" \
-    "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.test.sh" >/dev/null; then
+    "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.go" >/dev/null; then
   fail "restart acceptance artifacts touch the shared notification topic"
 fi
+integration="${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.test.sh"
+grep -Fq 'kafka-get-offsets' "${integration}" \
+  || fail "real Kafka integration does not capture shared partition end offsets"
+grep -Fq 'go test "${HELPER}" "${HELPER_TEST}"' "${integration}" \
+  || fail "real Kafka integration does not execute the helper Go test"
+if grep -Fq 'topic_exists()' "${integration}"; then
+  fail "real Kafka integration still collapses topic observation into a boolean"
+fi
+if grep -Fq 'kafka_topic_exists()' "${HARNESS}"; then
+  fail "restart harness still collapses topic observation into a boolean"
+fi
+for bounded_observer in "${HARNESS}" "${integration}"; do
+  grep -Fq '/usr/bin/timeout 10' "${bounded_observer}" \
+    || fail "Kafka observation is not bounded in ${bounded_observer}"
+done
+[[ "$(rg -o 'notification\.events' "${integration}" | wc -l | tr -d '[:space:]')" == "1" ]] \
+  || fail "shared notification topic is used outside the one read-only offset query"
 
 for live_contract in \
   'runtime_channel_leases' \
@@ -325,6 +361,7 @@ assert-revoke-terminal
 create-terminal-grace
 exceed-terminal-grace
 assert-terminal-resume-rejected
+observe-kafka-topic
 restore-control-panel
 validate-cleanup-ownership
 cleanup
@@ -352,6 +389,7 @@ fi
 cat >"${FIXTURE}/failure-actions" <<'ACTIONS'
 preflight
 create-normal
+observe-kafka-topic
 restore-control-panel
 validate-cleanup-ownership
 cleanup
@@ -407,6 +445,7 @@ for partial_at in credential-issued container-created readiness-timeout; do
   cat >"${partial_state}.expected" <<'ACTIONS'
 preflight
 create-normal
+observe-kafka-topic
 restore-control-panel
 validate-cleanup-ownership
 cleanup
@@ -414,6 +453,32 @@ ACTIONS
   cmp -s "${partial_state}.expected" "${partial_state}.log" \
     || fail "partial provisioning ${partial_at} did not clean exactly"
 done
+
+delete_crash_state="${FIXTURE}/cleanup-resume-kafka-delete"
+mkdir -m 0700 "${delete_crash_state}"
+: >"${delete_crash_state}.log"
+if RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
+    RUNTIME_RESTART_DRIVER_LOG="${delete_crash_state}.log" \
+    RUNTIME_RESTART_DRIVER_SCENARIO=cleanup_after_kafka_delete \
+    HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
+    bash "${HARNESS}" --state-dir "${delete_crash_state}" \
+      >"${delete_crash_state}.stdout" 2>"${delete_crash_state}.stderr"; then
+  fail "Kafka deletion crash before absent checkpoint unexpectedly passed"
+fi
+jq -e '.kafka_topic_state == "created" and (.cleanup_progress.kafka_topic // false) == false' \
+  "${delete_crash_state}/live-state.json" >/dev/null \
+  || fail "Kafka deletion crash incorrectly persisted an absent checkpoint"
+[[ ! -e "${delete_crash_state}/contract-kafka-topic" ]] \
+  || fail "Kafka deletion crash did not remove the external topic fact"
+RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
+  RUNTIME_RESTART_DRIVER_LOG="${delete_crash_state}.log" \
+  HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
+  bash "${HARNESS}" --state-dir "${delete_crash_state}" --cleanup-only \
+    >"${delete_crash_state}.cleanup.stdout" 2>"${delete_crash_state}.cleanup.stderr" \
+  || fail "cleanup-only did not recover after Kafka deletion before checkpoint"
+jq -e '.kafka_topic_state == "deleted" and .cleanup_progress.kafka_topic == true' \
+  "${delete_crash_state}/live-state.json" >/dev/null \
+  || fail "cleanup-only did not persist reliable Kafka absence after deletion crash"
 
 for cleanup_step in kafka_topic order portfolio control market; do
   cleanup_state="${FIXTURE}/cleanup-resume-${cleanup_step}"
@@ -491,6 +556,7 @@ done
 make_manifest() {
   local destination="$1"
   mkdir -m 0700 "${destination}"
+  destination="$(cd "${destination}" && pwd -P)"
   RUNTIME_RESTART_DRIVER_LOG="${destination}.setup.log" \
     RUNTIME_RESTART_CONTRACT_STATE="${destination}" \
     "${FIXTURE}/driver" preflight >/dev/null
@@ -512,8 +578,16 @@ assert_tamper_rejected_without_cleanup() {
         >"${state}.stdout" 2>"${state}.stderr"; then
     fail "tampered cleanup manifest passed: ${label}"
   fi
-  if grep -Eq '^(restore-control-panel|cleanup)$' "${state}.log"; then
-    fail "tampered cleanup executed a mutating action: ${label}"
+  if [[ "${label}" == kafka_* ]]; then
+    if grep -Eq '^(restore-control-panel|cleanup)$' "${state}.log"; then
+      fail "tampered Kafka cleanup fact executed a mutating action: ${label}"
+    fi
+  elif grep -Fxq cleanup "${state}.log"; then
+    fail "tampered cleanup reached owned-artifact mutation: ${label}"
+  fi
+  if [[ "${label}" == kafka_created_to_* ]] \
+      && [[ "$(tr '\n' ' ' <"${state}.log")" != "observe-kafka-topic " ]]; then
+    fail "tampered Kafka enum was not rejected by the read-only broker fact: ${label}"
   fi
 }
 
@@ -527,6 +601,8 @@ assert_tamper_rejected_without_cleanup source '.market.source="runtime-channel-r
 assert_tamper_rejected_without_cleanup symbol '.market.symbol="RCRFFFFFFFFFFFFUSDT"'
 assert_tamper_rejected_without_cleanup kafka_topic '.kafka_topic="notification.events"'
 assert_tamper_rejected_without_cleanup kafka_topic_state '.kafka_topic_state="owned"'
+assert_tamper_rejected_without_cleanup kafka_created_to_planned '.kafka_topic_state="planned"'
+assert_tamper_rejected_without_cleanup kafka_created_to_deleted '.kafka_topic_state="deleted"'
 assert_tamper_rejected_without_cleanup injection '.normal.session_id="x\u0027;DROP TABLE users;--"'
 assert_tamper_rejected_without_cleanup mode '.mode="live"'
 
@@ -567,6 +643,27 @@ fi
 grep -Fq 'environmental blocker: managed control-panel PID' "${FIXTURE}/control-mismatch.stderr" \
   || fail "control-panel ownership mismatch was not explicit"
 
+kafka_observation_state="${FIXTURE}/kafka-observation-error"
+make_manifest "${kafka_observation_state}"
+jq -e '.schema == 2 and .mode == "contract" and .kafka_topic_state == "created"' "${kafka_observation_state}/live-state.json" >/dev/null \
+  || fail "Kafka observation fixture manifest was not created"
+: >"${kafka_observation_state}.log"
+if RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
+    RUNTIME_RESTART_DRIVER_LOG="${kafka_observation_state}.log" \
+    RUNTIME_RESTART_DRIVER_SCENARIO=kafka_observation_error \
+    HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
+    bash "${HARNESS}" --state-dir "${kafka_observation_state}" --cleanup-only \
+      >"${kafka_observation_state}.stdout" 2>"${kafka_observation_state}.stderr"; then
+  fail "Kafka observation failure was treated as topic absence"
+fi
+[[ "$(tr '\n' ' ' <"${kafka_observation_state}.log")" == "observe-kafka-topic " ]] \
+  || fail "Kafka observation failure executed a mutating cleanup action: stderr=$(tr '\n' ' ' <"${kafka_observation_state}.stderr")"
+jq -e '.kafka_topic_state == "created" and (.cleanup_progress.kafka_topic // false) == false' \
+  "${kafka_observation_state}/live-state.json" >/dev/null \
+  || fail "Kafka observation failure changed cleanup state"
+[[ -f "${kafka_observation_state}/contract-kafka-topic" ]] \
+  || fail "Kafka observation failure removed the external topic fact"
+
 python3 - "${HARNESS}" "${DEPLOY_ROOT}/../strategy-service/tests/strategies/indicator_v2_open_time_cutover.py" <<'PY'
 import ast
 import pathlib
@@ -600,6 +697,7 @@ advance_phase = harness.split("    advance-data)", 1)[1].split("    create-revok
 fixture_phase = harness.split("create_normal_fixture() {", 1)[1].split("\nsession_status() {", 1)[0]
 runtime_phase = harness.split("start_owned_runtime() {", 1)[1].split("\ncreate_strategy_source() {", 1)[0]
 cleanup_phase = harness.split("cleanup_live() {", 1)[1].split("\nlive_action() {", 1)[0]
+cleanup_once_phase = harness.split("cleanup_once() {", 1)[1].split("\non_exit() {", 1)[0]
 stop_phase = harness.split("    stop-control-panel)", 1)[1].split("    observe-pending-platform-rpc)", 1)[0]
 assert "runtime-restart-barrier.json" not in pending_phase
 assert "runtime-restart-barrier.json" not in advance_phase
@@ -624,6 +722,8 @@ assert 'cleanup_step_done kafka_topic' in cleanup_phase
 assert 'mark_cleanup_step kafka_topic' in cleanup_phase
 assert 'delete_owned_kafka_topic' in cleanup_phase
 assert 'notification.events' not in harness
+assert cleanup_once_phase.index('validate_cleanup_manifest') < cleanup_once_phase.index('validate_kafka_topic_fact')
+assert cleanup_once_phase.index('validate_kafka_topic_fact') < cleanup_once_phase.index('run_action restore-control-panel')
 assert "'issued_at',l.issued_at::text,'updated_at',l.updated_at::text" in stop_phase
 
 proxy_phase = harness.split("start_kafka_hold_proxy() {", 1)[1].split("\nstop_kafka_hold_proxy() {", 1)[0]
