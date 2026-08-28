@@ -7,6 +7,7 @@ EVIDENCE_FILE=""
 STATE_DIR=""
 DRIVER="${RUNTIME_RESTART_DRIVER:-}"
 CLEANED_UP=false
+CLEANUP_ONLY=false
 PG_CONTAINER="${HUSHINE_LOCAL_PG_CONTAINER:-hushine-local-timescaledb-1}"
 RUNTIME_IMAGE="${HUSHINE_RUNTIME_RESTART_IMAGE:-hushine/strategy-runtime:executor-dev}"
 API="${HUSHINE_RUNTIME_RESTART_API:-http://127.0.0.1:8090}"
@@ -19,7 +20,7 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: scripts/test-runtime-channel-restart.sh [--evidence-file FILE] [--state-dir DIR]
+Usage: scripts/test-runtime-channel-restart.sh [--evidence-file FILE] [--state-dir DIR] [--cleanup-only]
 
 Runs the real local RuntimeChannel control-panel restart acceptance. The local
 stack must already be running (`make local-start`). Evidence defaults to a
@@ -38,6 +39,10 @@ while [[ "$#" -gt 0 ]]; do
       [[ "$#" -ge 2 ]] || die "--state-dir requires a path"
       STATE_DIR="$2"
       shift 2
+      ;;
+    --cleanup-only)
+      CLEANUP_ONLY=true
+      shift
       ;;
     -h|--help)
       usage
@@ -91,6 +96,25 @@ run_action() {
   live_action "${action}" "$@"
 }
 
+capture_action() {
+  local variable="$1" action="$2" output value
+  shift 2
+  output="${STATE_DIR}/action-${action}.json"
+  run_action "${action}" "$@" >"${output}"
+  chmod 0600 "${output}"
+  value="$(<"${output}")"
+  printf -v "${variable}" '%s' "${value}"
+}
+
+capture_cleanup() {
+  local variable="$1" output value
+  output="${STATE_DIR}/action-cleanup.json"
+  cleanup_once >"${output}"
+  chmod 0600 "${output}"
+  value="$(<"${output}")"
+  printf -v "${variable}" '%s' "${value}"
+}
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
@@ -115,6 +139,10 @@ pg() {
 sql_value() {
   local database="$1" query="$2"
   pg "${database}" -Atc "${query}"
+}
+
+database_exists() {
+  [[ "$(sql_value postgres "SELECT count(*) FROM pg_database WHERE datname='$1'")" == "1" ]]
 }
 
 api_request() {
@@ -184,8 +212,10 @@ container_process_pid() {
   local container="$1" pattern="$2"
   docker exec "${container}" sh -c '
     pattern="$1"
+    scanner=$$
     for item in /proc/[0-9]*; do
       pid=${item#/proc/}
+      [ "$pid" = "$scanner" ] && continue
       command=$(tr "\000" " " <"$item/cmdline" 2>/dev/null || true)
       case "$command" in *"$pattern"*) printf "%s\n" "$pid"; exit 0;; esac
     done
@@ -217,7 +247,7 @@ barrier_at() {
 ensure_market_fixture() {
   local owner symbol lower kline_table funding_table source database_created=false
   owner="$(state_get .owner_token)"
-  symbol="RCR${owner:0:12}USDT"
+  symbol="$(printf 'RCR%sUSDT' "${owner:0:12}" | tr '[:lower:]' '[:upper:]')"
   lower="$(printf '%s' "${symbol}" | tr '[:upper:]' '[:lower:]')"
   kline_table="futures_klines_${lower}_1m"
   funding_table="futures_funding_rates_${lower}"
@@ -404,7 +434,7 @@ snapshot_normal() {
   session="$(state_get .normal.session_id)"
   venue="$(state_get .normal.venue_id)"
   host_pid="$(docker inspect -f '{{.State.Pid}}' "${container}")"
-  agent="$(container_process_pid "${container}" /app/strategy-service/bin/runtime-agent)"
+  agent="$(container_process_pid "${container}" runtime-agent)"
   worker="$(worker_identity "${container}")"
   IFS='|' read -r worker_pid generation <<<"${worker}"
   health="$(agent_http_code "${container}" /healthz)"
@@ -453,6 +483,37 @@ runtime_exited() {
   [[ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)" == "false" ]]
 }
 
+capture_terminal_diagnostic() {
+  local phase="$1" container runtime key
+  container="$(state_get ".${phase}.container_name")"
+  runtime="$(state_get ".${phase}.runtime_id")"
+  key="$(state_get ".${phase}.credential_key_id")"
+  docker inspect "${container}" >"${STATE_DIR}/${phase}-docker-inspect.json" 2>&1 || true
+  docker top "${container}" -eo pid,ppid,stat,etime,args \
+    >"${STATE_DIR}/${phase}-docker-top.txt" 2>&1 || true
+  docker logs "${container}" >"${STATE_DIR}/${phase}-docker.log" 2>&1 || true
+  {
+    printf 'health_http=%s\n' "$(agent_http_code "${container}" /healthz 2>/dev/null || true)"
+    printf 'ready_http=%s\n' "$(agent_http_code "${container}" /readyz 2>/dev/null || true)"
+    printf 'runtime=%s\n' "$(sql_value control_panel "SELECT status||'|'||COALESCE(ended_reason,'')||'|'||updated_at::text FROM runtime_registry WHERE runtime_id='${runtime}'" 2>/dev/null || true)"
+    printf 'credential=%s\n' "$(sql_value control_panel "SELECT status||'|'||COALESCE(revoked_at::text,'') FROM runtime_credentials WHERE key_id='${key}'" 2>/dev/null || true)"
+    printf 'admission=%s\n' "$(sql_value control_panel "SELECT COALESCE(string_agg(failure_code||':'||attempt_count,',' ORDER BY last_seen_at), '') FROM runtime_admission_failures WHERE requested_runtime_id='${runtime}'" 2>/dev/null || true)"
+  } >"${STATE_DIR}/${phase}-state.txt"
+}
+
+wait_for_terminal_exit() {
+  local timeout="$1" description="$2" phase="$3" container deadline
+  container="$(state_get ".${phase}.container_name")"
+  deadline=$((SECONDS + timeout))
+  until runtime_exited "${container}"; do
+    if (( SECONDS >= deadline )); then
+      capture_terminal_diagnostic "${phase}"
+      die "timed out after ${timeout}s: ${description}; diagnostic=${STATE_DIR}/${phase}-state.txt"
+    fi
+    sleep 0.25
+  done
+}
+
 make_fast_control_config() {
   local output="${STATE_DIR}/control-fast.yaml"
   sed -e 's/heartbeat_grace_seconds: 30/heartbeat_grace_seconds: 2/' \
@@ -473,20 +534,20 @@ cleanup_live() {
   runtime="$(jq -r '.normal.runtime_id // ""' "${STATE_DIR}/live-state.json")"
   fast="$(jq -r '.fast_control // false' "${STATE_DIR}/live-state.json")"
   if [[ "${fast}" == "true" ]]; then
-    control_stop || cleanup_ok=false
-    control_start ./config.local.yaml || cleanup_ok=false
+    (control_stop) || cleanup_ok=false
+    (control_start ./config.local.yaml) || cleanup_ok=false
   fi
   if [[ -n "${session}" && -n "${token}" ]]; then
-    api_request POST "/api/strategy-sessions/${session}/stop" "${token}" '{"stop_action":"STOP_ONLY"}' \
+    (api_request POST "/api/strategy-sessions/${session}/stop" "${token}" '{"stop_action":"STOP_ONLY"}') \
       >"${STATE_DIR}/cleanup-stop-session.json" 2>/dev/null || true
   fi
   if [[ -n "${runtime}" && -n "${token}" ]]; then
-    api_request DELETE "/api/runtimes/${runtime}" "${token}" \
+    (api_request DELETE "/api/runtimes/${runtime}" "${token}") \
       >"${STATE_DIR}/cleanup-end-runtime.json" 2>/dev/null || true
   fi
   while IFS= read -r container; do
     [[ -z "${container}" ]] && continue
-    if [[ "$(docker inspect -f '{{index .Config.Labels \"hushine.acceptance.runtime-restart\"}}' "${container}" 2>/dev/null || true)" == "${owner}" ]]; then
+    if [[ "$(docker inspect -f '{{index .Config.Labels "hushine.acceptance.runtime-restart"}}' "${container}" 2>/dev/null || true)" == "${owner}" ]]; then
       docker unpause "${container}" >/dev/null 2>&1 || true
       docker rm -f "${container}" >/dev/null 2>&1 || cleanup_ok=false
     else
@@ -494,9 +555,8 @@ cleanup_live() {
     fi
   done < <(jq -r '[.normal,.revoke,.terminal_grace][]? | .container_name // empty' "${STATE_DIR}/live-state.json")
   if jq -e '.auth.user_id' "${STATE_DIR}/live-state.json" >/dev/null 2>&1; then
-    local user sessions portfolio venue strategy
+    local user portfolio venue strategy
     user="$(state_get .auth.user_id)"
-    sessions="$(jq -r '[.normal.session_id // empty] | map("\u0027" + . + "\u0027") | join(",")' "${STATE_DIR}/live-state.json")"
     portfolio="$(jq -r '.normal.portfolio_id // 0' "${STATE_DIR}/live-state.json")"
     venue="$(jq -r '.normal.venue_id // 0' "${STATE_DIR}/live-state.json")"
     strategy="$(jq -r '.normal.strategy_id // 0' "${STATE_DIR}/live-state.json")"
@@ -511,12 +571,13 @@ BEGIN
       IF ${portfolio} > 0 AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=r.table_name AND column_name='portfolio_id') THEN predicate := predicate || CASE WHEN predicate='' THEN '' ELSE ' OR ' END || format('portfolio_id=%s',${portfolio}); END IF;
       IF ${venue} > 0 AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=r.table_name AND column_name='venue_id') THEN predicate := predicate || CASE WHEN predicate='' THEN '' ELSE ' OR ' END || format('venue_id=%s',${venue}); END IF;
       IF ${strategy} > 0 AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=r.table_name AND column_name='strategy_id') THEN predicate := predicate || CASE WHEN predicate='' THEN '' ELSE ' OR ' END || format('strategy_id=%s',${strategy}); END IF;
-      IF '${sessions}' <> '' AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=r.table_name AND column_name='session_id') THEN predicate := predicate || CASE WHEN predicate='' THEN '' ELSE ' OR ' END || format('session_id IN (${sessions})'); END IF;
+      IF '${session}' <> '' AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=r.table_name AND column_name='session_id') THEN predicate := predicate || CASE WHEN predicate='' THEN '' ELSE ' OR ' END || format('session_id=%L','${session}'); END IF;
       IF predicate <> '' THEN BEGIN EXECUTE format('DELETE FROM %I WHERE %s',r.table_name,predicate); EXCEPTION WHEN foreign_key_violation THEN NULL; END; END IF;
     END LOOP;
   END LOOP;
 END \$cleanup\$;
 SQL
+    pg portfolio -c "DELETE FROM users WHERE id=${user}" >/dev/null || cleanup_ok=false
     pg order >/dev/null <<SQL || cleanup_ok=false
 DO \$cleanup\$
 DECLARE r record; pass int; predicate text;
@@ -525,7 +586,7 @@ BEGIN
   FOR r IN SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' LOOP
    predicate := '';
    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=r.table_name AND column_name='user_id') THEN predicate := format('user_id=%s',${user}); END IF;
-   IF '${sessions}' <> '' AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=r.table_name AND column_name='session_id') THEN predicate := predicate || CASE WHEN predicate='' THEN '' ELSE ' OR ' END || format('session_id IN (${sessions})'); END IF;
+   IF '${session}' <> '' AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=r.table_name AND column_name='session_id') THEN predicate := predicate || CASE WHEN predicate='' THEN '' ELSE ' OR ' END || format('session_id=%L','${session}'); END IF;
    IF predicate <> '' THEN BEGIN EXECUTE format('DELETE FROM %I WHERE %s',r.table_name,predicate); EXCEPTION WHEN foreign_key_violation THEN NULL; END; END IF;
   END LOOP;
  END LOOP;
@@ -536,14 +597,28 @@ SQL
   if jq -e '.market.lower' "${STATE_DIR}/live-state.json" >/dev/null 2>&1; then
     lower="$(state_get .market.lower)"; source="$(state_get .market.source)"; database_created="$(state_get .market.database_created)"
     pg control_panel -c "DELETE FROM market_data_coverage_segments WHERE source='${source}'" >/dev/null || cleanup_ok=false
-    pg binance_2025 -c "DROP TABLE IF EXISTS futures_klines_${lower}_1m; DROP TABLE IF EXISTS futures_funding_rates_${lower};" >/dev/null || cleanup_ok=false
-    if [[ "${database_created}" == "true" && "$(sql_value postgres "SELECT COALESCE(shobj_description(oid,'pg_database'),'') FROM pg_database WHERE datname='binance_2025'")" == "${source}" ]]; then
-      pg postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='binance_2025' AND pid <> pg_backend_pid()" >/dev/null || cleanup_ok=false
-      pg postgres -c "DROP DATABASE binance_2025" >/dev/null || cleanup_ok=false
+    if database_exists binance_2025; then
+      pg binance_2025 -c "DROP TABLE IF EXISTS futures_klines_${lower}_1m; DROP TABLE IF EXISTS futures_funding_rates_${lower};" >/dev/null || cleanup_ok=false
+      if [[ "${database_created}" == "true" && "$(sql_value postgres "SELECT COALESCE(shobj_description(oid,'pg_database'),'') FROM pg_database WHERE datname='binance_2025'")" == "${source}" ]]; then
+        pg postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='binance_2025' AND pid <> pg_backend_pid()" >/dev/null || cleanup_ok=false
+        pg postgres -c "DROP DATABASE binance_2025" >/dev/null || cleanup_ok=false
+      fi
     fi
   fi
   rm -f -- "${STATE_DIR}"/credential-*.json "${STATE_DIR}"/api.*
   [[ -z "$(docker ps -aq --filter "label=hushine.acceptance.runtime-restart=${owner}")" ]] || cleanup_ok=false
+  if jq -e '.auth.user_id' "${STATE_DIR}/live-state.json" >/dev/null 2>&1; then
+    local remaining
+    user="$(state_get .auth.user_id)"
+    remaining="$(sql_value portfolio "SELECT count(*) FROM users WHERE id=${user}")"
+    [[ "${remaining}" == "0" ]] || cleanup_ok=false
+    remaining="$(sql_value control_panel "SELECT (SELECT count(*) FROM runtime_credentials WHERE user_id=${user}) + (SELECT count(*) FROM runtime_registry WHERE user_id=${user}) + (SELECT count(*) FROM runtime_admission_failures WHERE user_id=${user})")"
+    [[ "${remaining}" == "0" ]] || cleanup_ok=false
+  fi
+  if jq -e '.market.source' "${STATE_DIR}/live-state.json" >/dev/null 2>&1; then
+    source="$(state_get .market.source)"
+    [[ "$(sql_value control_panel "SELECT count(*) FROM market_data_coverage_segments WHERE source='${source}'")" == "0" ]] || cleanup_ok=false
+  fi
   jq -nc --argjson ok "${cleanup_ok}" '{owned_only:true,artifacts_removed:$ok}'
   [[ "${cleanup_ok}" == "true" ]]
 }
@@ -627,7 +702,7 @@ live_action() {
       jq -nc --argjson streams "$(jq -er .streams_closed <<<"${result}")" --argjson runtimes "$(jq -er .runtimes_ended <<<"${result}")" '{revoked:true,streams_closed:$streams,runtimes_ended:$runtimes}'
       ;;
     assert-revoke-terminal)
-      container="$(state_get .revoke.container_name)"; wait_for 30 "revoked runtime safe stop" runtime_exited "${container}"
+      container="$(state_get .revoke.container_name)"; wait_for_terminal_exit 30 "revoked runtime safe stop" revoke
       local exit_code attempts
       exit_code="$(docker inspect -f '{{.State.ExitCode}}' "${container}")"
       attempts="$(sql_value control_panel "SELECT COALESCE(sum(attempt_count),0) FROM runtime_admission_failures WHERE requested_runtime_id='$(state_get .revoke.runtime_id)' AND last_seen_at >= (SELECT revoked_at FROM runtime_credentials WHERE key_id='$(state_get .revoke.credential_key_id)')")"
@@ -651,7 +726,7 @@ live_action() {
       ;;
     assert-terminal-resume-rejected)
       container="$(state_get .terminal_grace.container_name)"; runtime="$(state_get .terminal_grace.runtime_id)"
-      wait_for 30 "terminal RESUME rejection safe stop" runtime_exited "${container}"
+      wait_for_terminal_exit 30 "terminal RESUME rejection safe stop" terminal_grace
       local failure exit_code attempts
       failure="$(sql_value control_panel "SELECT failure_code||'|'||attempt_count FROM runtime_admission_failures WHERE requested_runtime_id='${runtime}' ORDER BY last_seen_at DESC LIMIT 1")"
       IFS='|' read -r code attempts <<<"${failure}"
@@ -698,10 +773,18 @@ on_exit() {
 }
 trap on_exit EXIT INT TERM
 
-preflight="$(run_action preflight)"
+if [[ "${CLEANUP_ONLY}" == "true" ]]; then
+  capture_cleanup cleanup
+  require_json cleanup '.owned_only == true and .artifacts_removed == true' "${cleanup}"
+  trap - EXIT INT TERM
+  echo "runtime-channel restart acceptance: cleanup PASS"
+  exit 0
+fi
+
+capture_action preflight preflight
 require_json preflight '.ok == true' "${preflight}"
 
-normal_fixture="$(run_action create-normal)"
+capture_action normal_fixture create-normal
 require_json normal-fixture '
   (.owner_token | type == "string" and length > 0)
   and (.runtime_id | type == "string" and length > 0)
@@ -710,7 +793,7 @@ require_json normal-fixture '
   and (.container_name | type == "string" and length > 0)
 ' "${normal_fixture}"
 
-before="$(run_action snapshot-before "${normal_fixture}")"
+capture_action before snapshot-before "${normal_fixture}"
 require_json before '
   .runtime_container_pid > 1 and .agent_pid > 0 and .worker_pid > 1
   and .worker_generation > 0 and .session_status == "running"
@@ -719,10 +802,10 @@ require_json before '
   and .indicator_cursor >= 0 and .income_cursor >= 0
 ' "${before}"
 
-stopped="$(run_action stop-control-panel "${normal_fixture}")"
+capture_action stopped stop-control-panel "${normal_fixture}"
 require_json stop-control-panel '.stopped == true and .only_control_panel == true' "${stopped}"
 
-disconnected="$(run_action snapshot-disconnected "${normal_fixture}")"
+capture_action disconnected snapshot-disconnected "${normal_fixture}"
 require_json disconnected '
   .session_status == "running"
   and .agent_health_http == 200 and .agent_ready_http == 503
@@ -730,7 +813,7 @@ require_json disconnected '
 same_identity "${before}" "${disconnected}" \
   || die "runtime/Agent/Worker identity changed while control-panel was stopped"
 
-pending="$(run_action pending-rpc "${normal_fixture}")"
+capture_action pending pending-rpc "${normal_fixture}"
 require_json pending-rpc '
   .status == "failed" and .grpc_code == "Unavailable"
   and .elapsed_ms > 0 and .elapsed_ms <= 2000
@@ -738,18 +821,18 @@ require_json pending-rpc '
   and (.correlation_id | type == "string" and length > 0)
 ' "${pending}"
 
-started="$(run_action start-control-panel "${normal_fixture}")"
+capture_action started start-control-panel "${normal_fixture}"
 require_json start-control-panel '.started == true' "${started}"
-resume="$(run_action wait-resume "${normal_fixture}")"
+capture_action resume wait-resume "${normal_fixture}"
 require_json resume '
   .resumed == true and .first_frame == "RESUME"
   and .agent_ready_http == 200
   and (.resume_observed_at | type == "string" and length > 0)
 ' "${resume}"
 
-advanced="$(run_action advance-data "${normal_fixture}")"
+capture_action advanced advance-data "${normal_fixture}"
 require_json advance-data '.advanced == true' "${advanced}"
-after="$(run_action snapshot-after "${normal_fixture}")"
+capture_action after snapshot-after "${normal_fixture}"
 require_json after '
   .session_status == "running"
   and .agent_health_http == 200 and .agent_ready_http == 200
@@ -764,22 +847,22 @@ jq -e --argjson before "${before}" '
 ' <<<"${after}" >/dev/null \
   || die "heartbeat/data cursors did not advance exactly once after RESUME"
 
-revoke_fixture="$(run_action create-revoke)"
+capture_action revoke_fixture create-revoke
 require_json revoke-fixture '(.runtime_id | length > 0) and (.credential_key_id | length > 0)' "${revoke_fixture}"
-revoked="$(run_action revoke-credential "${revoke_fixture}")"
+capture_action revoked revoke-credential "${revoke_fixture}"
 require_json revoke-credential '.revoked == true and .streams_closed >= 1 and .runtimes_ended >= 1' "${revoked}"
-revoke_result="$(run_action assert-revoke-terminal "${revoke_fixture}")"
+capture_action revoke_result assert-revoke-terminal "${revoke_fixture}"
 require_json revoke-result '
   .safe_stop == true and .reconnect_storm == false
   and .reconnect_attempts >= 0 and .reconnect_attempts <= 1
   and .agent_exit_code != 0
 ' "${revoke_result}"
 
-grace_fixture="$(run_action create-terminal-grace)"
+capture_action grace_fixture create-terminal-grace
 require_json terminal-grace-fixture '(.runtime_id | length > 0) and (.credential_key_id | length > 0)' "${grace_fixture}"
-grace="$(run_action exceed-terminal-grace "${grace_fixture}")"
+capture_action grace exceed-terminal-grace "${grace_fixture}"
 require_json terminal-grace '.terminalized == true and .grace_seconds > 0' "${grace}"
-grace_result="$(run_action assert-terminal-resume-rejected "${grace_fixture}")"
+capture_action grace_result assert-terminal-resume-rejected "${grace_fixture}"
 require_json terminal-grace-result '
   .resume_rejected == true and .grpc_code == "FailedPrecondition"
   and .safe_stop == true and .reconnect_storm == false
@@ -787,7 +870,7 @@ require_json terminal-grace-result '
   and .agent_exit_code != 0
 ' "${grace_result}"
 
-cleanup="$(cleanup_once)"
+capture_cleanup cleanup
 require_json cleanup '.owned_only == true and .artifacts_removed == true' "${cleanup}"
 
 jq -S -n \

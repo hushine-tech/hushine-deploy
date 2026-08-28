@@ -17,6 +17,10 @@ set -euo pipefail
 action="$1"
 shift
 printf '%s\n' "${action}" >>"${RUNTIME_RESTART_DRIVER_LOG}"
+if [[ "${RUNTIME_RESTART_DRIVER_FAIL_AT:-}" == "${action}" ]]; then
+  echo "injected ${action} failure" >&2
+  exit 97
+fi
 case "${action}" in
   preflight)
     jq -nc '{ok:true}'
@@ -106,10 +110,12 @@ if grep -Eq 'local-infra-reset|docker compose[^#]*(down|rm)|down[[:space:]]+-v' 
 fi
 
 evidence="${FIXTURE}/evidence.json"
+mkdir -m 0700 "${FIXTURE}/state"
 RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
 RUNTIME_RESTART_DRIVER_LOG="${FIXTURE}/driver.log" \
 HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
-bash "${HARNESS}" --evidence-file "${evidence}" >"${FIXTURE}/stdout.log"
+bash "${HARNESS}" --state-dir "${FIXTURE}/state" \
+  --evidence-file "${evidence}" >"${FIXTURE}/stdout.log"
 
 jq -e '
   .schema == 1
@@ -185,4 +191,22 @@ cmp -s "${expected_actions}" "${FIXTURE}/driver.log" \
 
 grep -Fq 'runtime-channel restart acceptance: PASS' "${FIXTURE}/stdout.log" \
   || fail "harness did not print final PASS"
+
+: >"${FIXTURE}/driver.log"
+mkdir -m 0700 "${FIXTURE}/failure-state"
+if RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
+    RUNTIME_RESTART_DRIVER_LOG="${FIXTURE}/driver.log" \
+    RUNTIME_RESTART_DRIVER_FAIL_AT=create-normal \
+    HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
+    bash "${HARNESS}" --state-dir "${FIXTURE}/failure-state" \
+      >"${FIXTURE}/failure-stdout.log" 2>"${FIXTURE}/failure-stderr.log"; then
+  fail "injected live-action failure did not stop the harness"
+fi
+cat >"${FIXTURE}/failure-actions" <<'ACTIONS'
+preflight
+create-normal
+cleanup
+ACTIONS
+cmp -s "${FIXTURE}/failure-actions" "${FIXTURE}/driver.log" \
+  || fail "failure path continued after error or skipped cleanup"
 echo "runtime-channel restart contract: PASS"
