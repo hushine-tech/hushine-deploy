@@ -11,13 +11,26 @@ import (
 	"github.com/IBM/sarama"
 )
 
+func isOwnedKafkaTopic(topic string) bool {
+	const prefix = "runtime.restart.acceptance."
+	if !strings.HasPrefix(topic, prefix) || len(topic) != len(prefix)+64 {
+		return false
+	}
+	for _, char := range topic[len(prefix):] {
+		if !strings.ContainsRune("0123456789abcdef", char) {
+			return false
+		}
+	}
+	return true
+}
+
 func main() {
 	broker := flag.String("broker", "", "Kafka bootstrap proxy host:port")
-	topic := flag.String("topic", "notification.events", "Kafka topic")
+	topic := flag.String("topic", "", "unique harness-owned Kafka topic")
 	correlation := flag.String("correlation", "", "unique rpc- correlation")
 	flag.Parse()
-	if *broker == "" || *topic == "" || !strings.HasPrefix(*correlation, "rpc-") {
-		fmt.Fprintln(os.Stderr, "broker, topic, and rpc- correlation are required")
+	if *broker == "" || !isOwnedKafkaTopic(*topic) || !strings.HasPrefix(*correlation, "rpc-") {
+		fmt.Fprintln(os.Stderr, "broker, owner-derived topic, and rpc- correlation are required")
 		os.Exit(2)
 	}
 

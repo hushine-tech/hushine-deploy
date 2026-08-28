@@ -26,9 +26,13 @@ case "${action}" in
   preflight)
     mkdir -p "${RUNTIME_RESTART_CONTRACT_STATE}/runtimes/normal"
     chmod 0700 "${RUNTIME_RESTART_CONTRACT_STATE}" "${RUNTIME_RESTART_CONTRACT_STATE}/runtimes" "${RUNTIME_RESTART_CONTRACT_STATE}/runtimes/normal"
-    jq -nc '{
+    topic_state=created
+    [[ "${RUNTIME_RESTART_DRIVER_PARTIAL_AT:-}" != "kafka-topic-create" ]] || topic_state=create_requested
+    jq -nc --arg topic_state "${topic_state}" '{
       schema:2,mode:"contract",
       owner_token:"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      kafka_topic:"runtime.restart.acceptance.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      kafka_topic_state:$topic_state,
       generation:"generation-0123456789abcdef0123456789abcdef",
       service_baseline:{was_running:true,config:"./config.local.yaml",ready_http:200,pid:4000},
       control_panel_stopped:false,fast_control:false,
@@ -37,6 +41,7 @@ case "${action}" in
       normal:{provisioning:"ready",runtime_id:"selfhosted-abcdefghijklmnopqrstuv",credential_key_id:"abcdefghijklmnopqrstuv",container_name:"hushine-runtime-restart-normal-0123456789",runtime_root:"CONTRACT_RUNTIME_ROOT",portfolio_id:101,venue_id:201,strategy_id:301,session_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
     }' | sed "s#CONTRACT_RUNTIME_ROOT#${RUNTIME_RESTART_CONTRACT_STATE}/runtimes/normal#" >"${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
     chmod 0600 "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
+    [[ "${RUNTIME_RESTART_DRIVER_PARTIAL_AT:-}" != "kafka-topic-create" ]] || exit 97
     jq -nc '{ok:true}'
     ;;
   create-normal)
@@ -143,12 +148,16 @@ case "${action}" in
     ;;
   cleanup)
     [[ "${scenario}" != "cleanup_failure" ]] || exit 95
-    for step in order portfolio control market; do
+    for step in kafka_topic order portfolio control market; do
       if ! jq -e --arg step "${step}" '.cleanup_progress[$step] == true' \
           "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" >/dev/null; then
         temporary="${RUNTIME_RESTART_CONTRACT_STATE}/cleanup.tmp"
         jq --arg step "${step}" '.cleanup_progress[$step]=true' \
           "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" >"${temporary}"
+        if [[ "${step}" == "kafka_topic" ]]; then
+          jq '.kafka_topic_state="deleted"' "${temporary}" >"${temporary}.topic"
+          mv "${temporary}.topic" "${temporary}"
+        fi
         chmod 0600 "${temporary}"
         mv "${temporary}" "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
         [[ "${scenario}" != "cleanup_after_${step}" ]] || exit 95
@@ -171,6 +180,12 @@ grep -Fq 'github.com/IBM/sarama' "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-p
   || fail "Kafka proxy integration does not use the production Sarama client"
 grep -Fq 'sarama.NewSyncProducer' "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.go" \
   || fail "Kafka proxy integration does not exercise SyncProducer"
+if rg -n 'notification\.events' \
+    "${HARNESS}" \
+    "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.go" \
+    "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.test.sh" >/dev/null; then
+  fail "restart acceptance artifacts touch the shared notification topic"
+fi
 
 for live_contract in \
   'runtime_channel_leases' \
@@ -319,6 +334,9 @@ cmp -s "${expected_actions}" "${FIXTURE}/driver.log" \
 
 grep -Fq 'runtime-channel restart acceptance: PASS' "${FIXTURE}/stdout.log" \
   || fail "harness did not print final PASS"
+jq -e '.kafka_topic_state == "deleted" and .cleanup_progress.kafka_topic == true' \
+  "${FIXTURE}/state/live-state.json" >/dev/null \
+  || fail "successful cleanup did not persist owned Kafka topic deletion"
 
 : >"${FIXTURE}/driver.log"
 mkdir -m 0700 "${FIXTURE}/failure-state"
@@ -397,7 +415,7 @@ ACTIONS
     || fail "partial provisioning ${partial_at} did not clean exactly"
 done
 
-for cleanup_step in order portfolio control market; do
+for cleanup_step in kafka_topic order portfolio control market; do
   cleanup_state="${FIXTURE}/cleanup-resume-${cleanup_step}"
   mkdir -m 0700 "${cleanup_state}"
   : >"${cleanup_state}.log"
@@ -419,10 +437,37 @@ for cleanup_step in order portfolio control market; do
   [[ "$(tail -n 3 "${cleanup_state}.log" | tr '\n' ' ')" == \
       "restore-control-panel validate-cleanup-ownership cleanup " ]] \
     || fail "cleanup-only did not restore before validate/cleanup after ${cleanup_step}"
-  jq -e '.cleanup_progress == {order:true,portfolio:true,control:true,market:true}' \
+  jq -e '.cleanup_progress == {kafka_topic:true,order:true,portfolio:true,control:true,market:true}' \
     "${cleanup_state}/live-state.json" >/dev/null \
     || fail "cleanup-only did not complete all DB progress after ${cleanup_step}"
+  jq -e '.kafka_topic_state == "deleted"' "${cleanup_state}/live-state.json" >/dev/null \
+    || fail "cleanup-only did not preserve the deleted Kafka topic checkpoint after ${cleanup_step}"
 done
+
+topic_crash_state="${FIXTURE}/partial-kafka-topic-create"
+mkdir -m 0700 "${topic_crash_state}"
+: >"${topic_crash_state}.log"
+if RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
+    RUNTIME_RESTART_DRIVER_LOG="${topic_crash_state}.log" \
+    RUNTIME_RESTART_DRIVER_PARTIAL_AT=kafka-topic-create \
+    RUNTIME_RESTART_DRIVER_SCENARIO=cleanup_failure \
+    HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
+    bash "${HARNESS}" --state-dir "${topic_crash_state}" \
+      >"${topic_crash_state}.stdout" 2>"${topic_crash_state}.stderr"; then
+  fail "Kafka topic create-request crash plus cleanup failure unexpectedly passed"
+fi
+jq -e '.kafka_topic_state == "create_requested" and (.cleanup_progress.kafka_topic // false) == false' \
+  "${topic_crash_state}/live-state.json" >/dev/null \
+  || fail "Kafka topic ownership intent was not durable before the simulated create crash"
+RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
+  RUNTIME_RESTART_DRIVER_LOG="${topic_crash_state}.log" \
+  HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
+  bash "${HARNESS}" --state-dir "${topic_crash_state}" --cleanup-only \
+    >"${topic_crash_state}.cleanup.stdout" 2>"${topic_crash_state}.cleanup.stderr" \
+  || fail "cleanup-only did not resume Kafka topic cleanup after create-request crash"
+jq -e '.kafka_topic_state == "deleted" and .cleanup_progress.kafka_topic == true' \
+  "${topic_crash_state}/live-state.json" >/dev/null \
+  || fail "cleanup-only did not finish Kafka topic cleanup after create-request crash"
 
 run_false_positive() {
   local scenario="$1" state
@@ -480,6 +525,8 @@ assert_tamper_rejected_without_cleanup portfolio_id '.normal.portfolio_id=999'
 assert_tamper_rejected_without_cleanup owner '.owner_token="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"'
 assert_tamper_rejected_without_cleanup source '.market.source="runtime-channel-restart:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"'
 assert_tamper_rejected_without_cleanup symbol '.market.symbol="RCRFFFFFFFFFFFFUSDT"'
+assert_tamper_rejected_without_cleanup kafka_topic '.kafka_topic="notification.events"'
+assert_tamper_rejected_without_cleanup kafka_topic_state '.kafka_topic_state="owned"'
 assert_tamper_rejected_without_cleanup injection '.normal.session_id="x\u0027;DROP TABLE users;--"'
 assert_tamper_rejected_without_cleanup mode '.mode="live"'
 
@@ -525,6 +572,7 @@ import ast
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 harness = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 fixture = sys.argv[2]
@@ -572,7 +620,39 @@ for cleanup_step in ("order", "portfolio", "control", "market"):
     assert f'cleanup_step_done {cleanup_step}' in cleanup_phase
     assert f'mark_cleanup_step {cleanup_step}' in cleanup_phase
     assert f'if ! cleanup_step_done {cleanup_step}' not in cleanup_phase
+assert 'cleanup_step_done kafka_topic' in cleanup_phase
+assert 'mark_cleanup_step kafka_topic' in cleanup_phase
+assert 'delete_owned_kafka_topic' in cleanup_phase
+assert 'notification.events' not in harness
 assert "'issued_at',l.issued_at::text,'updated_at',l.updated_at::text" in stop_phase
+
+proxy_phase = harness.split("start_kafka_hold_proxy() {", 1)[1].split("\nstop_kafka_hold_proxy() {", 1)[0]
+config_program = proxy_phase.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+with tempfile.TemporaryDirectory() as temporary:
+    source_config = pathlib.Path(temporary) / "control.yaml"
+    source_config.write_text(
+        'notification:\n'
+        '  enabled: true\n'
+        '  kafka:\n'
+        '    brokers: ["broker:9092"]\n'
+        '    topic: "shared.baseline"\n'
+        '    client_id: "control"\n'
+        'other:\n'
+        '  topic: "must-stay"\n',
+        encoding="utf-8",
+    )
+    owned_topic = "runtime.restart.acceptance." + "c" * 64
+    rendered = subprocess.run(
+        [sys.executable, "-", str(source_config), "19092", owned_topic],
+        input=config_program,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert 'brokers: ["127.0.0.1:19092"]' in rendered
+    assert f'topic: "{owned_topic}"' in rendered
+    assert 'topic: "must-stay"' in rendered
+    assert 'topic: "shared.baseline"' not in rendered
 PY
 
 python3 - "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-hold-proxy.py" "${FIXTURE}/proxy-test" <<'PY'

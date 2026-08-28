@@ -273,7 +273,7 @@ file_uid_mode() {
 }
 
 validate_cleanup_manifest() {
-  local manifest="${STATE_DIR}/live-state.json" expected_mode owner expected_symbol expected_lower expected_source
+  local manifest="${STATE_DIR}/live-state.json" expected_mode owner expected_symbol expected_lower expected_source expected_topic
   local expected_uid uid_mode
   [[ -f "${manifest}" && ! -L "${manifest}" ]] || die "cleanup manifest must be a regular non-symlink file"
   expected_uid="$(id -u)"
@@ -288,11 +288,15 @@ validate_cleanup_manifest() {
   expected_symbol="$(printf 'RCR%sUSDT' "${owner:0:12}" | tr '[:lower:]' '[:upper:]')"
   expected_lower="$(printf '%s' "${expected_symbol}" | tr '[:upper:]' '[:lower:]')"
   expected_source="runtime-channel-restart:${owner}"
+  expected_topic="runtime.restart.acceptance.${owner}"
   jq -e \
     --arg mode "${expected_mode}" --arg owner "${owner}" --arg symbol "${expected_symbol}" \
-    --arg lower "${expected_lower}" --arg source "${expected_source}" --arg state_dir "${STATE_DIR}" '
+    --arg lower "${expected_lower}" --arg source "${expected_source}" --arg topic "${expected_topic}" \
+    --arg state_dir "${STATE_DIR}" '
     .schema == 2 and .mode == $mode and .owner_token == $owner
-    and ((keys - ["schema","mode","owner_token","generation","service_baseline","control_panel_stopped","fast_control","kafka_proxy","auth","market","normal","revoke","terminal_grace","pending_rpc","cleanup_progress"]) | length) == 0
+    and .kafka_topic == $topic
+    and (.kafka_topic_state | IN("planned","create_requested","created","deleted"))
+    and ((keys - ["schema","mode","owner_token","kafka_topic","kafka_topic_state","generation","service_baseline","control_panel_stopped","fast_control","kafka_proxy","auth","market","normal","revoke","terminal_grace","pending_rpc","cleanup_progress"]) | length) == 0
     and (.generation | type == "string" and test("^generation-[0-9a-f]{32}$"))
     and (.control_panel_stopped | type == "boolean")
     and (.fast_control | type == "boolean")
@@ -320,9 +324,11 @@ validate_cleanup_manifest() {
     and ((.pending_rpc // null) == null or (
       (.pending_rpc | keys) == ["correlation_id"]
       and (.pending_rpc.correlation_id | test("^rpc-[0-9a-f]{24}$"))))
-    and ((.cleanup_progress // {}) | type == "object"
-      and ((keys - ["containers","order","portfolio","control","market"]) | length) == 0
-      and all(.[]; type == "boolean"))
+    and ((.cleanup_progress // {}) as $progress |
+      ($progress | type == "object")
+      and (($progress | keys) - ["containers","kafka_topic","order","portfolio","control","market"] | length) == 0
+      and ($progress | all(.[]; type == "boolean"))
+      and (($progress.kafka_topic // false) != true or .kafka_topic_state == "deleted"))
     and (. as $root | ["normal","revoke","terminal_grace"] | all(. as $phase |
       (($root[$phase] // null) == null or (
         (($root[$phase] | keys) - ["provisioning","runtime_id","credential_key_id","container_name","runtime_root","portfolio_id","venue_id","strategy_id","session_id","lease_before","connection_owner_before","response","terminalized_at"] | length) == 0
@@ -489,9 +495,10 @@ json_file_matches() {
 }
 
 kafka_notification_count() {
-  local correlation="$1" output
+  local correlation="$1" output topic
+  topic="$(state_get .kafka_topic)"
   output="$(docker exec "${KAFKA_CONTAINER}" kafka-console-consumer \
-    --bootstrap-server 127.0.0.1:9092 --topic notification.events \
+    --bootstrap-server 127.0.0.1:9092 --topic "${topic}" \
     --from-beginning --timeout-ms 1500 2>/dev/null || true)"
   awk -v needle="${correlation}" 'index($0, needle) { count++ } END { print count + 0 }' <<<"${output}"
 }
@@ -871,8 +878,59 @@ control_runtime_config() {
   jq -r '.kafka_proxy.config // "./config.local.yaml"' "${STATE_DIR}/live-state.json"
 }
 
+kafka_topic_exists() {
+  docker exec "${KAFKA_CONTAINER}" kafka-topics \
+    --bootstrap-server 127.0.0.1:9092 --describe --topic "$1" \
+    >/dev/null 2>&1
+}
+
+create_owned_kafka_topic() {
+  local owner topic
+  owner="$(state_get .owner_token)"
+  topic="$(state_get .kafka_topic)"
+  [[ "${topic}" == "runtime.restart.acceptance.${owner}" ]] \
+    || die "owned Kafka topic does not match the manifest owner"
+  [[ "$(state_get .kafka_topic_state)" == "planned" ]] \
+    || die "owned Kafka topic is not in the planned state"
+  ! kafka_topic_exists "${topic}" \
+    || die "refuse to reuse pre-existing Kafka topic: ${topic}"
+  state_update '.kafka_topic_state="create_requested"'
+  docker exec "${KAFKA_CONTAINER}" kafka-topics \
+    --bootstrap-server 127.0.0.1:9092 --create --topic "${topic}" \
+    --partitions 1 --replication-factor 1 >/dev/null \
+    || die "could not create the harness-owned Kafka topic"
+  kafka_topic_exists "${topic}" \
+    || die "harness-owned Kafka topic was not visible after creation"
+  state_update '.kafka_topic_state="created"'
+}
+
+delete_owned_kafka_topic() {
+  local owner topic topic_state deadline
+  owner="$(state_get .owner_token)"
+  topic="$(state_get .kafka_topic)"
+  [[ "${topic}" == "runtime.restart.acceptance.${owner}" ]] || return 1
+  topic_state="$(state_get .kafka_topic_state)"
+  if [[ "${topic_state}" == "planned" ]]; then
+    state_update '.kafka_topic_state="deleted"'
+    return 0
+  fi
+  [[ "${topic_state}" != "deleted" ]] || return 0
+  [[ "${topic_state}" == "create_requested" || "${topic_state}" == "created" ]] || return 1
+  if kafka_topic_exists "${topic}"; then
+    docker exec "${KAFKA_CONTAINER}" kafka-topics \
+      --bootstrap-server 127.0.0.1:9092 --delete --topic "${topic}" \
+      >/dev/null || return 1
+  fi
+  deadline=$((SECONDS + 15))
+  while kafka_topic_exists "${topic}"; do
+    (( SECONDS < deadline )) || return 1
+    sleep 0.1
+  done
+  state_update '.kafka_topic_state="deleted"'
+}
+
 start_kafka_hold_proxy() {
-  local proxy_dir="${STATE_DIR}/kafka-proxy" pid port config
+  local proxy_dir="${STATE_DIR}/kafka-proxy" pid port config topic
   mkdir -m 0700 -p "${proxy_dir}"
   python3 "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-hold-proxy.py" \
     --target-port 9092 --control-dir "${proxy_dir}" \
@@ -884,26 +942,40 @@ start_kafka_hold_proxy() {
     die "Kafka hold proxy failed to publish its endpoint"
   fi
   port="$(jq -er '.port | select(type == "number" and . > 0)' "${proxy_dir}/endpoint.json")"
+  topic="$(state_get .kafka_topic)"
   config="${STATE_DIR}/control-pending.yaml"
-  if ! python3 - "${SOURCE_ROOT}/control-panel-service/config.local.yaml" "${port}" >"${config}" <<'PY'
+  if ! python3 - "${SOURCE_ROOT}/control-panel-service/config.local.yaml" "${port}" "${topic}" >"${config}" <<'PY'
+import json
 import pathlib
 import sys
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
 port = int(sys.argv[2])
+topic = sys.argv[3]
 in_notification = False
-replaced = False
+in_kafka = False
+broker_replaced = False
+topic_replaced = False
 for line in source:
     if line == "notification:":
         in_notification = True
+        in_kafka = False
     elif line and not line.startswith((" ", "#")):
         in_notification = False
-    if in_notification and line.strip().startswith("brokers:"):
+        in_kafka = False
+    elif in_notification and line == "  kafka:":
+        in_kafka = True
+    elif in_kafka and line and not line.startswith(("    ", "#")):
+        in_kafka = False
+    if in_kafka and line.strip().startswith("brokers:"):
         line = f'    brokers: ["127.0.0.1:{port}"]'
-        replaced = True
+        broker_replaced = True
+    elif in_kafka and line.strip().startswith("topic:"):
+        line = f"    topic: {json.dumps(topic)}"
+        topic_replaced = True
     print(line)
-if not replaced:
-    raise SystemExit("notification Kafka broker config was not found")
+if not broker_replaced or not topic_replaced:
+    raise SystemExit("notification Kafka broker/topic config was not found")
 PY
   then
     kill "${pid}" 2>/dev/null || true
@@ -1062,6 +1134,9 @@ cleanup_live() {
     fi
   done < <(jq -r '[.normal,.revoke,.terminal_grace][]? | .container_name // empty' "${STATE_DIR}/live-state.json")
   mark_cleanup_step containers
+  cleanup_step_done kafka_topic || :
+  delete_owned_kafka_topic || return 1
+  mark_cleanup_step kafka_topic
   if jq -e '.auth.user_id != null' "${STATE_DIR}/live-state.json" >/dev/null 2>&1; then
     user="$(state_get .auth.user_id)"
     username="runtime-restart-${owner:0:12}"
@@ -1244,10 +1319,12 @@ live_action() {
         jq -nc --arg owner "$(openssl rand -hex 32)" --arg generation "generation-$(openssl rand -hex 16)" \
           --argjson pid "$(<"${SOURCE_ROOT}/control-panel-service/.run.pid")" \
           '{schema:2,mode:"live",owner_token:$owner,generation:$generation,
+            kafka_topic:("runtime.restart.acceptance." + $owner),kafka_topic_state:"planned",
             service_baseline:{was_running:true,config:"./config.local.yaml",ready_http:200,pid:$pid},
             control_panel_stopped:false,fast_control:false}' >"${STATE_DIR}/live-state.json"
         chmod 0600 "${STATE_DIR}/live-state.json"
       fi
+      create_owned_kafka_topic
       start_kafka_hold_proxy
       state_update '.control_panel_stopped=true'
       control_stop
