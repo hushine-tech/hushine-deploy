@@ -6,7 +6,7 @@
 
 ## 结论
 
-当前未推送的 clean commits 通过完整仓库 gate、单库 fresh bootstrap、无缓存
+当前 clean commits 通过完整仓库 gate、单库 fresh bootstrap、无缓存
 Runtime 镜像构建、完整本地栈、RuntimeChannel 重启、41 单元交易模式矩阵、Funding
 service-chain/Demo gate、Indicator V2 和真实 coverage Runtime。未发现未关闭的范围内
 Critical、Important 或 Minor 缺陷。
@@ -229,4 +229,5 @@ Superpowers/OpenSpec 记录没有伪装成现行运维指南。
 最终两轮独立复审均为 CLEAN，所有原始及新增的 Critical、Important、范围内 Minor
 finding 均已关闭，未留下开放的代码审查项。
 
-结论：当前 commits 已达到 ready-to-push；本报告不执行远程 push。
+结论：当前 commits 已完成验收。主任务已将所有有变更的仓库推送到各自远程
+`cleanup/medium-baseline-20260710` 分支，并在推送后核对远端分支与本地 HEAD 一致。
