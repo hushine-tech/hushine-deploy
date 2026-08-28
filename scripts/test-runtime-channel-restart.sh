@@ -138,8 +138,12 @@ else
     || die "--state-dir must be an absolute non-symlink path"
   mkdir -p -- "${STATE_DIR}"
 fi
-chmod 0700 "${STATE_DIR}"
 STATE_DIR="$(cd "${STATE_DIR}" && pwd -P)"
+if [[ "${CLEANUP_ONLY}" == "false" ]] \
+    && [[ -n "$(find "${STATE_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  die "state directory is not empty; refuse to resume normal execution; inspect it and use --cleanup-only: ${STATE_DIR}"
+fi
+chmod 0700 "${STATE_DIR}"
 export RUNTIME_RESTART_CONTRACT_STATE="${STATE_DIR}"
 if [[ -z "${EVIDENCE_FILE}" ]]; then
   EVIDENCE_FILE="${STATE_DIR}/evidence.json"
@@ -156,6 +160,21 @@ atomic_json() {
   jq "$@" >"${temporary}"
   chmod 0600 "${temporary}"
   mv -f -- "${temporary}" "${destination}"
+}
+
+create_once_json() {
+  local destination="$1"
+  shift
+  local temporary="${destination}.new.$$"
+  [[ ! -e "${destination}" && ! -L "${destination}" ]] \
+    || die "refuse to replace create-once fixture file: ${destination}"
+  jq "$@" >"${temporary}"
+  chmod 0600 "${temporary}"
+  if ! ln -- "${temporary}" "${destination}"; then
+    rm -f -- "${temporary}"
+    die "could not create fixture file exactly once: ${destination}"
+  fi
+  rm -f -- "${temporary}"
 }
 
 run_action() {
@@ -273,7 +292,7 @@ validate_cleanup_manifest() {
     --arg mode "${expected_mode}" --arg owner "${owner}" --arg symbol "${expected_symbol}" \
     --arg lower "${expected_lower}" --arg source "${expected_source}" --arg state_dir "${STATE_DIR}" '
     .schema == 2 and .mode == $mode and .owner_token == $owner
-    and ((keys - ["schema","mode","owner_token","generation","service_baseline","control_panel_stopped","fast_control","kafka_proxy","auth","market","normal","revoke","terminal_grace","pending_rpc"]) | length) == 0
+    and ((keys - ["schema","mode","owner_token","generation","service_baseline","control_panel_stopped","fast_control","kafka_proxy","auth","market","normal","revoke","terminal_grace","pending_rpc","cleanup_progress"]) | length) == 0
     and (.generation | type == "string" and test("^generation-[0-9a-f]{32}$"))
     and (.control_panel_stopped | type == "boolean")
     and (.fast_control | type == "boolean")
@@ -301,9 +320,13 @@ validate_cleanup_manifest() {
     and ((.pending_rpc // null) == null or (
       (.pending_rpc | keys) == ["correlation_id"]
       and (.pending_rpc.correlation_id | test("^rpc-[0-9a-f]{24}$"))))
+    and ((.cleanup_progress // {}) | type == "object"
+      and ((keys - ["containers","order","portfolio","control","market"]) | length) == 0
+      and all(.[]; type == "boolean"))
     and (. as $root | ["normal","revoke","terminal_grace"] | all(. as $phase |
       (($root[$phase] // null) == null or (
-        (($root[$phase] | keys) - ["runtime_id","credential_key_id","container_name","runtime_root","portfolio_id","venue_id","strategy_id","session_id","lease_before","connection_owner_before","response","terminalized_at"] | length) == 0
+        (($root[$phase] | keys) - ["provisioning","runtime_id","credential_key_id","container_name","runtime_root","portfolio_id","venue_id","strategy_id","session_id","lease_before","connection_owner_before","response","terminalized_at"] | length) == 0
+        and (($root[$phase].provisioning // "ready") | IN("credential_issued","container_created","ready"))
         and ($root[$phase].runtime_id | type == "string" and test("^selfhosted-[A-Za-z0-9_-]{22}$"))
         and ($root[$phase].credential_key_id | type == "string" and test("^[A-Za-z0-9_-]{22}$"))
         and $root[$phase].runtime_id == ("selfhosted-" + $root[$phase].credential_key_id)
@@ -316,7 +339,7 @@ validate_cleanup_manifest() {
 }
 
 validate_cleanup_ownership() {
-  local raw user owner username phase runtime key container count source symbol
+  local raw user=0 owner username phase runtime key container count source symbol
   if [[ -n "${DRIVER}" ]]; then
     raw="$(run_action validate-cleanup-ownership)" \
       || die "cleanup ownership observation failed"
@@ -328,49 +351,63 @@ validate_cleanup_ownership() {
   if jq -e '.auth != null' "${STATE_DIR}/live-state.json" >/dev/null; then
     user="$(state_get .auth.user_id)"
     username="runtime-restart-${owner:0:12}"
-    count="$(pg portfolio -At -v user_id="${user}" -v username="${username}" <<'SQL'
-SELECT count(*) FROM users WHERE id=:'user_id'::bigint AND username=:'username';
+    count="$(pg portfolio -At -F '|' -v user_id="${user}" -v username="${username}" <<'SQL'
+SELECT count(*) FILTER (WHERE id=:'user_id'::bigint AND username=:'username'),
+       count(*) FILTER (WHERE NOT (id=:'user_id'::bigint AND username=:'username'))
+FROM users WHERE id=:'user_id'::bigint OR username=:'username';
 SQL
 )"
-    [[ "${count}" == "1" ]] || die "cleanup user ownership relationship is invalid"
+    [[ "${count}" =~ ^[01]\|0$ ]] || die "cleanup user ownership relationship is invalid"
   fi
   for phase in normal revoke terminal_grace; do
     jq -e --arg phase "${phase}" '.[$phase] != null' "${STATE_DIR}/live-state.json" >/dev/null || continue
     runtime="$(state_get ".${phase}.runtime_id")"; key="$(state_get ".${phase}.credential_key_id")"
     container="$(state_get ".${phase}.container_name")"
-    count="$(pg control_panel -At -v user_id="${user}" -v runtime_id="${runtime}" -v key_id="${key}" <<'SQL'
-SELECT (SELECT count(*) FROM runtime_registry WHERE user_id=:'user_id'::bigint AND runtime_id=:'runtime_id' AND credential_key_id=:'key_id')
-     + (SELECT count(*) FROM runtime_credentials WHERE user_id=:'user_id'::bigint AND key_id=:'key_id');
+    count="$(pg control_panel -At -F '|' -v user_id="${user}" -v runtime_id="${runtime}" -v key_id="${key}" <<'SQL'
+SELECT
+  (SELECT count(*) FROM runtime_registry WHERE user_id=:'user_id'::bigint AND runtime_id=:'runtime_id' AND credential_key_id=:'key_id'),
+  (SELECT count(*) FROM runtime_registry WHERE runtime_id=:'runtime_id' AND NOT (user_id=:'user_id'::bigint AND credential_key_id=:'key_id')),
+  (SELECT count(*) FROM runtime_credentials WHERE user_id=:'user_id'::bigint AND key_id=:'key_id'),
+  (SELECT count(*) FROM runtime_credentials WHERE key_id=:'key_id' AND user_id<>:'user_id'::bigint);
 SQL
 )"
-    [[ "${count}" == "2" ]] || die "cleanup ${phase} runtime/credential ownership relationship is invalid"
+    [[ "${count}" =~ ^[01]\|0\|[01]\|0$ ]] \
+      || die "cleanup ${phase} runtime/credential ownership relationship is invalid"
     if docker inspect "${container}" >/dev/null 2>&1; then
       [[ "$(docker inspect -f '{{index .Config.Labels "hushine.acceptance.runtime-restart"}}' "${container}")" == "${owner}" ]] \
         || die "cleanup ${phase} container owner label is invalid"
     fi
   done
   if jq -e '.normal.portfolio_id != null' "${STATE_DIR}/live-state.json" >/dev/null; then
-    count="$(pg portfolio -At \
+    count="$(pg portfolio -At -F '|' \
       -v user_id="${user}" -v portfolio_id="$(state_get .normal.portfolio_id)" \
       -v venue_id="$(state_get .normal.venue_id)" -v strategy_id="$(state_get .normal.strategy_id)" \
       -v session_id="$(state_get .normal.session_id)" -v runtime_id="$(state_get .normal.runtime_id)" <<'SQL'
-SELECT (SELECT count(*) FROM portfolios WHERE portfolio_id=:'portfolio_id'::bigint AND user_id=:'user_id'::bigint)
-     + (SELECT count(*) FROM venues WHERE venue_id=:'venue_id'::bigint AND portfolio_id=:'portfolio_id'::bigint AND user_id=:'user_id'::bigint)
-     + (SELECT count(*) FROM strategies WHERE strategy_id=:'strategy_id'::bigint AND user_id=:'user_id'::bigint)
-     + (SELECT count(*) FROM strategy_sessions WHERE session_id=:'session_id' AND portfolio_id=:'portfolio_id'::bigint AND user_id=:'user_id'::bigint AND strategy_id=:'strategy_id'::bigint AND runtime_id=:'runtime_id');
+SELECT
+  (SELECT count(*) FROM portfolios WHERE portfolio_id=:'portfolio_id'::bigint AND user_id=:'user_id'::bigint),
+  (SELECT count(*) FROM portfolios WHERE portfolio_id=:'portfolio_id'::bigint AND user_id<>:'user_id'::bigint),
+  (SELECT count(*) FROM venues WHERE venue_id=:'venue_id'::bigint AND portfolio_id=:'portfolio_id'::bigint AND user_id=:'user_id'::bigint),
+  (SELECT count(*) FROM venues WHERE venue_id=:'venue_id'::bigint AND NOT (portfolio_id=:'portfolio_id'::bigint AND user_id=:'user_id'::bigint)),
+  (SELECT count(*) FROM strategies WHERE strategy_id=:'strategy_id'::bigint AND user_id=:'user_id'::bigint),
+  (SELECT count(*) FROM strategies WHERE strategy_id=:'strategy_id'::bigint AND user_id<>:'user_id'::bigint),
+  (SELECT count(*) FROM strategy_sessions WHERE session_id=:'session_id' AND portfolio_id=:'portfolio_id'::bigint AND user_id=:'user_id'::bigint AND strategy_id=:'strategy_id'::bigint AND runtime_id=:'runtime_id'),
+  (SELECT count(*) FROM strategy_sessions WHERE session_id=:'session_id' AND NOT (portfolio_id=:'portfolio_id'::bigint AND user_id=:'user_id'::bigint AND strategy_id=:'strategy_id'::bigint AND runtime_id=:'runtime_id'));
 SQL
 )"
-    [[ "${count}" == "4" ]] || die "cleanup Portfolio/Venue/Strategy/Session ownership relationship is invalid"
+    [[ "${count}" =~ ^[01]\|0\|[01]\|0\|[01]\|0\|[01]\|0$ ]] \
+      || die "cleanup Portfolio/Venue/Strategy/Session ownership relationship is invalid"
   fi
   if jq -e '.market != null and (.market.fixture_committed // false)' "${STATE_DIR}/live-state.json" >/dev/null; then
     source="runtime-channel-restart:${owner}"
     symbol="$(printf 'RCR%sUSDT' "${owner:0:12}" | tr '[:lower:]' '[:upper:]')"
-    count="$(pg control_panel -At -v source="${source}" -v symbol="${symbol}" <<'SQL'
-SELECT count(*) FILTER (WHERE symbol=:'symbol')::text || '|' || count(*)::text
-FROM market_data_coverage_segments WHERE source=:'source';
+    count="$(pg control_panel -At -F '|' -v source="${source}" -v symbol="${symbol}" <<'SQL'
+SELECT count(*) FILTER (WHERE source=:'source' AND symbol=:'symbol'),
+       count(*) FILTER (WHERE NOT (source=:'source' AND symbol=:'symbol'))
+FROM market_data_coverage_segments WHERE source=:'source' OR symbol=:'symbol';
 SQL
 )"
-    [[ "${count}" == "2|2" ]] || die "cleanup market coverage ownership relationship is invalid"
+    [[ "${count}" == "0|0" || "${count}" == "2|0" ]] \
+      || die "cleanup market coverage ownership relationship is invalid"
   fi
 }
 
@@ -463,11 +500,13 @@ kafka_notification_count_is() {
   [[ "$(kafka_notification_count "$1")" == "$2" ]]
 }
 
-kafka_notification_count_stays_one() {
-  local correlation="$1" deadline=$((SECONDS + 3))
+kafka_notification_counts_stay_one() {
+  local correlation="$1" observation="$2" started="${SECONDS}" deadline=$((SECONDS + 8))
   while (( SECONDS < deadline )); do
+    [[ "$(jq -er '.produce_request_count' "${observation}" 2>/dev/null || true)" == "1" ]] || return 1
     [[ "$(kafka_notification_count "${correlation}")" == "1" ]] || return 1
   done
+  printf '%s\n' "$((SECONDS - started))"
 }
 
 ensure_market_fixture() {
@@ -547,14 +586,18 @@ issue_credential() {
 }
 
 start_owned_runtime() {
-  local phase phase_name runtime_id credential container runtime_root credential_json tls_json
+  local phase phase_name runtime_id credential key container runtime_root credential_json tls_json
   phase="$1"
   credential="$(issue_credential "${phase}")" || return
-  runtime_id="selfhosted-$(jq -er .key_id <<<"${credential}")"
+  key="$(jq -er .key_id <<<"${credential}")"
+  runtime_id="selfhosted-${key}"
   phase_name="${phase//_/-}"
   container="hushine-runtime-restart-${phase}-$(state_get .owner_token | cut -c1-10)"
   runtime_root="${STATE_DIR}/runtimes/${phase}"
   mkdir -m 0700 -p "${runtime_root}"
+  state_update --arg phase "${phase}" --arg runtime "${runtime_id}" --arg key "${key}" \
+    --arg container "${container}" --arg root "${runtime_root}" \
+    '.[$phase]={provisioning:"credential_issued",runtime_id:$runtime,credential_key_id:$key,container_name:$container,runtime_root:$root}'
   credential_json="$(jq -c '{version,key_id,private_key_pem}' <<<"${credential}")"
   tls_json="$(jq -c '{client_cert_pem,client_key_pem,server_ca_pem}' <<<"${credential}")"
   docker run -d --name "${container}" \
@@ -570,13 +613,13 @@ start_owned_runtime() {
     -e "RUNTIME_CHANNEL_TLS_BUNDLE_JSON=${tls_json}" \
     -e RUNTIME_CHANNEL_TLS_SERVER_NAME=runtime-channel.local \
     "${RUNTIME_IMAGE}" >/dev/null || return
+  state_update --arg phase "${phase}" --arg provisioning "container_created" \
+    '.[$phase].provisioning=$provisioning'
   wait_for 30 "${phase} runtime active" runtime_status_is "${runtime_id}" active || return
   wait_for 15 "${phase} agent readiness" agent_ready_is "${container}" 200 || return
-  state_update --arg phase "${phase}" --arg runtime "${runtime_id}" \
-    --arg key "$(jq -er .key_id <<<"${credential}")" --arg container "${container}" \
-    --arg root "${runtime_root}" \
-    '.[$phase]={runtime_id:$runtime,credential_key_id:$key,container_name:$container,runtime_root:$root}'
-  jq -nc --arg runtime_id "${runtime_id}" --arg credential_key_id "$(jq -er .key_id <<<"${credential}")" \
+  state_update --arg phase "${phase}" --arg provisioning "ready" \
+    '.[$phase].provisioning=$provisioning'
+  jq -nc --arg runtime_id "${runtime_id}" --arg credential_key_id "${key}" \
     --arg container_name "${container}" --arg runtime_root "${runtime_root}" \
     '{runtime_id:$runtime_id,credential_key_id:$credential_key_id,container_name:$container_name,runtime_root:$runtime_root}'
 }
@@ -597,7 +640,40 @@ replacements = {
     'TESTUSDT': symbol,
     'if sequence in {4, 9, 1438}:': 'if sequence in {4, 1438}:',
     'self._last_open_time_ms = 0': 'self._last_open_time_ms = 0\n        self._acceptance_pending_started = False',
-    '            if target > self._completed:\n': '            release_path = Path(str((pending or {}).get("release_file") or ""))\n            if self._completed == 1023 and release_path.exists():\n                return\n            if target > self._completed:\n',
+    '        acknowledged = False\n        while True:\n': '        acknowledged = False\n        binding_deadline = time.monotonic() + 30.0\n        while True:\n',
+    '            session_id = str(control.get("session_id") or "").strip()\n': '''            raw_binding = str(control.get("session_binding_file") or "").strip()
+            binding_path = Path(raw_binding)
+            if not binding_path.is_absolute() or binding_path.parent != Path("/coverage"):
+                raise RuntimeError("session binding path is invalid")
+            try:
+                binding = self._read_private_json(binding_path)
+            except FileNotFoundError:
+                if time.monotonic() >= binding_deadline:
+                    raise RuntimeError("session binding did not arrive within 30 seconds")
+                time.sleep(_BARRIER_POLL_SECONDS)
+                continue
+            session_id = str(binding.get("session_id") or "").strip()
+            if (
+                str(binding.get("owner_token") or "") != expected_owner
+                or str(binding.get("generation") or "") != expected_generation
+                or str(binding.get("runtime_id") or "") != runtime_id
+            ):
+                raise RuntimeError("session binding ownership changed")
+''',
+    '            if target > self._completed:\n': '''            release_path = Path(str((pending or {}).get("release_file") or ""))
+            if self._completed == 1023 and release_path.exists():
+                release = self._read_private_json(release_path)
+                if (
+                    str(release.get("owner_token") or "") != expected_owner
+                    or str(release.get("generation") or "") != expected_generation
+                    or str(release.get("runtime_id") or "") != runtime_id
+                    or str(release.get("session_id") or "") != session_id
+                    or int(release.get("release_after_completed") or 0) != 1023
+                ):
+                    raise RuntimeError("release ownership changed")
+                return
+            if target > self._completed:
+''',
 }
 for old, new in replacements.items():
     if old not in source:
@@ -665,8 +741,14 @@ barrier_pending = '''            pending = control.get("pending_call")
                 pending["session_id"] = session_id
                 self._acceptance_pending_started = True
                 arm = self._read_private_json(armed_path)
-                if str(arm.get("correlation_id") or "") != correlation:
-                    raise RuntimeError("pending_call arm correlation changed")
+                if (
+                    str(arm.get("correlation_id") or "") != correlation
+                    or str(arm.get("owner_token") or "") != expected_owner
+                    or str(arm.get("generation") or "") != expected_generation
+                    or str(arm.get("runtime_id") or "") != runtime_id
+                    or str(arm.get("session_id") or "") != session_id
+                ):
+                    raise RuntimeError("pending_call arm ownership changed")
                 self._run_acceptance_pending_call(pending)
 '''
 if barrier_anchor not in source:
@@ -695,17 +777,19 @@ create_normal_fixture() {
   api_request POST "/api/portfolios/${portfolio}/strategies/${strategy}" "${token}" >/dev/null
   api_request POST "/api/portfolios/${portfolio}/strategies/${strategy}/activate" "${token}" >/dev/null
   runtime_root="$(jq -er .runtime_root <<<"${runtime}")"
-  atomic_json "${runtime_root}/runtime-restart-barrier.json" -nc \
+  create_once_json "${runtime_root}/runtime-restart-barrier.json" -nc \
     --arg owner_token "${owner}" --arg generation "$(state_get .generation)" \
     --arg runtime_id "$(jq -er .runtime_id <<<"${runtime}")" --arg correlation_id "rpc-${owner:0:24}" \
-    '{schema:1,owner_token:$owner_token,generation:$generation,runtime_id:$runtime_id,session_id:"",target_completed:1023,ack_file:"/coverage/runtime-restart-ack.json",
+    '{schema:1,owner_token:$owner_token,generation:$generation,runtime_id:$runtime_id,session_binding_file:"/coverage/session-binding.json",target_completed:1023,ack_file:"/coverage/runtime-restart-ack.json",
       pending_call:{correlation_id:$correlation_id,armed_file:"/coverage/pending-call-arm.json",release_file:"/coverage/release-after-resume",started_file:"/coverage/pending-call-started.json",result_file:"/coverage/pending-call-result.json"}}'
   response="$(api_request POST "/api/portfolios/${portfolio}/run-strategy" "${token}" "$(jq -nc \
     --arg runtime "$(jq -er .runtime_id <<<"${runtime}")" \
     '{interval:"1m",start_time_ms:1735689600000,end_time_ms:1735812600000,runtime_id:$runtime}')")"
   session="$(jq -er .session_id <<<"${response}")"
-  atomic_json "${runtime_root}/runtime-restart-barrier.json" --arg session "${session}" \
-    '.session_id=$session' "${runtime_root}/runtime-restart-barrier.json"
+  create_once_json "${runtime_root}/session-binding.json" -nc --arg owner_token "${owner}" \
+    --arg generation "$(state_get .generation)" --arg runtime_id "$(jq -er .runtime_id <<<"${runtime}")" \
+    --arg session_id "${session}" \
+    '{schema:1,owner_token:$owner_token,generation:$generation,runtime_id:$runtime_id,session_id:$session_id}'
   state_update --argjson portfolio "${portfolio}" --argjson venue "${venue}" \
     --argjson strategy "${strategy}" --arg session "${session}" \
     '.normal += {portfolio_id:$portfolio,venue_id:$venue,strategy_id:$strategy,session_id:$session}'
@@ -941,6 +1025,15 @@ make_fast_control_config() {
   printf '%s\n' "${output}"
 }
 
+cleanup_step_done() {
+  jq -e --arg step "$1" '.cleanup_progress[$step] == true' \
+    "${STATE_DIR}/live-state.json" >/dev/null 2>&1
+}
+
+mark_cleanup_step() {
+  state_update --arg step "$1" '.cleanup_progress[$step]=true'
+}
+
 cleanup_live() {
   local owner token session runtime cleanup_ok=true lower source database_created=false
   local user=0 portfolio=0 venue=0 strategy=0 username
@@ -968,6 +1061,7 @@ cleanup_live() {
       cleanup_ok=false
     fi
   done < <(jq -r '[.normal,.revoke,.terminal_grace][]? | .container_name // empty' "${STATE_DIR}/live-state.json")
+  mark_cleanup_step containers
   if jq -e '.auth.user_id != null' "${STATE_DIR}/live-state.json" >/dev/null 2>&1; then
     user="$(state_get .auth.user_id)"
     username="runtime-restart-${owner:0:12}"
@@ -980,8 +1074,9 @@ cleanup_live() {
     normal_key="$(jq -r '.normal.credential_key_id // ""' "${STATE_DIR}/live-state.json")"
     revoke_key="$(jq -r '.revoke.credential_key_id // ""' "${STATE_DIR}/live-state.json")"
     terminal_key="$(jq -r '.terminal_grace.credential_key_id // ""' "${STATE_DIR}/live-state.json")"
+    cleanup_step_done order || :
     pg order -v user_id="${user}" -v session_id="${session}" -v portfolio_id="${portfolio}" \
-      -v venue_id="${venue}" >/dev/null <<'SQL' || cleanup_ok=false
+      -v venue_id="${venue}" >/dev/null <<'SQL' || return 1
 BEGIN;
 CREATE TEMP TABLE task8_owned_intents ON COMMIT DROP AS
   SELECT intent_id FROM order_intents WHERE user_id=:'user_id'::bigint;
@@ -1003,9 +1098,11 @@ DELETE FROM order_attempts WHERE intent_id IN (SELECT intent_id FROM task8_owned
 DELETE FROM order_intents WHERE intent_id IN (SELECT intent_id FROM task8_owned_intents);
 COMMIT;
 SQL
+    mark_cleanup_step order
+    cleanup_step_done portfolio || :
     pg portfolio -v user_id="${user}" -v username="${username}" -v portfolio_id="${portfolio}" \
       -v venue_id="${venue}" -v strategy_id="${strategy}" -v session_id="${session}" \
-      >/dev/null <<'SQL' || cleanup_ok=false
+      >/dev/null <<'SQL' || return 1
 BEGIN;
 CREATE TEMP TABLE task8_owned_operations ON COMMIT DROP AS
   SELECT operation_id FROM strategy_launch_operations WHERE user_id=:'user_id'::bigint;
@@ -1031,11 +1128,13 @@ DELETE FROM notification_settings WHERE user_id=:'user_id'::bigint;
 DELETE FROM users WHERE id=:'user_id'::bigint AND username=:'username';
 COMMIT;
 SQL
+    mark_cleanup_step portfolio
+    cleanup_step_done control || :
     pg control_panel -v user_id="${user}" -v portfolio_id="${portfolio}" -v strategy_id="${strategy}" \
       -v session_id="${session}" -v venue_id="${venue}" \
       -v normal_runtime="${normal_runtime}" -v revoke_runtime="${revoke_runtime}" -v terminal_runtime="${terminal_runtime}" \
       -v normal_key="${normal_key}" -v revoke_key="${revoke_key}" -v terminal_key="${terminal_key}" \
-      >/dev/null <<'SQL' || cleanup_ok=false
+      >/dev/null <<'SQL' || return 1
 BEGIN;
 CREATE TEMP TABLE task8_owned_streams ON COMMIT DROP AS
   SELECT DISTINCT stream_id FROM market_data_requests WHERE user_id=:'user_id'::bigint;
@@ -1059,18 +1158,24 @@ DELETE FROM runtime_credentials WHERE user_id=:'user_id'::bigint
   AND key_id IN (:'normal_key',:'revoke_key',:'terminal_key');
 COMMIT;
 SQL
+    mark_cleanup_step control
+  else
+    cleanup_step_done order || mark_cleanup_step order
+    cleanup_step_done portfolio || mark_cleanup_step portfolio
+    cleanup_step_done control || mark_cleanup_step control
   fi
+  cleanup_step_done market || :
   if jq -e '.market != null' "${STATE_DIR}/live-state.json" >/dev/null 2>&1; then
     source="runtime-channel-restart:${owner}"
     lower="$(printf 'RCR%sUSDT' "${owner:0:12}" | tr '[:upper:]' '[:lower:]')"
     database_created="$(state_get .market.database_created)"
     pg control_panel -v source="${source}" -v symbol="$(printf '%s' "${lower}" | tr '[:lower:]' '[:upper:]')" \
-      >/dev/null <<'SQL' || cleanup_ok=false
+      >/dev/null <<'SQL' || return 1
 DELETE FROM market_data_coverage_segments WHERE source=:'source' AND symbol=:'symbol';
 SQL
     if database_exists binance_2025; then
       pg binance_2025 -v kline_table="futures_klines_${lower}_1m" -v funding_table="futures_funding_rates_${lower}" \
-        >/dev/null <<'SQL' || cleanup_ok=false
+        >/dev/null <<'SQL' || return 1
 DROP TABLE IF EXISTS :"kline_table";
 DROP TABLE IF EXISTS :"funding_table";
 SQL
@@ -1081,10 +1186,13 @@ SELECT count(*) FROM pg_database WHERE datname='binance_2025'
 SQL
 )"
       if [[ "${database_created}" == "true" && "${owned_database_count}" == "1" ]]; then
-        pg postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='binance_2025' AND pid <> pg_backend_pid()" >/dev/null || cleanup_ok=false
-        pg postgres -c "DROP DATABASE binance_2025" >/dev/null || cleanup_ok=false
+        pg postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='binance_2025' AND pid <> pg_backend_pid()" >/dev/null || return 1
+        pg postgres -c "DROP DATABASE binance_2025" >/dev/null || return 1
       fi
     fi
+    mark_cleanup_step market
+  else
+    mark_cleanup_step market
   fi
   rm -f -- "${STATE_DIR}"/credential-*.json "${STATE_DIR}"/api.*
   [[ -z "$(docker ps -aq --filter "label=hushine.acceptance.runtime-restart=${owner}")" ]] || cleanup_ok=false
@@ -1156,9 +1264,14 @@ live_action() {
       hold="${STATE_DIR}/kafka-proxy/hold.json"
       armed_file="${root}/pending-call-arm.json"
       started_file="${root}/pending-call-started.json"; result_file="${root}/pending-call-result.json"
-      rm -f -- "${armed_file}" "${started_file}" "${result_file}" "${STATE_DIR}/kafka-proxy/produce-observation.json" "${STATE_DIR}/kafka-proxy/response-held.json"
+      [[ ! -e "${armed_file}" && ! -e "${started_file}" && ! -e "${result_file}" ]] \
+        || die "pending-call fixture facts already exist"
+      rm -f -- "${STATE_DIR}/kafka-proxy/produce-observation.json" "${STATE_DIR}/kafka-proxy/response-held.json"
       atomic_json "${hold}" -nc --arg correlation_id "${correlation}" '{schema:1,correlation_id:$correlation_id}'
-      atomic_json "${armed_file}" -nc --arg correlation_id "${correlation}" '{schema:1,correlation_id:$correlation_id}'
+      create_once_json "${armed_file}" -nc --arg correlation_id "${correlation}" --arg owner_token "${owner}" \
+        --arg generation "$(state_get .generation)" --arg runtime_id "$(state_get .normal.runtime_id)" \
+        --arg session_id "$(state_get .normal.session_id)" \
+        '{schema:1,correlation_id:$correlation_id,owner_token:$owner_token,generation:$generation,runtime_id:$runtime_id,session_id:$session_id}'
       wait_for 15 "Worker pending platform call start" json_file_matches "${started_file}" ".correlation_id == \"${correlation}\" and .method == \"notification.Publish\""
       observation="${STATE_DIR}/kafka-proxy/produce-observation.json"; held_file="${STATE_DIR}/kafka-proxy/response-held.json"
       wait_for 15 "correlated Kafka Produce request" json_file_matches "${observation}" ".correlation_id == \"${correlation}\" and .produce_request_count == 1"
@@ -1231,17 +1344,27 @@ SQL
           admission_failures:$raw.admission_failures}'
       ;;
     observe-pending-after-resume)
+      local observation window proxy_count broker_count
       correlation="$(state_get .pending_rpc.correlation_id)"
-      kafka_notification_count_stays_one "${correlation}" \
+      observation="${STATE_DIR}/kafka-proxy/produce-observation.json"
+      window="$(kafka_notification_counts_stay_one "${correlation}" "${observation}")" \
         || die "pending platform call was replayed after RESUME"
+      proxy_count="$(jq -er .produce_request_count "${observation}")"
+      broker_count="$(kafka_notification_count "${correlation}")"
       jq -nc --arg correlation_id "${correlation}" \
-        --argjson platform_execution_count "$(kafka_notification_count "${correlation}")" \
+        --argjson platform_execution_count "${broker_count}" --argjson proxy_produce_count "${proxy_count}" \
+        --argjson observation_window_seconds "${window}" \
         --argjson caller_completion_count "$(jq -er .caller_completion_count "$(state_get .normal.runtime_root)/pending-call-result.json")" \
-        '{correlation_id:$correlation_id,platform_execution_count:$platform_execution_count,caller_completion_count:$caller_completion_count}'
+        '{correlation_id:$correlation_id,platform_execution_count:$platform_execution_count,
+          proxy_produce_count:$proxy_produce_count,caller_completion_count:$caller_completion_count,
+          observation_window_seconds:$observation_window_seconds}'
       ;;
     advance-data)
       local release="$(state_get .normal.runtime_root)/release-after-resume"
-      atomic_json "${release}" -nc '{schema:1,release_after_completed:1023}'
+      create_once_json "${release}" -nc --arg owner_token "$(state_get .owner_token)" \
+        --arg generation "$(state_get .generation)" --arg runtime_id "$(state_get .normal.runtime_id)" \
+        --arg session_id "$(state_get .normal.session_id)" \
+        '{schema:1,owner_token:$owner_token,generation:$generation,runtime_id:$runtime_id,session_id:$session_id,release_after_completed:1023}'
       wait_for 60 "worker barrier at callback 1025" barrier_at 1025
       local session="$(state_get .normal.session_id)" venue="$(state_get .normal.venue_id)"
       wait_for 30 "one funding income wallet effect" income_count_is_one "${session}" "${venue}"
@@ -1344,12 +1467,16 @@ derive_pending_evidence() {
     and $failed.proxy_produce_count == 1 and $failed.caller_completion_count == 1
     and $failed.worker_pid == .worker_pid
     and $after.correlation_id == .correlation_id
-    and $after.platform_execution_count == 1 and $after.caller_completion_count == 1
+    and $after.platform_execution_count == 1 and $after.proxy_produce_count == 1
+    and $after.caller_completion_count == 1 and $after.observation_window_seconds >= 7
   ' <<<"${started}" >/dev/null || die "raw pending RuntimeChannel call observations are inconsistent or replayed"
   jq -nc --argjson started "${started}" --argjson failed "${failed}" --argjson after "${after_resume}" '{
     status:"failed",grpc_code:$failed.caller_grpc_code,elapsed_ms:$failed.caller_elapsed_ms,
     replay_count:($after.platform_execution_count - 1),correlation_id:$started.correlation_id,
-    platform_execution_count:$after.platform_execution_count,observation_source:"worker+kafka"
+    platform_execution_count:$after.platform_execution_count,
+    proxy_produce_count:$after.proxy_produce_count,
+    observation_window_seconds:$after.observation_window_seconds,
+    observation_source:"worker+kafka"
   }'
 }
 
@@ -1424,10 +1551,10 @@ cleanup_once() {
   [[ "${CLEANED_UP}" == "false" ]] || return 0
   CLEANED_UP=true
   validate_cleanup_manifest
-  validate_cleanup_ownership
   restored="$(run_action restore-control-panel)" || die "control-panel baseline restoration failed"
   jq -e '.baseline_restored == true' <<<"${restored}" >/dev/null \
     || die "control-panel baseline restoration evidence is invalid"
+  validate_cleanup_ownership
   run_action cleanup
 }
 

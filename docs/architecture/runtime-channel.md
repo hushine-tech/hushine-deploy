@@ -31,7 +31,11 @@ control-panel-service migration 修复 schema drift，不能由验收脚本改�
 pending-call 证据不是 handler 侧合成值：同一 Python Worker 发起带唯一 correlation 的
 `notification.Publish`，harness 的 Kafka frame barrier 只扣住对应 Produce response；
 broker topic、barrier 和 Worker caller 文件共同证明请求已执行一次、断线以 typed
-`Unavailable` 返回，而且 RESUME 后没有第二次 Produce。RESUME 本身由 credential 已消费、
+`Unavailable` 返回，而且 RESUME 后用超过最大 5 秒 reconnect backoff 的 8 秒窗口同时确认
+proxy Produce 与 broker event 都仍为一次。proxy 按 connection/correlation 跟踪 Kafka API
+版本，并把 Sarama Metadata v7 返回的 broker 地址重写回自身，producer 不能绕过 barrier。
+`scripts/runtime-channel-kafka-proxy-integration.test.sh` 用真实 IBM/sarama SyncProducer 和本地
+Kafka 验证 bootstrap、Metadata、durable Produce、hold 与 release。RESUME 本身由 credential 已消费、
 单行 lease 的 `issued_at` 不变/`updated_at` 前进、connection owner 轮换和无 admission
 failure 的数据库事实推导。Funding 验证比较 Income 的精确 applied amount 与三项 canonical
 wallet delta，并要求 durable cursor 等于同一 Income ID。
@@ -40,6 +44,12 @@ wallet delta，并要求 durable cursor 等于同一 Income ID。
 所有 ID/label/path/market 派生值必须先验证，再用数据库关系确认 fixture ownership。清理仅
 执行显式、依赖顺序固定的 owner-scoped 删除；诊断只保留 PID/status/exit/image 和验收 owner
 label，不保留 Docker env、credential、TLS 或 private key。
+
+普通执行要求全新或空的 `--state-dir`；目录中已有任何文件时会在 proxy、服务、SQL、API 或
+Docker 变更前拒绝，并提示仅使用 `--cleanup-only`。credential 发出后，manifest 在启动容器前
+持久化 provisioning key/runtime/container/root；失败清理先从可信 baseline 恢复 control-panel，
+再校验仍存在的 artifact ownership。order/portfolio/control/market 清理进度逐库持久化，重复
+`--cleanup-only` 可以从已提交步骤继续；缺失 artifact 视为已清理，仍存在但关系不匹配则 fail closed。
 
 ## Income delivery
 

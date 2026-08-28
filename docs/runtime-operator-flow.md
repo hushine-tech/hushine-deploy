@@ -178,7 +178,20 @@ terminal grace；两者都必须无 reconnect storm 并安全停止。清理以�
 pending RPC 是 Worker 发出的真实 `notification.Publish`。验收临时把 control-panel 的
 notification Kafka broker 指到私有 frame-aware proxy，只扣住该 correlation 的 Produce
 response；Worker caller 的 typed error、proxy Produce 计数和 `notification.events` 中的唯一
-event 都必须一致。结束时无论在哪个断言失败，脚本都先恢复运行前的 control-panel config/
+event 都必须一致。proxy 会把 Sarama Metadata broker endpoint 重写回自身，并在 RESUME 后用
+8 秒窗口同时检查 proxy/broker 都没有第二次发送。运行 live gate 前可单独执行真实 Kafka
+client 边界：
+
+```bash
+scripts/runtime-channel-kafka-proxy-integration.test.sh
+```
+
+指定的 `--state-dir` 必须为新建或空目录；发现旧 `live-state.json` 或其他内容时普通执行不会
+恢复，且在任何外部 mutation 前退出。此时只可先审阅 manifest，再显式运行同一路径的
+`--cleanup-only`。credential、容器启动和 readiness 的 provisioning 阶段都保存精确 owner
+身份；分库清理可重复继续，但任何仍存在且 ownership 不匹配的 artifact 都会停止清理。
+
+结束时无论在哪个断言失败，脚本都先恢复运行前的 control-panel config/
 readiness，再删除 fixture。`--cleanup-only` 也会先验证 mode-0600 manifest、owner 派生字段和
 跨库 ownership；manifest 被编辑、换 owner/ID/source/symbol 或权限变宽时不执行任何清理。
 

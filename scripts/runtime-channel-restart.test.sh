@@ -34,12 +34,24 @@ case "${action}" in
       control_panel_stopped:false,fast_control:false,
       auth:{token:"contract.token.value",user_id:42},
       market:{symbol:"RCR0123456789ABUSDT",lower:"rcr0123456789abusdt",source:"runtime-channel-restart:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",database_created:false},
-      normal:{runtime_id:"selfhosted-abcdefghijklmnopqrstuv",credential_key_id:"abcdefghijklmnopqrstuv",container_name:"hushine-runtime-restart-normal-0123456789",runtime_root:"CONTRACT_RUNTIME_ROOT",portfolio_id:101,venue_id:201,strategy_id:301,session_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      normal:{provisioning:"ready",runtime_id:"selfhosted-abcdefghijklmnopqrstuv",credential_key_id:"abcdefghijklmnopqrstuv",container_name:"hushine-runtime-restart-normal-0123456789",runtime_root:"CONTRACT_RUNTIME_ROOT",portfolio_id:101,venue_id:201,strategy_id:301,session_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
     }' | sed "s#CONTRACT_RUNTIME_ROOT#${RUNTIME_RESTART_CONTRACT_STATE}/runtimes/normal#" >"${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
     chmod 0600 "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
     jq -nc '{ok:true}'
     ;;
   create-normal)
+    if [[ -n "${RUNTIME_RESTART_DRIVER_PARTIAL_AT:-}" ]]; then
+      provisioning=credential_issued
+      [[ "${RUNTIME_RESTART_DRIVER_PARTIAL_AT}" == "credential-issued" ]] \
+        || provisioning=container_created
+      temporary="${RUNTIME_RESTART_CONTRACT_STATE}/partial.tmp"
+      jq --arg provisioning "${provisioning}" \
+        '.normal={provisioning:$provisioning,runtime_id:"selfhosted-abcdefghijklmnopqrstuv",credential_key_id:"abcdefghijklmnopqrstuv",container_name:"hushine-runtime-restart-normal-0123456789",runtime_root:(.normal.runtime_root)}' \
+        "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" >"${temporary}"
+      chmod 0600 "${temporary}"
+      mv "${temporary}" "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
+      exit 97
+    fi
     jq -nc '{owner_token:"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",runtime_id:"selfhosted-abcdefghijklmnopqrstuv",session_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",credential_key_id:"abcdefghijklmnopqrstuv",container_name:"hushine-runtime-restart-normal-0123456789"}'
     ;;
   snapshot-before)
@@ -73,7 +85,10 @@ case "${action}" in
   observe-pending-after-resume)
     count=1
     [[ "${scenario}" != "replay" ]] || count=2
-    jq -nc --argjson count "${count}" '{correlation_id:"pending-contract",platform_execution_count:$count,caller_completion_count:1}'
+    window=8
+    [[ "${scenario}" != "short_horizon" ]] || window=6
+    jq -nc --argjson count "${count}" --argjson window "${window}" \
+      '{correlation_id:"pending-contract",platform_execution_count:$count,proxy_produce_count:$count,caller_completion_count:1,observation_window_seconds:$window}'
     ;;
   advance-data)
     jq -nc '{advanced:true}'
@@ -110,12 +125,13 @@ case "${action}" in
     jq -nc --slurpfile states "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" '($states[0]) as $state | {
       relationships_valid:(
         $state.auth.user_id == 42
-        and $state.normal.portfolio_id == 101
-        and $state.normal.venue_id == 201
-        and $state.normal.strategy_id == 301
-        and $state.normal.session_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         and $state.normal.runtime_id == "selfhosted-abcdefghijklmnopqrstuv"
         and $state.normal.credential_key_id == "abcdefghijklmnopqrstuv"
+        and (($state.normal.provisioning // "ready") != "ready" or (
+          $state.normal.portfolio_id == 101
+          and $state.normal.venue_id == 201
+          and $state.normal.strategy_id == 301
+          and $state.normal.session_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
       ),
       container_labels_valid:true,
       market_ownership_valid:true
@@ -127,6 +143,17 @@ case "${action}" in
     ;;
   cleanup)
     [[ "${scenario}" != "cleanup_failure" ]] || exit 95
+    for step in order portfolio control market; do
+      if ! jq -e --arg step "${step}" '.cleanup_progress[$step] == true' \
+          "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" >/dev/null; then
+        temporary="${RUNTIME_RESTART_CONTRACT_STATE}/cleanup.tmp"
+        jq --arg step "${step}" '.cleanup_progress[$step]=true' \
+          "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" >"${temporary}"
+        chmod 0600 "${temporary}"
+        mv "${temporary}" "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
+        [[ "${scenario}" != "cleanup_after_${step}" ]] || exit 95
+      fi
+    done
     jq -nc '{ownership_validated:true,owned_only:true,artifacts_removed:true}'
     ;;
   *)
@@ -138,6 +165,12 @@ DRIVER
 chmod 0700 "${FIXTURE}/driver"
 
 [[ -x "${HARNESS}" ]] || fail "missing executable harness: ${HARNESS}"
+[[ -x "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.test.sh" ]] \
+  || fail "missing executable real Kafka proxy integration"
+grep -Fq 'github.com/IBM/sarama' "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.go" \
+  || fail "Kafka proxy integration does not use the production Sarama client"
+grep -Fq 'sarama.NewSyncProducer' "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-proxy-integration.go" \
+  || fail "Kafka proxy integration does not exercise SyncProducer"
 
 for live_contract in \
   'runtime_channel_leases' \
@@ -164,6 +197,29 @@ grep -Fq 'make -C "${SOURCE_ROOT}/control-panel-service" stop' "${HARNESS}" \
 if grep -Eq 'local-infra-reset|docker compose[^#]*(down|rm)|down[[:space:]]+-v' "${HARNESS}"; then
   fail "live harness contains destructive shared-infrastructure cleanup"
 fi
+
+for existing_case in valid-looking tampered; do
+  existing_state="${FIXTURE}/existing-${existing_case}"
+  mkdir -m 0700 "${existing_state}"
+  if [[ "${existing_case}" == "valid-looking" ]]; then
+    jq -nc '{schema:2,mode:"contract",owner_token:("a" * 64)}' >"${existing_state}/live-state.json"
+  else
+    printf '%s\n' '{"schema":2,"owner_token":"x\u0027;DROP TABLE users;--"' >"${existing_state}/live-state.json"
+  fi
+  chmod 0600 "${existing_state}/live-state.json"
+  : >"${existing_state}.log"
+  if RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
+      RUNTIME_RESTART_DRIVER_LOG="${existing_state}.log" \
+      HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
+      bash "${HARNESS}" --state-dir "${existing_state}" \
+        >"${existing_state}.stdout" 2>"${existing_state}.stderr"; then
+    fail "normal execution resumed a pre-existing ${existing_case} state"
+  fi
+  [[ ! -s "${existing_state}.log" ]] \
+    || fail "pre-existing ${existing_case} state executed a driver mutation"
+  grep -Fq -- '--cleanup-only' "${existing_state}.stderr" \
+    || fail "pre-existing ${existing_case} state did not direct cleanup-only"
+done
 
 evidence="${FIXTURE}/evidence.json"
 mkdir -m 0700 "${FIXTURE}/state"
@@ -204,6 +260,8 @@ jq -e '
   and .normal.pending_rpc.elapsed_ms <= 2000
   and .normal.pending_rpc.replay_count == 0
   and .normal.pending_rpc.platform_execution_count == 1
+  and .normal.pending_rpc.proxy_produce_count == 1
+  and .normal.pending_rpc.observation_window_seconds >= 7
   and .normal.pending_rpc.observation_source == "worker+kafka"
   and .normal.resume.first_frame == "RESUME"
   and .normal.resume.agent_ready_http == 200
@@ -252,8 +310,8 @@ assert-revoke-terminal
 create-terminal-grace
 exceed-terminal-grace
 assert-terminal-resume-rejected
-validate-cleanup-ownership
 restore-control-panel
+validate-cleanup-ownership
 cleanup
 ACTIONS
 cmp -s "${expected_actions}" "${FIXTURE}/driver.log" \
@@ -276,8 +334,8 @@ fi
 cat >"${FIXTURE}/failure-actions" <<'ACTIONS'
 preflight
 create-normal
-validate-cleanup-ownership
 restore-control-panel
+validate-cleanup-ownership
 cleanup
 ACTIONS
 cmp -s "${FIXTURE}/failure-actions" "${FIXTURE}/driver.log" \
@@ -306,6 +364,66 @@ run_service_recovery_failure snapshot-disconnected
 run_service_recovery_failure start-control-panel
 run_service_recovery_failure assert-terminal-resume-rejected
 
+for partial_at in credential-issued container-created readiness-timeout; do
+  partial_state="${FIXTURE}/partial-${partial_at}"
+  mkdir -m 0700 "${partial_state}"
+  : >"${partial_state}.log"
+  if RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
+      RUNTIME_RESTART_DRIVER_LOG="${partial_state}.log" \
+      RUNTIME_RESTART_DRIVER_PARTIAL_AT="${partial_at}" \
+      HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
+      bash "${HARNESS}" --state-dir "${partial_state}" \
+        >"${partial_state}.stdout" 2>"${partial_state}.stderr"; then
+    fail "partial provisioning ${partial_at} unexpectedly passed"
+  fi
+  expected_provisioning=container_created
+  [[ "${partial_at}" == "credential-issued" ]] && expected_provisioning=credential_issued
+  jq -e --arg expected "${expected_provisioning}" '
+    .normal.provisioning == $expected
+    and .normal.runtime_id == "selfhosted-abcdefghijklmnopqrstuv"
+    and .normal.credential_key_id == "abcdefghijklmnopqrstuv"
+    and .normal.container_name == "hushine-runtime-restart-normal-0123456789"
+    and (.normal.runtime_root | endswith("/runtimes/normal"))
+  ' "${partial_state}/live-state.json" >/dev/null \
+    || fail "partial provisioning ${partial_at} did not persist exact ownership"
+  cat >"${partial_state}.expected" <<'ACTIONS'
+preflight
+create-normal
+restore-control-panel
+validate-cleanup-ownership
+cleanup
+ACTIONS
+  cmp -s "${partial_state}.expected" "${partial_state}.log" \
+    || fail "partial provisioning ${partial_at} did not clean exactly"
+done
+
+for cleanup_step in order portfolio control market; do
+  cleanup_state="${FIXTURE}/cleanup-resume-${cleanup_step}"
+  mkdir -m 0700 "${cleanup_state}"
+  : >"${cleanup_state}.log"
+  if RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
+      RUNTIME_RESTART_DRIVER_LOG="${cleanup_state}.log" \
+      RUNTIME_RESTART_DRIVER_SCENARIO="cleanup_after_${cleanup_step}" \
+      HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
+      bash "${HARNESS}" --state-dir "${cleanup_state}" \
+        >"${cleanup_state}.stdout" 2>"${cleanup_state}.stderr"; then
+    fail "injected cleanup-after-${cleanup_step} failure unexpectedly passed"
+  fi
+  RUNTIME_RESTART_DRIVER="${FIXTURE}/driver" \
+    RUNTIME_RESTART_DRIVER_LOG="${cleanup_state}.log" \
+    RUNTIME_RESTART_DRIVER_SCENARIO="cleanup_after_${cleanup_step}" \
+    HUSHINE_RUNTIME_RESTART_CONTRACT=1 \
+    bash "${HARNESS}" --state-dir "${cleanup_state}" --cleanup-only \
+      >"${cleanup_state}.cleanup.stdout" 2>"${cleanup_state}.cleanup.stderr" \
+    || fail "cleanup-only did not resume after ${cleanup_step} cleanup failure"
+  [[ "$(tail -n 3 "${cleanup_state}.log" | tr '\n' ' ')" == \
+      "restore-control-panel validate-cleanup-ownership cleanup " ]] \
+    || fail "cleanup-only did not restore before validate/cleanup after ${cleanup_step}"
+  jq -e '.cleanup_progress == {order:true,portfolio:true,control:true,market:true}' \
+    "${cleanup_state}/live-state.json" >/dev/null \
+    || fail "cleanup-only did not complete all DB progress after ${cleanup_step}"
+done
+
 run_false_positive() {
   local scenario="$1" state
   state="${FIXTURE}/false-${scenario}"
@@ -321,7 +439,7 @@ run_false_positive() {
   fi
 }
 
-for scenario in replay hello_fallback multiple_leases wallet_double_apply cleanup_failure restore_failure; do
+for scenario in replay short_horizon hello_fallback multiple_leases wallet_double_apply cleanup_failure restore_failure; do
   run_false_positive "${scenario}"
 done
 
@@ -424,10 +542,35 @@ ast.parse(generated)
 assert "threading.Thread" not in generated
 assert "self._run_acceptance_pending_call(pending)" in generated
 assert 'armed_file' in generated and 'release_file' in generated
+assert 'session_binding_file' in generated
+assert 'self._read_private_json(binding_path)' in generated
+assert 'session binding ownership changed' in generated
+assert 'pending_call arm ownership changed' in generated
+assert 'release ownership changed' in generated
 pending_phase = harness.split("    start-pending-platform-rpc)", 1)[1].split("    stop-control-panel)", 1)[0]
 advance_phase = harness.split("    advance-data)", 1)[1].split("    create-revoke)", 1)[0]
+fixture_phase = harness.split("create_normal_fixture() {", 1)[1].split("\nsession_status() {", 1)[0]
+runtime_phase = harness.split("start_owned_runtime() {", 1)[1].split("\ncreate_strategy_source() {", 1)[0]
+cleanup_phase = harness.split("cleanup_live() {", 1)[1].split("\nlive_action() {", 1)[0]
 assert "runtime-restart-barrier.json" not in pending_phase
 assert "runtime-restart-barrier.json" not in advance_phase
+assert 'create_once_json "${armed_file}"' in pending_phase
+assert 'create_once_json "${release}"' in advance_phase
+assert '--arg owner_token "${owner}"' in pending_phase
+assert '--arg owner_token "$(state_get .owner_token)"' in advance_phase
+assert fixture_phase.count('create_once_json "${runtime_root}/runtime-restart-barrier.json"') == 1
+assert 'create_once_json "${runtime_root}/session-binding.json"' in fixture_phase
+assert '.session_id=$session' not in fixture_phase
+credential_checkpoint = runtime_phase.index('provisioning:"credential_issued"')
+docker_run = runtime_phase.index('docker run')
+container_checkpoint = runtime_phase.index('--arg provisioning "container_created"')
+readiness_wait = runtime_phase.index('agent readiness')
+ready_checkpoint = runtime_phase.index('--arg provisioning "ready"')
+assert credential_checkpoint < docker_run < container_checkpoint < readiness_wait < ready_checkpoint
+for cleanup_step in ("order", "portfolio", "control", "market"):
+    assert f'cleanup_step_done {cleanup_step}' in cleanup_phase
+    assert f'mark_cleanup_step {cleanup_step}' in cleanup_phase
+    assert f'if ! cleanup_step_done {cleanup_step}' not in cleanup_phase
 PY
 
 python3 - "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-hold-proxy.py" "${FIXTURE}/proxy-test" <<'PY'
@@ -449,34 +592,71 @@ control.mkdir(mode=0o700)
 correlation = "rpc-contract-framing"
 module.atomic_json(control / "hold.json", {"schema": 1, "correlation_id": correlation})
 proxy = module.HoldProxy("127.0.0.1", 9092, control)
-client_peer, proxy_client = socket.socketpair()
-proxy_broker, broker_peer = socket.socketpair()
-threading.Thread(target=proxy.client_to_broker, args=(proxy_client, proxy_broker), daemon=True).start()
-request_body = struct.pack(">hhi", 0, 9, 73) + correlation.encode()
-request = struct.pack(">i", len(request_body)) + request_body
-client_peer.sendall(request)
-assert module.recv_frame(broker_peer) == request
+proxy.set_advertised_endpoint("127.0.0.1", 19092)
+produce_client, produce_proxy = socket.socketpair()
+produce_upstream, produce_broker = socket.socketpair()
+metadata_client, metadata_proxy = socket.socketpair()
+metadata_upstream, metadata_broker = socket.socketpair()
+threading.Thread(target=proxy.client_to_broker, args=(1, produce_proxy, produce_upstream), daemon=True).start()
+threading.Thread(target=proxy.broker_to_client, args=(1, produce_upstream, produce_proxy), daemon=True).start()
+threading.Thread(target=proxy.client_to_broker, args=(2, metadata_proxy, metadata_upstream), daemon=True).start()
+threading.Thread(target=proxy.broker_to_client, args=(2, metadata_upstream, metadata_proxy), daemon=True).start()
+
+# Two connections deliberately reuse correlation 73. Only the Produce response
+# on connection 1 may be held; Metadata on connection 2 must be routed back to
+# the proxy endpoint so a real Sarama producer cannot bypass it.
+produce_body = struct.pack(">hhi", 0, 3, 73) + struct.pack(">h", 6) + b"sarama" + correlation.encode()
+produce_request = struct.pack(">i", len(produce_body)) + produce_body
+produce_client.sendall(produce_request)
+assert module.recv_frame(produce_broker) == produce_request
 deadline = time.monotonic() + 2
 while not (control / "produce-observation.json").exists() and time.monotonic() < deadline:
     time.sleep(0.01)
 raw = json.loads((control / "produce-observation.json").read_text())
 assert raw["produce_request_count"] == 1 and raw["correlation_id"] == correlation
-threading.Thread(target=proxy.broker_to_client, args=(proxy_broker, proxy_client), daemon=True).start()
-response_body = struct.pack(">i", 73) + b"held-response"
-response = struct.pack(">i", len(response_body)) + response_body
-broker_peer.sendall(response)
+
+metadata_body = struct.pack(">hhi", 3, 7, 73) + struct.pack(">h", 6) + b"sarama" + struct.pack(">i", 0)
+metadata_request = struct.pack(">i", len(metadata_body)) + metadata_body
+metadata_client.sendall(metadata_request)
+assert module.recv_frame(metadata_broker) == metadata_request
+metadata_response_body = (
+    struct.pack(">iii", 73, 0, 1)
+    + struct.pack(">i", 1)
+    + struct.pack(">h", 5) + b"kafka"
+    + struct.pack(">i", 9092)
+    + struct.pack(">h", -1)
+    + struct.pack(">h", -1)
+    + struct.pack(">i", 1)
+    + struct.pack(">i", 0)
+)
+metadata_response = struct.pack(">i", len(metadata_response_body)) + metadata_response_body
+metadata_broker.sendall(metadata_response)
+rewritten = module.recv_frame(metadata_client)
+assert rewritten is not None
+body = rewritten[4:]
+offset = 4 + 4 + 4 + 4
+(host_size,) = struct.unpack(">h", body[offset:offset + 2])
+offset += 2
+assert body[offset:offset + host_size] == b"127.0.0.1"
+offset += host_size
+(advertised_port,) = struct.unpack(">i", body[offset:offset + 4])
+assert advertised_port == 19092
+
+produce_response_body = struct.pack(">i", 73) + b"held-response"
+produce_response = struct.pack(">i", len(produce_response_body)) + produce_response_body
+produce_broker.sendall(produce_response)
 deadline = time.monotonic() + 2
 while not (control / "response-held.json").exists() and time.monotonic() < deadline:
     time.sleep(0.01)
 assert (control / "response-held.json").exists()
-client_peer.settimeout(0.1)
+produce_client.settimeout(0.1)
 try:
-    client_peer.recv(1)
+    produce_client.recv(1)
     raise AssertionError("matching Produce response was not held")
 except TimeoutError:
     pass
 (control / "hold.json").unlink()
-client_peer.settimeout(2)
-assert module.recv_frame(client_peer) == response
+produce_client.settimeout(2)
+assert module.recv_frame(produce_client) == produce_response
 PY
 echo "runtime-channel restart contract: PASS"
