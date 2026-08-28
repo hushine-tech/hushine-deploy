@@ -140,4 +140,14 @@ if TRADING_MATRIX_CONTRACT_TEST_ONLY=1 \
 fi
 rm -f -- "${illegal_report}"
 
+escaped_report="${TMP}/../hushine-trading-matrix-escaped-$$.md"
+if TRADING_MATRIX_CONTRACT_TEST_ONLY=1 \
+  TRADING_MATRIX_EVENTS_FILE="${complete}" \
+  TRADING_MATRIX_REPORT="${escaped_report}" \
+  "${SCRIPT}" >/dev/null 2>&1; then
+  rm -f -- "${escaped_report}"
+  fail "path traversal escaped the private contract directory"
+fi
+rm -f -- "${escaped_report}"
+
 echo "trading mode matrix contract: PASS"

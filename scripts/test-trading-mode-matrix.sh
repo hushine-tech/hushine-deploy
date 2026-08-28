@@ -179,8 +179,22 @@ run_group() {
 }
 
 if [[ -n "${TRADING_MATRIX_EVENTS_FILE:-}" ]]; then
-  contract_prefix="${TMPDIR:-/tmp}/hushine-trading-matrix-contract."
-  if [[ "${TRADING_MATRIX_CONTRACT_TEST_ONLY:-}" != "1" || "${REPORT}" != "${contract_prefix}"* ]]; then
+  if [[ "${TRADING_MATRIX_CONTRACT_TEST_ONLY:-}" != "1" ]] || ! python3 - "${TMPDIR:-/tmp}" "${REPORT}" "${TRADING_MATRIX_EVENTS_FILE}" <<'PY'
+from pathlib import Path
+import sys
+
+tmp_root = Path(sys.argv[1]).resolve()
+report = Path(sys.argv[2]).resolve()
+events = Path(sys.argv[3]).resolve()
+private_dir = report.parent
+valid = (
+    private_dir.parent == tmp_root
+    and private_dir.name.startswith("hushine-trading-matrix-contract.")
+    and events.parent == private_dir
+)
+raise SystemExit(0 if valid else 1)
+PY
+  then
     echo "synthetic matrix evidence is restricted to the contract test directory" >&2
     exit 2
   fi
