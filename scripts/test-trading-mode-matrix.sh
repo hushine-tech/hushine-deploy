@@ -24,7 +24,7 @@ FUT-FOK-FULL	Futures LIMIT FOK, complete liquidity	FILLED atomically with one ex
 FUT-FOK-ZERO	Futures LIMIT FOK, insufficient liquidity	EXPIRED with zero persisted fill	go:TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/futures_FOK_zero_fill
 FUT-REDUCE-CLOSE	Futures SELL reduce-only close	Intent, attempt, exchange order and fill retain reduce-only close facts	go:TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/futures_reduce-only_close
 FUT-REJECT	Futures business rejection	Failed attempt persists; no exchange order, fill or lifecycle event	go:TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/futures_business_rejection
-FUT-GTC-DELAYED	Futures GTC REST NEW, websocket partial fill, ingestor, then REST recovery	Open order transitions through exact 0.2 partial to exact 0.5 final fill without duplicate quantity	go:TestBinanceFactoryPlacesOrderAndReceivesMockWSPartialFill;go:TestUserDataIngestorWritesPartialFillEvent;go:TestScannerRestRecoveryCompletesPartialOrderWithMockBinance
+FUT-GTC-DELAYED	Futures GTC REST NEW, websocket partial fill, ingestor, then REST recovery	Open order transitions through exact 0.2 partial to exact 0.5 final fill without duplicate quantity	go:TestBinanceDelayedGTCWebsocketThenRESTRecoveryIsExactlyOnceInRepository
 FUT-DUPLICATE	Repeated exchange trade report	Canonical trade identity is idempotent at lifecycle storage boundary	go:TestSaveLifecycleEventDeduplicatesExchangeTrade
 MODE-ONEWAY-CROSS	One-way Cross open, Funding, mark and reduce-only close	BOTH leg initial margin, PnL and wallet/margin/available balances reconcile	pytest:tests/test_backtest_funding_wallet.py::test_futures_position_margin_wallet_matrix_tracks_each_leg_and_balance[one-way-cross]
 MODE-ONEWAY-ISOLATED	One-way Isolated open, Funding, mark and reduce-only close	BOTH leg isolated Funding and all wallet balances reconcile	pytest:tests/test_backtest_funding_wallet.py::test_futures_position_margin_wallet_matrix_tracks_each_leg_and_balance[one-way-isolated]
@@ -74,7 +74,7 @@ actual_for_cell() {
     FUT-REJECT)
       echo "status=FAILED; intents=1 attempts=1 orders=0 fills=0 lifecycle=0" ;;
     FUT-GTC-DELAYED)
-      echo "REST status=NEW; websocket partial=0.2 persisted by ingestor; REST recovery adds 0.2+0.3 and terminal executed=0.5" ;;
+      echo "REST status=NEW; websocket trade 7001=0.2; REST duplicate 7001 ignored, trade 7002=0.3 and terminal executed=0.5" ;;
     FUT-DUPLICATE)
       echo "first_event_id=second_event_id; persisted rows=1; original payload unchanged" ;;
     MODE-ONEWAY-CROSS)
@@ -206,9 +206,9 @@ else
     "SPOT-GTC-FULL SPOT-GTC-PARTIAL SPOT-IOC-PARTIAL SPOT-FOK-FULL SPOT-FOK-ZERO FUT-GTC-FULL FUT-GTC-PARTIAL FUT-IOC-PARTIAL FUT-FOK-FULL FUT-FOK-ZERO FUT-REDUCE-CLOSE FUT-REJECT" \
     $'--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/spot_GTC_full\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/spot_GTC_partial_remains_open\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/spot_IOC_partial_expires_remainder\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/spot_FOK_full\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/spot_FOK_zero_fill\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/futures_GTC_full\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/futures_GTC_partial_remains_open\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/futures_IOC_partial_expires_remainder\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/futures_FOK_full\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/futures_FOK_zero_fill\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/futures_reduce-only_close\n--- PASS: TestTradingModeMatrixPersistsEveryBinanceOrderOutcome/futures_business_rejection'
   run_group core-delayed-gtc "${WORKSPACE}/core-service" \
-    "go test -v ./internal/exchange/binance ./internal/order/lifecycle -run '^(TestBinanceFactoryPlacesOrderAndReceivesMockWSPartialFill|TestUserDataIngestorWritesPartialFillEvent|TestScannerRestRecoveryCompletesPartialOrderWithMockBinance)$' -count=1" \
+    "env ORDER_DATABASE_HOST=127.0.0.1 ORDER_DATABASE_PORT=5432 ORDER_DATABASE_USER=postgres ORDER_DATABASE_PASSWORD=postgres ORDER_DATABASE_DBNAME=order ORDER_DATABASE_SSLMODE=disable go test -v ./internal/order/repository -run '^TestBinanceDelayedGTCWebsocketThenRESTRecoveryIsExactlyOnceInRepository$' -count=1" \
     core-binance-mock/delayed-GTC-final "FUT-GTC-DELAYED" \
-    $'--- PASS: TestBinanceFactoryPlacesOrderAndReceivesMockWSPartialFill\n--- PASS: TestUserDataIngestorWritesPartialFillEvent\n--- PASS: TestScannerRestRecoveryCompletesPartialOrderWithMockBinance'
+    '--- PASS: TestBinanceDelayedGTCWebsocketThenRESTRecoveryIsExactlyOnceInRepository'
   run_group core-duplicate-fill "${WORKSPACE}/core-service" \
     "env ORDER_DATABASE_HOST=127.0.0.1 ORDER_DATABASE_PORT=5432 ORDER_DATABASE_USER=postgres ORDER_DATABASE_PASSWORD=postgres ORDER_DATABASE_DBNAME=order ORDER_DATABASE_SSLMODE=disable go test -v ./internal/order/repository -run '^TestSaveLifecycleEventDeduplicatesExchangeTrade$' -count=1" \
     core-lifecycle/duplicate-trade "FUT-DUPLICATE" \
