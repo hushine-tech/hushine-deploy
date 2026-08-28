@@ -1,6 +1,6 @@
 # Runtime 操作流程
 
-最后核验：2026-08-27。
+最后核验：2026-08-28。
 
 Futures 杠杆的完整声明、页面、持久化和故障语义见
 [`strategy-owned-futures-leverage.md`](strategy-owned-futures-leverage.md)。
@@ -49,12 +49,14 @@ PYTHONPATH=.:../strategy-library uv run --frozen --extra dev pytest tests/ -q
    再把 schema/name/version/digest 与部署配置精确比较。不完整或不一致都会记录
    `runtime_admission_failures`，route 不会变为 active。
 
-control-panel 服务端支持把 `RESUME` 作为 RuntimeChannel 第一帧，agent 代码也有
-`BuildResumeRuntimeFrame` 构造器；但当前 `RuntimeChannelClient.Run` 每次只建立一条
-stream，发送 HELLO 后运行到连接关闭，没有自动重连循环，也没有在运行路径中自动
-发送 RESUME。运维上必须把“协议支持 RESUME”与“当前 agent 已自动恢复”区分开：
-连接断开后由进程重启/外部 supervisor 重新连接，旧 active session 进入
-`recoverable`，不能宣称原 session 自动续跑。
+第一次连接只发送 `HELLO`。认证成功后，agent 保存 control-panel 返回的短期
+fingerprint/lease；瞬时断线由进程内 supervisor 串行重连，后续连接第一帧发送
+`RESUME`，不会重用一次性 credential。断线期间 agent health 保持正常、readiness
+变为 false；旧 generation 的 pending 平台 RPC 以有界 `Unavailable` 失败，不能在
+RESUME 后 replay。认证 RESUME ACK 后 readiness 才恢复，Go Agent 和现有 Python
+Worker 都不重建。只有 terminal runtime、credential revoke、过期/无效 fingerprint
+或不匹配 dependency profile 才停止重连并安全退出；不得把 terminal session 自动改回
+running。
 
 正常与 coverage 镜像必须成对构建、验证和 smoke。两者的 profile/version/
 digest/源码 commit 完全相同，build ID 必须不同；`coverage` 只允许作为镜像
@@ -158,6 +160,20 @@ control-panel 停机时先把 readiness 置为 false、关闭全部 RuntimeChann
 再对 RuntimeChannel 与内部 gRPC server 执行同一个 10 秒有界
 `GracefulStop`。如果连接仍卡在 HELLO/认证前或 handler 未返回，超时后会调用
 `Stop` 并等待 server 退出，不能让 pre-auth stream 无限阻塞整个服务停机。
+
+真实 restart gate 在已经由 `make local-start` 启动的本地栈运行：
+
+```bash
+make runtime-channel-restart-acceptance
+```
+
+脚本创建并拥有 disposable credential/runtime/backtest session，只停止
+control-panel-service。它记录容器、Agent、Worker PID/进程 generation、Session、
+heartbeat/Indicator/Income cursor，证明断线 health/ready、pending RPC 不 replay、
+lease 原地 RESUME、cursor 前进和 Funding wallet exactly-once。负向阶段分别撤销另一张
+disposable credential，以及用临时 fast-grace control-panel 配置让第三个 runtime 超过
+terminal grace；两者都必须无 reconnect storm 并安全停止。清理以随机 owner label、
+精确 user/runtime/session/symbol 为边界，不重置共享 database、volume 或无关 Runtime。
 
 ## 替换 hosted runtime
 

@@ -26,7 +26,7 @@ LOCAL_RUNTIME_COVERAGE_DIR ?= $(SOURCE_ROOT)/.coverage/runtime-agent
 LOCAL_RUNTIME_COVERAGE_IMAGE ?= hushine/strategy-runtime:executor-coverage-dev
 LOCAL_RUNTIME_COVERAGE_ENV := env RUNTIME_COVERAGE_ENABLED=true RUNTIME_COVERAGE_OUTPUT_DIR="$(LOCAL_RUNTIME_COVERAGE_DIR)" RUNTIME_COVERAGE_IMAGE="$(LOCAL_RUNTIME_COVERAGE_IMAGE)"
 
-.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle local-configs local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted runtime-dependency-envs runtime-dependency-contract runtime-images-verify runtime-dependency-acceptance test-runtime-indicator-v2 funding-income-service-chain funding-income-demo-smoke no-first-party-compatibility code-census-static code-census-snapshot code-census-unit-coverage code-census-session-start code-census-session-stop code-census-full
+.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle local-configs local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted runtime-dependency-envs runtime-dependency-contract runtime-images-verify runtime-dependency-acceptance runtime-channel-restart-acceptance test-runtime-indicator-v2 funding-income-service-chain funding-income-demo-smoke no-first-party-compatibility code-census-static code-census-snapshot code-census-unit-coverage code-census-session-start code-census-session-stop code-census-full
 
 help:
 	@echo "Targets:"
@@ -48,6 +48,7 @@ help:
 	@echo "  runtime-image      — build hushine/strategy-runtime image (IMAGE_TAG=dev)"
 	@echo "  runtime-dependency-contract   — verify manifest projections against immutable RUNTIME_DEPENDENCY_BASE_SHA"
 	@echo "  runtime-dependency-acceptance — rebuild and verify the paired normal/coverage runtime images"
+	@echo "  runtime-channel-restart-acceptance — restart control-panel around a disposable real RuntimeChannel session"
 	@echo "  test-runtime-indicator-v2 — run the database, Agent, blocked-worker, gateway, and portal V2 gate"
 	@echo "  funding-income-service-chain — run the local Funding/Income full service-chain gate"
 	@echo "  funding-income-demo-smoke — run a guarded read-only Binance Demo Income query"
@@ -218,6 +219,9 @@ runtime-dependency-acceptance: runtime-dependency-contract runtime-images-verify
 		--json)" \
 	RUNTIME_DEPENDENCY_BASE_SHA="$(RUNTIME_DEPENDENCY_BASE_SHA)" \
 		bash $(DEPLOY_ROOT)/scripts/runtime-dependency-contract.test.sh
+
+runtime-channel-restart-acceptance:
+	@HUSHINE_SOURCE_ROOT="$(SOURCE_ROOT)" bash $(DEPLOY_ROOT)/scripts/test-runtime-channel-restart.sh
 
 test-runtime-indicator-v2:
 	@HUSHINE_SOURCE_ROOT="$(SOURCE_ROOT)" bash $(DEPLOY_ROOT)/scripts/runtime-indicator-v2-smoke.sh

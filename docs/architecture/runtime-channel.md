@@ -1,6 +1,32 @@
 # RuntimeChannel、Income 与 Worker 生命周期
 
-最后核验：2026-08-27。
+最后核验：2026-08-28。
+
+## control-panel 短暂重启
+
+runtime-agent 第一次建立连接时发送 `HELLO`，取得一次性 credential 绑定的
+RuntimeChannel lease。已认证连接因 control-panel 短暂重启而断开时，agent 保留 Go
+进程和所有 Python Worker，立即清除 readiness，但 health 继续为正常；旧 generation
+中尚未完成的平台 RPC 在 2 秒内以 `Unavailable` 失败，不跨连接 replay。新
+control-panel ready 后，agent 用保留的 fingerprint 发送 `RESUME`，同一 lease 原地
+轮换，ready 恢复。Runtime 容器 PID、Agent PID、Worker PID/进程 generation 和
+`session_id` 都不得变化。
+
+仓库验收脚本用一次性用户、credential、Runtime、Session、唯一 market symbol 和
+私有 barrier 构造真实 backtest。它只停止 control-panel，记录重启前后 heartbeat、
+Indicator 与 Income cursor，并要求一个 Funding Income 只造成一次 wallet effect；还
+覆盖 credential revoke 和超过 terminal grace 后拒绝 RESUME。所有等待都有界，清理
+只按 harness owner label 与精确 ID 删除：
+
+```bash
+make local-start
+make runtime-channel-restart-acceptance
+```
+
+证据默认保留在脚本打印的私有 `evidence_file`。预检会验证 live
+`market_data_coverage_segments_interval_check` 能表达
+`funding_rate interval=''`；存在旧约束时在创建 fixture 前明确失败，必须先通过
+control-panel-service migration 修复 schema drift，不能由验收脚本改写共享 schema。
 
 ## Income delivery
 
