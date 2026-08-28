@@ -303,15 +303,13 @@ VENUE_RESP=$(curl -s -X POST "${API}/api/venues" \
     \"initial_balance\": 10000,
     \"positions\": [{
       \"symbol\": \"TESTUSDT\",
-      \"direction\": 0,
+      \"position_side\": \"BOTH\",
       \"initial_balance\": 10000,
-      \"leverage\": 20,
       \"fee_rate\": 0.0004
     }, {
       \"symbol\": \"ALTUSDT\",
-      \"direction\": 0,
+      \"position_side\": \"BOTH\",
       \"initial_balance\": 10000,
-      \"leverage\": 20,
       \"fee_rate\": 0.0004
     }]
   }
