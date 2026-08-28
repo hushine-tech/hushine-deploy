@@ -1,6 +1,6 @@
 # 数据库初始化与所有权
 
-最后核验：2026-08-27。
+最后核验：2026-08-28。
 
 当前系统只支持从空数据库一次性创建当前 schema。每个 owner 仓库只保留
 `0000_create_schema_migrations.sql`（需要 ledger 的服务）和
@@ -104,3 +104,51 @@ go test ./internal/storage -count=1
 
 任何“已有旧列则转换”“找不到新表则读取旧表”或旧 migration 文件都不属于当前部署
 流程；需要保留的业务数据必须走单独、显式的数据迁移项目，不能塞回启动路径。
+
+## 只重建本机 control_panel
+
+这是破坏性操作，只用于已确认可重建的本地 `control_panel`。它不得删除
+`portfolio`、`order`、任何 `{exchange}_{year}` 年库或 Docker volume。
+
+```bash
+make local-stop
+
+set -euo pipefail
+umask 077
+backup_path="/tmp/control_panel_pre_rebuild_$(date +%Y%m%d_%H%M%S).dump"
+docker compose -f deploy/local/docker-compose.yml exec -T timescaledb \
+  pg_dump -U postgres -Fc -d control_panel \
+  > "${backup_path}"
+chmod 600 "${backup_path}"
+test -s "${backup_path}"
+docker compose -f deploy/local/docker-compose.yml exec -T timescaledb \
+  pg_restore -l < "${backup_path}" > /dev/null
+backup_mode="$(stat -f '%Lp' "${backup_path}" 2>/dev/null || stat -c '%a' "${backup_path}")"
+test "${backup_mode}" = "600"
+
+docker compose -f deploy/local/docker-compose.yml exec -T timescaledb \
+  psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'control_panel' AND pid <> pg_backend_pid()"
+docker compose -f deploy/local/docker-compose.yml exec -T timescaledb \
+  psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "DROP DATABASE IF EXISTS control_panel"
+
+make local-ensure-dbs
+make local-ensure-dbs
+```
+
+这段命令必须在同一个启用 `set -euo pipefail` 的 shell 中连续执行。`pg_dump`、非空检查、
+`pg_restore -l` 可读性检查或 `0600` 权限检查任一失败，shell 都会在 terminate/drop 之前退出。
+备份可能包含用户、Runtime 和 credential 元数据，不能放宽权限；验收结束后按本地数据
+保留策略安全删除。
+
+首次执行后，在启动 scraper 和业务服务之前验收：
+
+- ledger 严格只有 `0000_create_schema_migrations.sql` 和
+  `0001_current_schema_baseline.sql`；
+- `market_data_coverage_segments` 接受 `kline` 的非空 interval，以及
+  `funding_rate` 的空 interval，并拒绝反向组合；
+- 所有业务表为零行。
+
+第二次执行必须显示 baseline 已应用，且 ledger 和业务表仍不变。有任何一项不
+满足时不得启动业务栈。

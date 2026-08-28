@@ -1,6 +1,6 @@
 # 本地开发 / Local Development
 
-最后核验：2026-08-27。
+最后核验：2026-08-28。
 
 本流程只使用本机 Docker 基础设施。服务 source-default 配置不是本地运行的权威输入；
 生成的 private local config 和显式环境覆盖才是。
@@ -48,8 +48,10 @@ ELK，trace 通过本机 OTLP 进入 Jaeger。
 ## Coverage-instrumented Runtime
 
 ```bash
-IMAGE_TAG=dev make runtime-image
-make runtime-images-verify
+cd ../strategy-service
+scripts/build_strategy_runtime.sh --all --no-cache --verify dev
+
+cd ../hushine-deploy
 make local-start
 ```
 
@@ -58,6 +60,30 @@ make local-start
 `LOCAL_RUNTIME_COVERAGE_DIR` 可显式覆盖镜像与输出目录。Runtime 容器只能收到
 RuntimeChannel 地址和 sealed identity；Hosted、Self-hosted、Bare 都不能收到内部
 数据库、Kafka、账户 credential、core/order 地址。
+
+构建完必须同时检查 normal 和 coverage 镜像 label：
+
+- strategy-service、core-service、strategy-library 和 golang-lib commit 与当前
+  clean checkout 一致；
+- `org.hushine.runtime.source-dirty=false`；
+- dependency closure、Worker bootstrap 和镜像内 Python import verifier 通过。
+
+仅看到 `.coverage/runtime-agent` 目录存在不算成功。需要用当前用户拥有、带 active
+strategy 的 Portfolio 运行一次受跟踪 smoke：
+
+```bash
+USER_ID=<user-id> \
+PORTFOLIO_ID=<portfolio-id> \
+EXPECTED_INPUT_COUNT=<declared-input-count> \
+COVERAGE_IMAGE=hushine/strategy-runtime:executor-coverage-dev \
+bash scripts/smoke_hosted_runtime_coverage.sh \
+  "$(cd .. && pwd -P)/.coverage/runtime-agent"
+```
+
+运行会创建专属 Hosted Runtime，分别执行 Preview 和两个 active Worker generation，再通过
+control-panel 结束 Runtime。只有在新 Runtime 目录中出现 complete
+`finalization.json`、Go covdata、Python shard，且合并后的两份报告均有命中，才能确认
+本轮采样生效。脚本只清理自己的 Runtime/Session/容器，不删除用户 Portfolio。
 
 ## 停止与清理
 
