@@ -552,6 +552,7 @@ advance_phase = harness.split("    advance-data)", 1)[1].split("    create-revok
 fixture_phase = harness.split("create_normal_fixture() {", 1)[1].split("\nsession_status() {", 1)[0]
 runtime_phase = harness.split("start_owned_runtime() {", 1)[1].split("\ncreate_strategy_source() {", 1)[0]
 cleanup_phase = harness.split("cleanup_live() {", 1)[1].split("\nlive_action() {", 1)[0]
+stop_phase = harness.split("    stop-control-panel)", 1)[1].split("    observe-pending-platform-rpc)", 1)[0]
 assert "runtime-restart-barrier.json" not in pending_phase
 assert "runtime-restart-barrier.json" not in advance_phase
 assert 'create_once_json "${armed_file}"' in pending_phase
@@ -571,6 +572,7 @@ for cleanup_step in ("order", "portfolio", "control", "market"):
     assert f'cleanup_step_done {cleanup_step}' in cleanup_phase
     assert f'mark_cleanup_step {cleanup_step}' in cleanup_phase
     assert f'if ! cleanup_step_done {cleanup_step}' not in cleanup_phase
+assert "'issued_at',l.issued_at::text,'updated_at',l.updated_at::text" in stop_phase
 PY
 
 python3 - "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-hold-proxy.py" "${FIXTURE}/proxy-test" <<'PY'

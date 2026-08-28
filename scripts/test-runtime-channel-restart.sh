@@ -1288,7 +1288,7 @@ live_action() {
       runtime="$(state_get .normal.runtime_id)"
       result="$(pg control_panel -At -v runtime_id="${runtime}" <<'SQL'
 SELECT json_build_object(
-  'lease',json_build_object('issued_at',issued_at::text,'updated_at',updated_at::text,'row_count',count(*) OVER()),
+  'lease',json_build_object('issued_at',l.issued_at::text,'updated_at',l.updated_at::text,'row_count',count(*) OVER()),
   'connection_owner',json_build_object('instance_id',r.connection_owner_instance_id,'acquired_at',r.connection_owner_acquired_at::text)
 ) FROM runtime_channel_leases l JOIN runtime_registry r USING(runtime_id) WHERE l.runtime_id=:'runtime_id';
 SQL
