@@ -10,6 +10,8 @@ CLEANED_UP=false
 CLEANUP_ONLY=false
 SANITIZE_INSPECT=""
 DIAGNOSTIC_OUTPUT=""
+CONTROL_OWNER_PID_FILE=""
+CONTROL_OWNER_LISTENER_PID=""
 PG_CONTAINER="${HUSHINE_LOCAL_PG_CONTAINER:-hushine-local-timescaledb-1}"
 RUNTIME_IMAGE="${HUSHINE_RUNTIME_RESTART_IMAGE:-hushine/strategy-runtime:executor-dev}"
 KAFKA_CONTAINER="${HUSHINE_RUNTIME_RESTART_KAFKA_CONTAINER:-hushine-local-kafka-1}"
@@ -21,10 +23,24 @@ die() {
   exit 1
 }
 
+validate_control_owner() {
+  local pid_file="$1" listener_pid="$2" managed_pid
+  [[ -f "${pid_file}" && ! -L "${pid_file}" ]] \
+    || die "control-panel ownership pid file is missing or unsafe: ${pid_file}"
+  managed_pid="$(tr -d '[:space:]' <"${pid_file}")"
+  [[ "${managed_pid}" =~ ^[1-9][0-9]*$ && "${listener_pid}" =~ ^[1-9][0-9]*$ ]] \
+    || die "control-panel ownership PIDs are invalid"
+  [[ "${managed_pid}" == "${listener_pid}" ]] \
+    || die "environmental blocker: managed control-panel PID ${managed_pid} does not own RuntimeChannel listener PID ${listener_pid}"
+  kill -0 "${managed_pid}" 2>/dev/null \
+    || die "managed control-panel PID ${managed_pid} is not alive"
+}
+
 usage() {
   cat <<'EOF'
 Usage: scripts/test-runtime-channel-restart.sh [--evidence-file FILE] [--state-dir DIR] [--cleanup-only]
        scripts/test-runtime-channel-restart.sh --sanitize-docker-inspect FILE --diagnostic-output FILE
+       scripts/test-runtime-channel-restart.sh --validate-control-owner PIDFILE --listener-pid PID
 
 Runs the real local RuntimeChannel control-panel restart acceptance. The local
 stack must already be running (`make local-start`). Evidence defaults to a
@@ -58,6 +74,16 @@ while [[ "$#" -gt 0 ]]; do
       DIAGNOSTIC_OUTPUT="$2"
       shift 2
       ;;
+    --validate-control-owner)
+      [[ "$#" -ge 2 ]] || die "--validate-control-owner requires a pid file"
+      CONTROL_OWNER_PID_FILE="$2"
+      shift 2
+      ;;
+    --listener-pid)
+      [[ "$#" -ge 2 ]] || die "--listener-pid requires a PID"
+      CONTROL_OWNER_LISTENER_PID="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -67,6 +93,14 @@ while [[ "$#" -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "${CONTROL_OWNER_PID_FILE}" || -n "${CONTROL_OWNER_LISTENER_PID}" ]]; then
+  [[ -n "${CONTROL_OWNER_PID_FILE}" && -n "${CONTROL_OWNER_LISTENER_PID}" ]] \
+    || die "control-panel ownership validation requires PIDFILE and listener PID"
+  validate_control_owner "${CONTROL_OWNER_PID_FILE}" "${CONTROL_OWNER_LISTENER_PID}"
+  echo "runtime-channel restart acceptance: control-panel owner PASS"
+  exit 0
+fi
 
 if [[ -n "${SANITIZE_INSPECT}" || -n "${DIAGNOSTIC_OUTPUT}" ]]; then
   [[ -n "${SANITIZE_INSPECT}" && -n "${DIAGNOSTIC_OUTPUT}" ]] \
@@ -1083,13 +1117,16 @@ live_action() {
   local action="$1" payload="${2:-}" runtime container key token result before after correlation
   case "${action}" in
     preflight)
-      for command in curl docker jq make openssl python3 rg sed; do require_command "${command}"; done
+      for command in curl docker jq lsof make openssl python3 rg sed; do require_command "${command}"; done
       docker inspect "${PG_CONTAINER}" >/dev/null 2>&1 || die "local TimescaleDB container is unavailable: ${PG_CONTAINER}"
       docker inspect "${KAFKA_CONTAINER}" >/dev/null 2>&1 || die "local Kafka container is unavailable: ${KAFKA_CONTAINER}"
       docker image inspect "${RUNTIME_IMAGE}" >/dev/null 2>&1 || die "runtime image is unavailable: ${RUNTIME_IMAGE}"
       curl -fsS --max-time 2 "${API}/healthz" >/dev/null || die "quant-handler is not healthy"
       curl -fsS --max-time 2 "${CONTROL_READY}" >/dev/null || die "control-panel-service is not ready"
       [[ -f "${SOURCE_ROOT}/control-panel-service/.run.pid" ]] || die "control-panel-service is not owned by local-start"
+      local control_listener_pid
+      control_listener_pid="$(lsof -nP -tiTCP:50055 -sTCP:LISTEN 2>/dev/null | sort -u)"
+      validate_control_owner "${SOURCE_ROOT}/control-panel-service/.run.pid" "${control_listener_pid}"
       local coverage_constraint
       coverage_constraint="$(sql_value control_panel "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='market_data_coverage_segments_interval_check'")"
       if [[ "${coverage_constraint}" != *"funding_rate"* || "${coverage_constraint}" != *"interval\" = ''"* ]]; then

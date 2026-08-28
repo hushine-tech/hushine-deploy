@@ -390,6 +390,18 @@ if grep -Eq 'PRIVATE_KEY|TLS_SECRET|RUNTIME_CREDENTIAL_JSON|RUNTIME_CHANNEL_TLS_
   fail "diagnostic projection retained forbidden credential material"
 fi
 
+control_pid_file="${FIXTURE}/control.run.pid"
+printf '%s\n' "$$" >"${control_pid_file}"
+bash "${HARNESS}" --validate-control-owner "${control_pid_file}" --listener-pid "$$" \
+  >"${FIXTURE}/control-owner.stdout" 2>"${FIXTURE}/control-owner.stderr" \
+  || fail "matching managed/listener control-panel PID was rejected"
+if bash "${HARNESS}" --validate-control-owner "${control_pid_file}" --listener-pid "$(( $$ + 1000000 ))" \
+    >"${FIXTURE}/control-mismatch.stdout" 2>"${FIXTURE}/control-mismatch.stderr"; then
+  fail "mismatched managed/listener control-panel PID passed"
+fi
+grep -Fq 'environmental blocker: managed control-panel PID' "${FIXTURE}/control-mismatch.stderr" \
+  || fail "control-panel ownership mismatch was not explicit"
+
 python3 - "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-hold-proxy.py" "${FIXTURE}/proxy-test" <<'PY'
 import importlib.util
 import json
