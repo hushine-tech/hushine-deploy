@@ -590,7 +590,6 @@ import sys
 path, owner, generation, symbol = sys.argv[1:]
 source = pathlib.Path(path).read_text(encoding="utf-8")
 replacements = {
-    'import stat\nimport time': 'import stat\nimport threading\nimport time',
     'from pathlib import Path\nfrom typing import Any': 'from pathlib import Path\nfrom typing import Any\n\nfrom google.protobuf.struct_pb2 import Struct',
     'ACCEPTANCE_BARRIER_FILE = ""': 'ACCEPTANCE_BARRIER_FILE = "/coverage/runtime-restart-barrier.json"',
     'ACCEPTANCE_BARRIER_OWNER_TOKEN = ""': f'ACCEPTANCE_BARRIER_OWNER_TOKEN = {json.dumps(owner)}',
@@ -598,6 +597,7 @@ replacements = {
     'TESTUSDT': symbol,
     'if sequence in {4, 9, 1438}:': 'if sequence in {4, 1438}:',
     'self._last_open_time_ms = 0': 'self._last_open_time_ms = 0\n        self._acceptance_pending_started = False',
+    '            if target > self._completed:\n': '            release_path = Path(str((pending or {}).get("release_file") or ""))\n            if self._completed == 1023 and release_path.exists():\n                return\n            if target > self._completed:\n',
 }
 for old, new in replacements.items():
     if old not in source:
@@ -652,23 +652,22 @@ if anchor not in source:
 source = source.replace(anchor, pending_method + anchor, 1)
 barrier_anchor = '            target = self._positive_int(\n'
 barrier_pending = '''            pending = control.get("pending_call")
-            if pending is not None and not self._acceptance_pending_started:
+            armed_path = Path(str((pending or {}).get("armed_file") or ""))
+            if pending is not None and armed_path.exists() and not self._acceptance_pending_started:
                 if not isinstance(pending, dict):
                     raise RuntimeError("pending_call must be an object")
                 correlation = str(pending.get("correlation_id") or "")
-                paths = [Path(str(pending.get(name) or "")) for name in ("started_file", "result_file")]
+                paths = [Path(str(pending.get(name) or "")) for name in ("armed_file", "release_file", "started_file", "result_file")]
                 if not correlation.startswith("rpc-") or any(
                     not path.is_absolute() or path.parent != Path("/coverage") for path in paths
                 ):
                     raise RuntimeError("pending_call ownership fields are invalid")
                 pending["session_id"] = session_id
                 self._acceptance_pending_started = True
-                threading.Thread(
-                    target=self._run_acceptance_pending_call,
-                    args=(pending,),
-                    name="runtime-restart-pending-call",
-                    daemon=True,
-                ).start()
+                arm = self._read_private_json(armed_path)
+                if str(arm.get("correlation_id") or "") != correlation:
+                    raise RuntimeError("pending_call arm correlation changed")
+                self._run_acceptance_pending_call(pending)
 '''
 if barrier_anchor not in source:
     raise SystemExit(f"strategy fixture contract changed: {barrier_anchor!r}")
@@ -698,8 +697,9 @@ create_normal_fixture() {
   runtime_root="$(jq -er .runtime_root <<<"${runtime}")"
   atomic_json "${runtime_root}/runtime-restart-barrier.json" -nc \
     --arg owner_token "${owner}" --arg generation "$(state_get .generation)" \
-    --arg runtime_id "$(jq -er .runtime_id <<<"${runtime}")" \
-    '{schema:1,owner_token:$owner_token,generation:$generation,runtime_id:$runtime_id,session_id:"",target_completed:1023,ack_file:"/coverage/runtime-restart-ack.json"}'
+    --arg runtime_id "$(jq -er .runtime_id <<<"${runtime}")" --arg correlation_id "rpc-${owner:0:24}" \
+    '{schema:1,owner_token:$owner_token,generation:$generation,runtime_id:$runtime_id,session_id:"",target_completed:1023,ack_file:"/coverage/runtime-restart-ack.json",
+      pending_call:{correlation_id:$correlation_id,armed_file:"/coverage/pending-call-arm.json",release_file:"/coverage/release-after-resume",started_file:"/coverage/pending-call-started.json",result_file:"/coverage/pending-call-result.json"}}'
   response="$(api_request POST "/api/portfolios/${portfolio}/run-strategy" "${token}" "$(jq -nc \
     --arg runtime "$(jq -er .runtime_id <<<"${runtime}")" \
     '{interval:"1m",start_time_ms:1735689600000,end_time_ms:1735812600000,runtime_id:$runtime}')")"
@@ -1150,16 +1150,15 @@ live_action() {
     create-normal) create_normal_fixture ;;
     snapshot-before|snapshot-disconnected|snapshot-after) snapshot_normal ;;
     start-pending-platform-rpc)
-      local owner barrier root hold started_file result_file observation held_file proxy_count broker_count worker_pid
+      local owner root hold armed_file started_file result_file observation held_file proxy_count broker_count worker_pid
       owner="$(state_get .owner_token)"; root="$(state_get .normal.runtime_root)"
-      barrier="${root}/runtime-restart-barrier.json"
       correlation="rpc-${owner:0:24}"
       hold="${STATE_DIR}/kafka-proxy/hold.json"
+      armed_file="${root}/pending-call-arm.json"
       started_file="${root}/pending-call-started.json"; result_file="${root}/pending-call-result.json"
-      rm -f -- "${started_file}" "${result_file}" "${STATE_DIR}/kafka-proxy/produce-observation.json" "${STATE_DIR}/kafka-proxy/response-held.json"
+      rm -f -- "${armed_file}" "${started_file}" "${result_file}" "${STATE_DIR}/kafka-proxy/produce-observation.json" "${STATE_DIR}/kafka-proxy/response-held.json"
       atomic_json "${hold}" -nc --arg correlation_id "${correlation}" '{schema:1,correlation_id:$correlation_id}'
-      atomic_json "${barrier}" --arg correlation_id "${correlation}" \
-        '.pending_call={correlation_id:$correlation_id,started_file:"/coverage/pending-call-started.json",result_file:"/coverage/pending-call-result.json"}' "${barrier}"
+      atomic_json "${armed_file}" -nc --arg correlation_id "${correlation}" '{schema:1,correlation_id:$correlation_id}'
       wait_for 15 "Worker pending platform call start" json_file_matches "${started_file}" ".correlation_id == \"${correlation}\" and .method == \"notification.Publish\""
       observation="${STATE_DIR}/kafka-proxy/produce-observation.json"; held_file="${STATE_DIR}/kafka-proxy/response-held.json"
       wait_for 15 "correlated Kafka Produce request" json_file_matches "${observation}" ".correlation_id == \"${correlation}\" and .produce_request_count == 1"
@@ -1241,8 +1240,8 @@ SQL
         '{correlation_id:$correlation_id,platform_execution_count:$platform_execution_count,caller_completion_count:$caller_completion_count}'
       ;;
     advance-data)
-      local barrier="$(state_get .normal.runtime_root)/runtime-restart-barrier.json"
-      atomic_json "${barrier}" '.target_completed=1025' "${barrier}"
+      local release="$(state_get .normal.runtime_root)/release-after-resume"
+      atomic_json "${release}" -nc '{schema:1,release_after_completed:1023}'
       wait_for 60 "worker barrier at callback 1025" barrier_at 1025
       local session="$(state_get .normal.session_id)" venue="$(state_get .normal.venue_id)"
       wait_for 30 "one funding income wallet effect" income_count_is_one "${session}" "${venue}"

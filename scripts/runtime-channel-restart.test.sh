@@ -402,6 +402,34 @@ fi
 grep -Fq 'environmental blocker: managed control-panel PID' "${FIXTURE}/control-mismatch.stderr" \
   || fail "control-panel ownership mismatch was not explicit"
 
+python3 - "${HARNESS}" "${DEPLOY_ROOT}/../strategy-service/tests/strategies/indicator_v2_open_time_cutover.py" <<'PY'
+import ast
+import pathlib
+import subprocess
+import sys
+
+harness = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+fixture = sys.argv[2]
+function = harness.split("create_strategy_source() {", 1)[1]
+program = function.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+completed = subprocess.run(
+    [sys.executable, "-", fixture, "a" * 64, "generation-" + "b" * 32, "RCRAAAAAAAAAAAAUSDT"],
+    input=program,
+    text=True,
+    capture_output=True,
+    check=True,
+)
+generated = completed.stdout
+ast.parse(generated)
+assert "threading.Thread" not in generated
+assert "self._run_acceptance_pending_call(pending)" in generated
+assert 'armed_file' in generated and 'release_file' in generated
+pending_phase = harness.split("    start-pending-platform-rpc)", 1)[1].split("    stop-control-panel)", 1)[0]
+advance_phase = harness.split("    advance-data)", 1)[1].split("    create-revoke)", 1)[0]
+assert "runtime-restart-barrier.json" not in pending_phase
+assert "runtime-restart-barrier.json" not in advance_phase
+PY
+
 python3 - "${DEPLOY_ROOT}/scripts/runtime-channel-kafka-hold-proxy.py" "${FIXTURE}/proxy-test" <<'PY'
 import importlib.util
 import json
