@@ -66,17 +66,47 @@ case "${action}" in
     jq -nc '{runtime_container_pid:4100,agent_pid:1,worker_pid:77,worker_generation:1,session_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",session_status:"running",heartbeat_cursor_us:1000,heartbeat_at:"2026-08-28T01:00:00Z",indicator_cursor:1023,income_cursor:0,wallet_effect_count:0,agent_health_http:200,agent_ready_http:200,wallet:{wallet_balance:"100000.000000000000000000",available_balance:"99900.000000000000000000",total_value:"100100.000000000000000000",last_applied_income_entry_id:0}}'
     ;;
   start-pending-platform-rpc)
-    jq -nc '{correlation_id:"pending-contract",caller:"python-worker",method:"notification.Publish",worker_started:true,worker_pid:77,proxy_produce_count:1,platform_execution_count:1}'
+    jq -nc '{correlation_id:"rpc-0123456789abcdef01234567",caller:"python-worker",method:"notification.Publish",worker_started:true,worker_pid:77,started_at_ns:1000000000,proxy_produce_count:1,platform_execution_count:1}'
     ;;
   stop-control-panel)
     jq -e '.control_panel_stopped == true and .service_baseline.was_running == true' "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" >/dev/null
-    jq -nc '{stopped:true,only_control_panel:true}'
+    temporary="${RUNTIME_RESTART_CONTRACT_STATE}/stop.tmp"
+    if [[ "${scenario}" == "missing_disconnect_timestamp" ]]; then
+      jq '.pending_rpc={correlation_id:"rpc-0123456789abcdef01234567"}' \
+        "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" >"${temporary}"
+      chmod 0600 "${temporary}"
+      mv "${temporary}" "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
+      jq -nc '{stopped:true,only_control_panel:true,disconnect_requested_at_ns:7990000000}'
+    else
+      jq '.pending_rpc={correlation_id:"rpc-0123456789abcdef01234567",disconnect_requested_at_ns:7990000000}' \
+        "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json" >"${temporary}"
+      chmod 0600 "${temporary}"
+      mv "${temporary}" "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json"
+      jq -nc '{stopped:true,only_control_panel:true,disconnect_requested_at_ns:7990000000}'
+    fi
     ;;
   snapshot-disconnected)
     jq -nc '{runtime_container_pid:4100,agent_pid:1,worker_pid:77,worker_generation:1,session_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",session_status:"running",heartbeat_cursor_us:1000,heartbeat_at:"2026-08-28T01:00:00Z",indicator_cursor:1023,income_cursor:0,wallet_effect_count:0,agent_health_http:200,agent_ready_http:503,wallet:{wallet_balance:"100000.000000000000000000",available_balance:"99900.000000000000000000",total_value:"100100.000000000000000000",last_applied_income_entry_id:0}}'
     ;;
   observe-pending-platform-rpc)
-    jq -nc '{correlation_id:"pending-contract",caller_completed:true,caller_grpc_code:"Unavailable",caller_elapsed_ms:187,caller_completion_count:1,worker_pid:77,proxy_produce_count:1,platform_execution_count:1}'
+    disconnect_requested_at_ns="$(jq -er \
+      '.pending_rpc.disconnect_requested_at_ns | select(type == "number" and . > 0 and floor == .)' \
+      "${RUNTIME_RESTART_CONTRACT_STATE}/live-state.json")" \
+      || { echo "missing persisted disconnect timestamp" >&2; exit 98; }
+    case "${scenario}" in
+      slow_disconnect)
+        jq -nc --argjson disconnect_requested_at_ns "${disconnect_requested_at_ns}" '{correlation_id:"rpc-0123456789abcdef01234567",caller_completed:true,caller_grpc_code:"Unavailable",started_at_ns:1000000000,disconnect_requested_at_ns:$disconnect_requested_at_ns,caller_completed_at_ns:9991000000,caller_elapsed_ms:8991,disconnect_elapsed_ms:2001,caller_completion_count:1,worker_pid:77,proxy_produce_count:1,platform_execution_count:1}'
+        ;;
+      completion_before_disconnect)
+        jq -nc --argjson disconnect_requested_at_ns "${disconnect_requested_at_ns}" '{correlation_id:"rpc-0123456789abcdef01234567",caller_completed:true,caller_grpc_code:"Unavailable",started_at_ns:1000000000,disconnect_requested_at_ns:$disconnect_requested_at_ns,caller_completed_at_ns:7989000000,caller_elapsed_ms:6989,disconnect_elapsed_ms:0,caller_completion_count:1,worker_pid:77,proxy_produce_count:1,platform_execution_count:1}'
+        ;;
+      missing_completion_timestamp)
+        jq -nc --argjson disconnect_requested_at_ns "${disconnect_requested_at_ns}" '{correlation_id:"rpc-0123456789abcdef01234567",caller_completed:true,caller_grpc_code:"Unavailable",started_at_ns:1000000000,disconnect_requested_at_ns:$disconnect_requested_at_ns,caller_elapsed_ms:7000,disconnect_elapsed_ms:10,caller_completion_count:1,worker_pid:77,proxy_produce_count:1,platform_execution_count:1}'
+        ;;
+      *)
+        jq -nc --argjson disconnect_requested_at_ns "${disconnect_requested_at_ns}" '{correlation_id:"rpc-0123456789abcdef01234567",caller_completed:true,caller_grpc_code:"Unavailable",started_at_ns:1000000000,disconnect_requested_at_ns:$disconnect_requested_at_ns,caller_completed_at_ns:8000000000,caller_elapsed_ms:7000,disconnect_elapsed_ms:10,caller_completion_count:1,worker_pid:77,proxy_produce_count:1,platform_execution_count:1}'
+        ;;
+    esac
     ;;
   start-control-panel)
     jq -nc '{started:true}'
@@ -96,7 +126,7 @@ case "${action}" in
     window=8
     [[ "${scenario}" != "short_horizon" ]] || window=6
     jq -nc --argjson count "${count}" --argjson window "${window}" \
-      '{correlation_id:"pending-contract",platform_execution_count:$count,proxy_produce_count:$count,caller_completion_count:1,observation_window_seconds:$window}'
+      '{correlation_id:"rpc-0123456789abcdef01234567",platform_execution_count:$count,proxy_produce_count:$count,caller_completion_count:1,observation_window_seconds:$window}'
     ;;
   advance-data)
     jq -nc '{advanced:true}'
@@ -307,8 +337,8 @@ jq -e '
   and .normal.disconnected.session_status == "running"
   and .normal.pending_rpc.status == "failed"
   and .normal.pending_rpc.grpc_code == "Unavailable"
-  and .normal.pending_rpc.elapsed_ms > 0
-  and .normal.pending_rpc.elapsed_ms <= 2000
+  and .normal.pending_rpc.total_elapsed_ms == 7000
+  and .normal.pending_rpc.disconnect_elapsed_ms == 10
   and .normal.pending_rpc.replay_count == 0
   and .normal.pending_rpc.platform_execution_count == 1
   and .normal.pending_rpc.proxy_produce_count == 1
@@ -547,9 +577,19 @@ run_false_positive() {
       bash "${HARNESS}" --state-dir "${state}" >"${state}.stdout" 2>"${state}.stderr"; then
     fail "false-positive scenario passed: ${scenario}"
   fi
+  case "${scenario}" in
+    slow_disconnect|completion_before_disconnect|missing_completion_timestamp)
+      grep -Fq 'pending-failed returned invalid evidence' "${state}.stderr" \
+        || fail "${scenario} failed for the wrong reason: $(tr '\n' ' ' <"${state}.stderr")"
+      ;;
+    missing_disconnect_timestamp)
+      grep -Fq 'missing persisted disconnect timestamp' "${state}.stderr" \
+        || fail "${scenario} failed for the wrong reason: $(tr '\n' ' ' <"${state}.stderr")"
+      ;;
+  esac
 }
 
-for scenario in replay short_horizon hello_fallback multiple_leases wallet_double_apply cleanup_failure restore_failure; do
+for scenario in replay short_horizon hello_fallback multiple_leases wallet_double_apply cleanup_failure restore_failure slow_disconnect completion_before_disconnect missing_disconnect_timestamp missing_completion_timestamp; do
   run_false_positive "${scenario}"
 done
 
@@ -666,6 +706,7 @@ jq -e '.kafka_topic_state == "created" and (.cleanup_progress.kafka_topic // fal
 
 python3 - "${HARNESS}" "${DEPLOY_ROOT}/../strategy-service/tests/strategies/indicator_v2_open_time_cutover.py" <<'PY'
 import ast
+import json
 import pathlib
 import subprocess
 import sys
@@ -692,6 +733,9 @@ assert 'self._read_private_json(binding_path)' in generated
 assert 'session binding ownership changed' in generated
 assert 'pending_call arm ownership changed' in generated
 assert 'release ownership changed' in generated
+assert generated.count('completed_ns = time.time_ns()') == 1
+assert '"caller_completed_at_ns": completed_ns' in generated
+assert '(completed_ns - started_ns) // 1_000_000' in generated
 pending_phase = harness.split("    start-pending-platform-rpc)", 1)[1].split("    stop-control-panel)", 1)[0]
 advance_phase = harness.split("    advance-data)", 1)[1].split("    create-revoke)", 1)[0]
 fixture_phase = harness.split("create_normal_fixture() {", 1)[1].split("\nsession_status() {", 1)[0]
@@ -725,6 +769,65 @@ assert 'notification.events' not in harness
 assert cleanup_once_phase.index('validate_cleanup_manifest') < cleanup_once_phase.index('validate_kafka_topic_fact')
 assert cleanup_once_phase.index('validate_kafka_topic_fact') < cleanup_once_phase.index('run_action restore-control-panel')
 assert "'issued_at',l.issued_at::text,'updated_at',l.updated_at::text" in stop_phase
+disconnect_sample = stop_phase.index("python3 -c 'import time; print(time.time_ns())'")
+disconnect_checkpoint = stop_phase.index('.pending_rpc.disconnect_requested_at_ns')
+control_stop = stop_phase.index('control_stop')
+assert disconnect_sample < disconnect_checkpoint < control_stop
+observe_phase = harness.split("    observe-pending-platform-rpc)", 1)[1].split("    start-control-panel)", 1)[0]
+assert 'caller_completed_at_ns' in observe_phase
+assert 'disconnect_requested_at_ns' in observe_phase
+assert 'disconnect_elapsed_ms' in observe_phase
+assert 'stat ' not in observe_phase and 'mtime' not in observe_phase
+observer_program = observe_phase.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+def run_observer(started_ns, disconnect_ns, completed_ns, *, include_completion=True):
+    correlation = "rpc-0123456789abcdef01234567"
+    with tempfile.TemporaryDirectory() as temporary:
+        started_path = pathlib.Path(temporary) / "started.json"
+        result_path = pathlib.Path(temporary) / "result.json"
+        started_path.write_text(
+            '{"correlation_id":"%s","started_at_ns":%d}' % (correlation, started_ns),
+            encoding="utf-8",
+        )
+        result = {
+            "correlation_id": correlation,
+            "caller_completed": True,
+            "caller_grpc_code": "Unavailable",
+            "caller_elapsed_ms": max(1, (completed_ns - started_ns) // 1_000_000),
+            "caller_completion_count": 1,
+            "worker_pid": 77,
+        }
+        if include_completion:
+            result["caller_completed_at_ns"] = completed_ns
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, "-", str(started_path), str(result_path), correlation,
+             "" if disconnect_ns is None else str(disconnect_ns), "1", "1"],
+            input=observer_program,
+            text=True,
+            capture_output=True,
+        )
+
+observed = run_observer(1_000_000_000, 7_990_000_000, 8_000_000_000)
+assert observed.returncode == 0, observed.stderr
+observed_evidence = json.loads(observed.stdout)
+assert observed_evidence["caller_elapsed_ms"] == 7000
+assert observed_evidence["disconnect_elapsed_ms"] == 10
+exact_sla = run_observer(1_000_000_000, 7_990_000_000, 9_990_000_000)
+assert exact_sla.returncode == 0, exact_sla.stderr
+over_sla = run_observer(1_000_000_000, 7_990_000_000, 9_990_000_001)
+assert over_sla.returncode != 0
+assert "disconnect latency exceeded 2 seconds" in over_sla.stderr
+before_disconnect = run_observer(1_000_000_000, 7_990_000_000, 7_989_000_000)
+assert before_disconnect.returncode != 0
+assert "completed before disconnect" in before_disconnect.stderr
+missing_completion = run_observer(
+    1_000_000_000, 7_990_000_000, 8_000_000_000, include_completion=False
+)
+assert missing_completion.returncode != 0
+assert "caller_completed_at_ns must be a positive integer" in missing_completion.stderr
+missing_disconnect = run_observer(1_000_000_000, None, 8_000_000_000)
+assert missing_disconnect.returncode != 0
 
 proxy_phase = harness.split("start_kafka_hold_proxy() {", 1)[1].split("\nstop_kafka_hold_proxy() {", 1)[0]
 config_program = proxy_phase.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]

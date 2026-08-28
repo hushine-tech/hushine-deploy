@@ -322,8 +322,11 @@ validate_cleanup_manifest() {
       and .kafka_proxy.config == ($state_dir + "/control-pending.yaml")
       and .kafka_proxy.control_dir == ($state_dir + "/kafka-proxy")))
     and ((.pending_rpc // null) == null or (
-      (.pending_rpc | keys) == ["correlation_id"]
-      and (.pending_rpc.correlation_id | test("^rpc-[0-9a-f]{24}$"))))
+      (.pending_rpc | type) == "object"
+      and (((.pending_rpc | keys) - ["correlation_id","disconnect_requested_at_ns"]) | length) == 0
+      and (.pending_rpc.correlation_id | type == "string" and test("^rpc-[0-9a-f]{24}$"))
+      and ((.pending_rpc | has("disconnect_requested_at_ns") | not) or
+        (.pending_rpc.disconnect_requested_at_ns | type == "number" and . > 0 and floor == .))))
     and ((.cleanup_progress // {}) as $progress |
       ($progress | type == "object")
       and (($progress | keys) - ["containers","kafka_topic","order","portfolio","control","market"] | length) == 0
@@ -718,13 +721,15 @@ pending_method = '''    def _run_acceptance_pending_call(self, control: dict[str
         except Exception as exc:
             code = str(getattr(exc, "code", ""))
             message = str(exc)
+        completed_ns = time.time_ns()
         self._atomic_private_json(result_path, {
             "schema": 1,
             "correlation_id": correlation,
             "caller_completed": True,
             "caller_grpc_code": code,
             "caller_error": message,
-            "caller_elapsed_ms": max(1, (time.time_ns() - started_ns) // 1_000_000),
+            "caller_completed_at_ns": completed_ns,
+            "caller_elapsed_ms": max(1, (completed_ns - started_ns) // 1_000_000),
             "caller_completion_count": 1,
             "worker_pid": os.getpid(),
         })
@@ -1400,7 +1405,7 @@ live_action() {
     create-normal) create_normal_fixture ;;
     snapshot-before|snapshot-disconnected|snapshot-after) snapshot_normal ;;
     start-pending-platform-rpc)
-      local owner root hold armed_file started_file result_file observation held_file proxy_count broker_count worker_pid
+      local owner root hold armed_file started_file result_file observation held_file proxy_count broker_count worker_pid started_at_ns
       owner="$(state_get .owner_token)"; root="$(state_get .normal.runtime_root)"
       correlation="rpc-${owner:0:24}"
       hold="${STATE_DIR}/kafka-proxy/hold.json"
@@ -1421,12 +1426,14 @@ live_action() {
       wait_for 15 "one durable correlated notification" kafka_notification_count_is "${correlation}" 1
       proxy_count="$(jq -er .produce_request_count "${observation}")"; broker_count="$(kafka_notification_count "${correlation}")"
       worker_pid="$(jq -er .worker_pid "${started_file}")"
+      started_at_ns="$(jq -er '.started_at_ns | select(type == "number" and . > 0 and floor == .)' "${started_file}")"
       state_update --arg correlation "${correlation}" '.pending_rpc={correlation_id:$correlation}'
       jq -nc --arg correlation_id "${correlation}" --argjson proxy_count "${proxy_count}" \
-        --argjson broker_count "${broker_count}" --argjson worker_pid "${worker_pid}" \
-        '{correlation_id:$correlation_id,caller:"python-worker",method:"notification.Publish",worker_started:true,worker_pid:$worker_pid,proxy_produce_count:$proxy_count,platform_execution_count:$broker_count}'
+        --argjson broker_count "${broker_count}" --argjson worker_pid "${worker_pid}" --argjson started_at_ns "${started_at_ns}" \
+        '{correlation_id:$correlation_id,caller:"python-worker",method:"notification.Publish",worker_started:true,worker_pid:$worker_pid,started_at_ns:$started_at_ns,proxy_produce_count:$proxy_count,platform_execution_count:$broker_count}'
       ;;
     stop-control-panel)
+      local disconnect_requested_at_ns
       runtime="$(state_get .normal.runtime_id)"
       result="$(pg control_panel -At -v runtime_id="${runtime}" <<'SQL'
 SELECT json_build_object(
@@ -1438,23 +1445,75 @@ SQL
       jq -e '.lease.row_count == 1 and (.connection_owner.instance_id | length > 0)' <<<"${result}" >/dev/null \
         || die "pre-restart RuntimeChannel server facts are incomplete"
       state_update --argjson raw "${result}" '.normal.lease_before=$raw.lease | .normal.connection_owner_before=$raw.connection_owner'
+      disconnect_requested_at_ns="$(python3 -c 'import time; print(time.time_ns())')"
+      state_update --argjson disconnect_requested_at_ns "${disconnect_requested_at_ns}" \
+        '.pending_rpc.disconnect_requested_at_ns=$disconnect_requested_at_ns'
       control_stop
       wait_for 15 "agent readiness cleared" agent_ready_is "$(state_get .normal.container_name)" 503
-      jq -nc '{stopped:true,only_control_panel:true}'
+      jq -nc --argjson disconnect_requested_at_ns "${disconnect_requested_at_ns}" \
+        '{stopped:true,only_control_panel:true,disconnect_requested_at_ns:$disconnect_requested_at_ns}'
       ;;
     observe-pending-platform-rpc)
-      local root result_file proxy_count broker_count
+      local root started_file result_file proxy_count broker_count disconnect_requested_at_ns
       root="$(state_get .normal.runtime_root)"; correlation="$(state_get .pending_rpc.correlation_id)"
+      started_file="${root}/pending-call-started.json"
       result_file="${root}/pending-call-result.json"
       wait_for 10 "pending Worker caller completion" json_file_matches "${result_file}" ".correlation_id == \"${correlation}\" and .caller_completed == true"
       rm -f -- "${STATE_DIR}/kafka-proxy/hold.json"
       proxy_count="$(jq -er .produce_request_count "${STATE_DIR}/kafka-proxy/produce-observation.json")"
       broker_count="$(kafka_notification_count "${correlation}")"
-      jq -nc --argjson result "$(<"${result_file}")" --argjson proxy_count "${proxy_count}" --argjson broker_count "${broker_count}" \
-        '{correlation_id:$result.correlation_id,caller_completed:$result.caller_completed,
-          caller_grpc_code:$result.caller_grpc_code,caller_elapsed_ms:$result.caller_elapsed_ms,
-          caller_completion_count:$result.caller_completion_count,worker_pid:$result.worker_pid,
-          proxy_produce_count:$proxy_count,platform_execution_count:$broker_count}'
+      disconnect_requested_at_ns="$(state_get .pending_rpc.disconnect_requested_at_ns)"
+      python3 - "${started_file}" "${result_file}" "${correlation}" \
+        "${disconnect_requested_at_ns}" "${proxy_count}" "${broker_count}" <<'PY'
+import json
+import sys
+
+
+def positive_integer(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise SystemExit(f"{label} must be a positive integer")
+    return value
+
+
+started_path, result_path, correlation = sys.argv[1:4]
+disconnect_requested_at_ns = positive_integer(int(sys.argv[4]), "disconnect_requested_at_ns")
+proxy_count = positive_integer(int(sys.argv[5]), "proxy_produce_count")
+broker_count = positive_integer(int(sys.argv[6]), "platform_execution_count")
+with open(started_path, encoding="utf-8") as source:
+    started = json.load(source)
+with open(result_path, encoding="utf-8") as source:
+    result = json.load(source)
+started_at_ns = positive_integer(started.get("started_at_ns"), "started_at_ns")
+caller_completed_at_ns = positive_integer(
+    result.get("caller_completed_at_ns"), "caller_completed_at_ns"
+)
+if result.get("correlation_id") != correlation or started.get("correlation_id") != correlation:
+    raise SystemExit("pending caller correlation changed")
+if caller_completed_at_ns < disconnect_requested_at_ns:
+    raise SystemExit("pending caller completed before disconnect was requested")
+caller_elapsed_ms = max(1, (caller_completed_at_ns - started_at_ns) // 1_000_000)
+if result.get("caller_elapsed_ms") != caller_elapsed_ms:
+    raise SystemExit("pending caller total elapsed time is inconsistent")
+disconnect_elapsed_ns = caller_completed_at_ns - disconnect_requested_at_ns
+if disconnect_elapsed_ns > 2_000_000_000:
+    raise SystemExit("pending caller disconnect latency exceeded 2 seconds")
+disconnect_elapsed_ms = disconnect_elapsed_ns // 1_000_000
+evidence = {
+    "correlation_id": correlation,
+    "caller_completed": result.get("caller_completed"),
+    "caller_grpc_code": result.get("caller_grpc_code"),
+    "started_at_ns": started_at_ns,
+    "disconnect_requested_at_ns": disconnect_requested_at_ns,
+    "caller_completed_at_ns": caller_completed_at_ns,
+    "caller_elapsed_ms": caller_elapsed_ms,
+    "disconnect_elapsed_ms": disconnect_elapsed_ms,
+    "caller_completion_count": result.get("caller_completion_count"),
+    "worker_pid": result.get("worker_pid"),
+    "proxy_produce_count": proxy_count,
+    "platform_execution_count": broker_count,
+}
+print(json.dumps(evidence, separators=(",", ":")))
+PY
       ;;
     start-control-panel)
       control_start "$(control_runtime_config)"
@@ -1601,10 +1660,16 @@ derive_pending_evidence() {
     .caller == "python-worker" and .method == "notification.Publish"
     and .worker_started == true and .platform_execution_count == 1
     and .proxy_produce_count == 1 and .worker_pid > 1
+    and (.started_at_ns | type == "number" and . > 0 and floor == .)
     and (.correlation_id | type == "string" and length > 0)
     and $failed.correlation_id == .correlation_id
     and $failed.caller_completed == true and $failed.caller_grpc_code == "Unavailable"
-    and $failed.caller_elapsed_ms > 0 and $failed.caller_elapsed_ms <= 2000
+    and $failed.started_at_ns == .started_at_ns
+    and ($failed.disconnect_requested_at_ns | type == "number" and . > 0 and floor == .)
+    and ($failed.caller_completed_at_ns | type == "number" and . > 0 and floor == .)
+    and $failed.caller_completed_at_ns >= $failed.disconnect_requested_at_ns
+    and $failed.caller_elapsed_ms > 0
+    and $failed.disconnect_elapsed_ms >= 0 and $failed.disconnect_elapsed_ms <= 2000
     and $failed.platform_execution_count == 1
     and $failed.proxy_produce_count == 1 and $failed.caller_completion_count == 1
     and $failed.worker_pid == .worker_pid
@@ -1613,7 +1678,12 @@ derive_pending_evidence() {
     and $after.caller_completion_count == 1 and $after.observation_window_seconds >= 7
   ' <<<"${started}" >/dev/null || die "raw pending RuntimeChannel call observations are inconsistent or replayed"
   jq -nc --argjson started "${started}" --argjson failed "${failed}" --argjson after "${after_resume}" '{
-    status:"failed",grpc_code:$failed.caller_grpc_code,elapsed_ms:$failed.caller_elapsed_ms,
+    status:"failed",grpc_code:$failed.caller_grpc_code,
+    started_at_ns:$failed.started_at_ns,
+    disconnect_requested_at_ns:$failed.disconnect_requested_at_ns,
+    caller_completed_at_ns:$failed.caller_completed_at_ns,
+    total_elapsed_ms:$failed.caller_elapsed_ms,
+    disconnect_elapsed_ms:$failed.disconnect_elapsed_ms,
     replay_count:($after.platform_execution_count - 1),correlation_id:$started.correlation_id,
     platform_execution_count:$after.platform_execution_count,
     proxy_produce_count:$after.proxy_produce_count,
@@ -1744,12 +1814,17 @@ capture_action pending_started start-pending-platform-rpc "${normal_fixture}"
 require_json pending-started '
   .worker_started == true and .caller == "python-worker"
   and .method == "notification.Publish" and .platform_execution_count == 1
+  and .proxy_produce_count == 1
+  and (.started_at_ns | type == "number" and . > 0 and floor == .)
   and (.correlation_id | type == "string" and length > 0)
 ' "${pending_started}"
 
 state_update '.control_panel_stopped=true'
 capture_action stopped stop-control-panel "${normal_fixture}"
-require_json stop-control-panel '.stopped == true and .only_control_panel == true' "${stopped}"
+require_json stop-control-panel '
+  .stopped == true and .only_control_panel == true
+  and (.disconnect_requested_at_ns | type == "number" and . > 0 and floor == .)
+' "${stopped}"
 
 capture_action disconnected snapshot-disconnected "${normal_fixture}"
 require_json disconnected '
@@ -1762,8 +1837,14 @@ same_identity "${before}" "${disconnected}" \
 capture_action pending_failed observe-pending-platform-rpc "${normal_fixture}"
 require_json pending-failed '
   .caller_completed == true and .caller_grpc_code == "Unavailable"
-  and .caller_elapsed_ms > 0 and .caller_elapsed_ms <= 2000
-  and .platform_execution_count == 1
+  and (.started_at_ns | type == "number" and . > 0 and floor == .)
+  and (.disconnect_requested_at_ns | type == "number" and . > 0 and floor == .)
+  and (.caller_completed_at_ns | type == "number" and . > 0 and floor == .)
+  and .caller_completed_at_ns >= .disconnect_requested_at_ns
+  and .caller_elapsed_ms > 0
+  and .disconnect_elapsed_ms >= 0 and .disconnect_elapsed_ms <= 2000
+  and .caller_completion_count == 1
+  and .proxy_produce_count == 1 and .platform_execution_count == 1
 ' "${pending_failed}"
 
 capture_action started start-control-panel "${normal_fixture}"
