@@ -175,6 +175,13 @@ disposable credential，以及用临时 fast-grace control-panel 配置让第三
 terminal grace；两者都必须无 reconnect storm 并安全停止。清理以随机 owner label、
 精确 user/runtime/session/symbol 为边界，不重置共享 database、volume 或无关 Runtime。
 
+pending RPC 是 Worker 发出的真实 `notification.Publish`。验收临时把 control-panel 的
+notification Kafka broker 指到私有 frame-aware proxy，只扣住该 correlation 的 Produce
+response；Worker caller 的 typed error、proxy Produce 计数和 `notification.events` 中的唯一
+event 都必须一致。结束时无论在哪个断言失败，脚本都先恢复运行前的 control-panel config/
+readiness，再删除 fixture。`--cleanup-only` 也会先验证 mode-0600 manifest、owner 派生字段和
+跨库 ownership；manifest 被编辑、换 owner/ID/source/symbol 或权限变宽时不执行任何清理。
+
 ## 替换 hosted runtime
 
 1. 打开 `Runtime Management`。

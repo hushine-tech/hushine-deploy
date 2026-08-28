@@ -28,6 +28,19 @@ make runtime-channel-restart-acceptance
 `funding_rate interval=''`；存在旧约束时在创建 fixture 前明确失败，必须先通过
 control-panel-service migration 修复 schema drift，不能由验收脚本改写共享 schema。
 
+pending-call 证据不是 handler 侧合成值：同一 Python Worker 发起带唯一 correlation 的
+`notification.Publish`，harness 的 Kafka frame barrier 只扣住对应 Produce response；
+broker topic、barrier 和 Worker caller 文件共同证明请求已执行一次、断线以 typed
+`Unavailable` 返回，而且 RESUME 后没有第二次 Produce。RESUME 本身由 credential 已消费、
+单行 lease 的 `issued_at` 不变/`updated_at` 前进、connection owner 轮换和无 admission
+failure 的数据库事实推导。Funding 验证比较 Income 的精确 applied amount 与三项 canonical
+wallet delta，并要求 durable cursor 等于同一 Income ID。
+
+保留的 cleanup manifest 是 fail-closed 边界：目录/文件 owner 和 mode、schema、随机 owner、
+所有 ID/label/path/market 派生值必须先验证，再用数据库关系确认 fixture ownership。清理仅
+执行显式、依赖顺序固定的 owner-scoped 删除；诊断只保留 PID/status/exit/image 和验收 owner
+label，不保留 Docker env、credential、TLS 或 private key。
+
 ## Income delivery
 
 ```text
