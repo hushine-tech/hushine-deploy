@@ -156,6 +156,7 @@ local-dev: local-bootstrap
 	wait
 
 local-start: local-bootstrap
+	@$(MAKE) local-stop
 	@$(LOCAL_NO_PROXY) $(MAKE) -C "$(SOURCE_ROOT)/core-service" CONFIG=./config.local.yaml start
 	@sleep 2
 	@$(LOCAL_NO_PROXY) $(LOCAL_RUNTIME_COVERAGE_ENV) $(MAKE) -C "$(SOURCE_ROOT)/control-panel-service" CONFIG=./config.local.yaml start

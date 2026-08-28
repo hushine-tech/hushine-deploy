@@ -94,6 +94,24 @@ for required in \
   }
 done
 
+local_start_recipe="$({
+  awk '
+    /^local-start:/ { in_target=1 }
+    in_target && /^[^[:space:]#][^=]*:/ && !/^local-start:/ { exit }
+    in_target { print }
+  ' "$deploy_root/Makefile"
+})"
+[[ "$(grep -Fc -- '$(MAKE) local-stop' <<<"$local_start_recipe")" -eq 1 ]] || {
+  echo 'local-start must call local-stop exactly once' >&2
+  exit 1
+}
+local_stop_line="$(grep -Fn -- '$(MAKE) local-stop' <<<"$local_start_recipe" | cut -d: -f1)"
+first_start_line="$(grep -Fn -- '$(SOURCE_ROOT)/core-service' <<<"$local_start_recipe" | cut -d: -f1 | head -1)"
+[[ -n "$first_start_line" && "$local_stop_line" -lt "$first_start_line" ]] || {
+  echo 'local-start must stop managed services before starting core-service' >&2
+  exit 1
+}
+
 fallback_uv_home="$tmpdir/fallback-uv-home"
 mkdir -p "$fallback_uv_home/.local/bin"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$fallback_uv_home/.local/bin/uv"
