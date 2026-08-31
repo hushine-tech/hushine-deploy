@@ -51,7 +51,10 @@ def verify_hash(relative: object, expected: object) -> None:
         raise SystemExit(f"checksum mismatch: {relative}")
 
 verify_hash("search-index.json", manifest.get("search_index_sha256"))
-allowed = {"manifest.json", "search-index.json"}
+if manifest.get("source_index_schema_version") != 1:
+    raise SystemExit("invalid source index schema version")
+verify_hash("source-index.json", manifest.get("source_index_sha256"))
+allowed = {"manifest.json", "search-index.json", "source-index.json"}
 for document in manifest.get("documents", []):
     if not isinstance(document, dict):
         raise SystemExit("invalid document manifest entry")

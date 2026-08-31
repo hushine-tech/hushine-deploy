@@ -128,12 +128,42 @@ docs_commit="$(git -C "${source_root}/hushine-docs" rev-parse HEAD)"
 [[ "${release}" == "${build_root}/${docs_commit}" ]]
 [[ -s "${release}/manifest.json" ]]
 [[ -s "${release}/search-index.json" ]]
+[[ -s "${release}/source-index.json" ]]
+
+python3 - "${release}" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+release = Path(sys.argv[1])
+manifest = json.loads((release / "manifest.json").read_text(encoding="utf-8"))
+source_index_path = release / "source-index.json"
+source_index = json.loads(source_index_path.read_text(encoding="utf-8"))
+assert manifest["source_index_schema_version"] == 1
+assert manifest["source_index_sha256"] == hashlib.sha256(source_index_path.read_bytes()).hexdigest()
+assert source_index["schema_version"] == 1
+assert source_index["chunks"] == sorted(
+    source_index["chunks"],
+    key=lambda chunk: (chunk["repository"], chunk["path"], chunk["start_line"]),
+)
+PY
 
 publish_root="${fixture}/published"
 DOCS_RELEASE_DIR="${release}" DOCS_PUBLISH_ROOT="${publish_root}" \
   bash "${PUBLISHER}"
 [[ "$(readlink "${publish_root}/current")" == "releases/${docs_commit}" ]]
 first_target="$(readlink "${publish_root}/current")"
+
+cp "${release}/source-index.json" "${fixture}/source-index.json"
+printf '%s\n' tampered >> "${release}/source-index.json"
+if DOCS_RELEASE_DIR="${release}" DOCS_PUBLISH_ROOT="${publish_root}" \
+  bash "${PUBLISHER}" >"${fixture}/tampered-source.stdout" 2>"${fixture}/tampered-source.stderr"; then
+  echo "publisher accepted a source-index checksum mismatch" >&2
+  exit 1
+fi
+grep -Fq 'checksum mismatch: source-index.json' "${fixture}/tampered-source.stderr"
+mv "${fixture}/source-index.json" "${release}/source-index.json"
 
 first_document="$(python3 - "${release}/manifest.json" <<'PY'
 import json
