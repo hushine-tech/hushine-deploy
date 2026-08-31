@@ -2,7 +2,7 @@
 
 日期：2026-08-31
 
-状态：已完成口头设计；等待书面规格确认
+状态：设计已批准；进入实施计划
 
 ## 1. 背景
 
@@ -310,10 +310,15 @@ POST /api/docs/conversations/{conversation_id}/messages
 
 ```text
 OPENAI_API_KEY
+OPENAI_BASE_URL（仅用于测试或明确的兼容端点覆盖，默认使用 OpenAI 官方地址）
 OPENAI_DOCS_MODEL
 DOCS_CHAT_ENABLED
 DOCS_CHAT_REQUESTS_PER_MINUTE
 ```
+
+`OPENAI_API_KEY` 只能由 `quant-handler` 进程环境提供，不能从 YAML、前端配置或文档包读取。Conversation
+中的 `hushine_uid_hash` 使用现有 JWT 服务端密钥和固定的用途隔离前缀生成 HMAC-SHA256；JWT 密钥轮换后，
+旧 Conversation 按失效处理，不额外增加第二份长期身份密钥。
 
 未配置 key、功能关闭、上游限频或模型失败时，只禁用右侧问答区。文档阅读和本地搜索继续工作。页面展示
 简洁错误，不回显上游响应、developer prompt、API key 或检索到但用户无权查看的内容。
