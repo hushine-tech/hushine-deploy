@@ -1,43 +1,31 @@
-# Hushine 文档
+# Hushine 文档归属
 
-最后核验：2026-08-27。
+当前用户手册、系统架构和基础运维文档的唯一内容源是同级独立仓库
+`hushine-docs`，用户通过 Portal 左侧底部的 **Documentation** 入口阅读。该页面为只读：
+Markdown 在 `hushine-docs` 中评审和提交，部署流程构建不可变发布包后由
+`quant-handler` 按登录用户权限提供。
 
-当前文档按使用目的分为三块。日期化 Superpowers/OpenSpec 文件是设计与决策记录，
-不作为部署或用户操作入口。
+```text
+hushine-docs Markdown
+  -> make docs-build
+  -> verified releases/<docs_commit>
+  -> atomic current symlink
+  -> quant-handler /api/docs/*
+  -> quant-frontend /docs
+```
 
-## 基础运维 / Operations
+本仓库的文档边界如下：
 
-- [`operations/local-development.md`](operations/local-development.md)：本机 PostgreSQL/
-  TimescaleDB、Kafka、ELK、Jaeger、一次性 schema bootstrap、服务和 coverage 启动
-- [`operations/funding-income.md`](operations/funding-income.md)：Funding 支持矩阵、同步调度、
-  监控告警、Mock Binance 与受保护的 Demo gate
-- [`production-deploy-checklist.md`](production-deploy-checklist.md)：发布前的完整部署与验收清单
-- [`local-docker.md`](local-docker.md)：本机 Docker 基础设施的详细配置
-- [`../db/README.md`](../db/README.md)：一次性数据库 baseline、owner 和生成 bundle
-- [`runtime-operator-flow.md`](runtime-operator-flow.md)：Hosted/Self-hosted/Bare Runtime
-  的启动、心跳、恢复和 worker restart
+- `docs/superpowers/`、`openspec/`、日期化审计与测试报告保存设计决策和验收证据，不是当前用户操作入口。
+- `db/README.md` 和各服务 migration 继续是数据库 schema 的权威来源；文档中心只提供面向读者的解释。
+- `README.md`、脚本和 Make target 继续定义发布、启动和验收动作。
+- 仍保留的旧用户手册/架构/运维 Markdown 仅用于迁移核对，不再作为当前内容源；确认对应页面已迁移并通过 Portal smoke 后，按独立删除提交清理。
 
-## 代码结构与逻辑 / Architecture
+本地生成并发布文档：
 
-- [`architecture/exchange-adapters.md`](architecture/exchange-adapters.md)：Registry capability、
-  Binance/OKX 边界、精确 Funding 计算与 Income 原子入账
-- [`architecture/runtime-channel.md`](architecture/runtime-channel.md)：Income 投递、持久化 cursor、
-  blocked Worker、restart、Backtest 时间线与 Indicator 分块
-- [`../README.md`](../README.md)：多仓库服务图、端口和通信边界
-- [`strategy-owned-futures-leverage.md`](strategy-owned-futures-leverage.md)：策略解析、
-  Preview、Binance apply/readback、原子提交与 rollback
-- [`spot-usdt.md`](spot-usdt.md)：Binance Spot asset/symbol、精确过滤器、订单、wallet、
-  stop-and-close 与 reconciliation
-- [`code-census/README.md`](code-census/README.md)：静态、单元覆盖率和页面采样方法
+```bash
+make local-docs
+```
 
-## 用户手册 / User Manual
-
-- [`user-manual/backtest.md`](user-manual/backtest.md)：Backtest、Funding 时间线、数据缺口、
-  多 symbol 与订单语义
-- [`user-manual/demo-live.md`](user-manual/demo-live.md)：Demo/Live、Funding 对账、Venue 模式、
-  Telegram 与 worker restart
-- [`user-manual.md`](user-manual.md)：登录、Portfolio/Venue、Market Data、Strategy、Runtime
-  和 Session 的页面总览
-
-发现文档与页面或代码不一致时，以当前测试通过的代码契约为准，并在同一修改中更新
-这里的当前文档；不要继续链接已删除的验收快照或审计记录。
+发布失败不会切换 `current`。文档包缺失或校验失败时，只有 `/api/docs/*` 返回
+`DOCS_UNAVAILABLE`，健康检查和交易业务接口继续可用。
