@@ -28,6 +28,7 @@ def _localize_yaml(
     *,
     control: bool = False,
     core: bool = False,
+    handler: bool = False,
 ) -> None:
     source = SOURCE_ROOT / relative_source
     target = SOURCE_ROOT / relative_target
@@ -71,6 +72,19 @@ def _localize_yaml(
             )
             if count != 1:
                 raise RuntimeError(f"control-panel RuntimeChannel TLS {key} is missing")
+    if handler:
+        text = re.sub(
+            r"(?ms)^docs:\n(?:^[ \t]+.*\n|^[ \t]*\n)*",
+            "",
+            text,
+            count=1,
+        ).rstrip()
+        docs_root = (SOURCE_ROOT / ".generated/docs/current").resolve()
+        text += (
+            "\n\ndocs:\n"
+            f"  root: {json.dumps(str(docs_root))}\n"
+            "  privileged_user_ids: []\n"
+        )
     _write_private(target, GENERATED_HEADER + text)
 
 
@@ -118,14 +132,12 @@ def main() -> int:
         "core-service/config.local.yaml",
         core=True,
     )
-    for source, target in (
-        (
-            "gateway/quant-handler/config.yaml",
-            "gateway/quant-handler/config.local.yaml",
-        ),
-        ("scraper/config.yaml", "scraper/config.local.yaml"),
-    ):
-        _localize_yaml(source, target)
+    _localize_yaml(
+        "gateway/quant-handler/config.yaml",
+        "gateway/quant-handler/config.local.yaml",
+        handler=True,
+    )
+    _localize_yaml("scraper/config.yaml", "scraper/config.local.yaml")
     _localize_yaml(
         "control-panel-service/config.yaml",
         "control-panel-service/config.local.yaml",

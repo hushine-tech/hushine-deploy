@@ -5,8 +5,9 @@ Last verified: 2026-08-27.
 Deployment, database, smoke-test, and operator documentation for the Hushine
 multi-repository system.
 
-Documentation entry point: [docs/README.md](docs/README.md), organized as
-基础运维、代码结构和逻辑、用户手册.
+Current Markdown is maintained in the independent `hushine-docs` repository and
+published to the in-product Documentation Center. This repository keeps only
+deployment ownership, transition notes, dated design history, and test evidence.
 
 This repository does not contain service source code. Clone it beside the
 service repositories and keep the directory names below.
@@ -18,6 +19,7 @@ mkdir hushine
 cd hushine
 
 git clone git@github.com:hushine-tech/hushine-deploy.git .
+git clone git@github.com:hushine-tech/hushine-docs.git hushine-docs
 git clone git@github.com:hushine-tech/core-service.git core-service
 git clone git@github.com:hushine-tech/control-panel-service.git control-panel-service
 git clone git@github.com:hushine-tech/quant-handler.git gateway/quant-handler
@@ -38,6 +40,7 @@ hushine/
   docs/
   db/
   scripts/
+  hushine-docs/          # current product/operator Markdown + package builder
   core-service/          # GitHub: hushine-tech/core-service
   control-panel-service/
   gateway/
@@ -78,8 +81,21 @@ make local-stop
 
 `local-bootstrap` regenerates the ignored `config.local.yaml` files from the
 tracked service configs, rewrites infrastructure endpoints to localhost, and
-creates the runtime coverage output directory. Hosted runtimes started by the
-local control panel use the coverage image by default.
+creates the runtime coverage output directory. It also builds the clean
+`hushine-docs` checkout and atomically publishes it under
+`.generated/docs/current`. Hosted runtimes started by the local control panel
+use the coverage image by default.
+
+Document-only commands:
+
+```bash
+make docs-build
+make docs-publish
+make local-docs
+```
+
+Production publication sets `DOCS_PUBLISH_ROOT=/var/lib/hushine/docs`; the
+default local root remains inside `.generated/` and is not committed.
 
 `make dev` still runs services against each repository's explicitly selected
 config. Use it with remote infrastructure only after supplying and probing that

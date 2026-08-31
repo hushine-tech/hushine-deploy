@@ -9,7 +9,10 @@ GENERATOR="${DEPLOY_ROOT}/scripts/prepare-local-configs.py"
   echo "missing executable local config generator" >&2
   exit 1
 }
-grep -Fq 'local-bootstrap: local-configs local-infra-up' "${DEPLOY_ROOT}/Makefile"
+grep -Fq 'local-bootstrap: local-configs local-docs local-infra-up' "${DEPLOY_ROOT}/Makefile"
+grep -Fq 'docs-build:' "${DEPLOY_ROOT}/Makefile"
+grep -Fq 'docs-publish: docs-build' "${DEPLOY_ROOT}/Makefile"
+grep -Fq 'local-docs: docs-publish' "${DEPLOY_ROOT}/Makefile"
 grep -Fq 'RUNTIME_COVERAGE_ENABLED=true' "${DEPLOY_ROOT}/Makefile"
 grep -Fq 'RUNTIME_COVERAGE_OUTPUT_DIR=' "${DEPLOY_ROOT}/Makefile"
 grep -Fq 'RUNTIME_COVERAGE_IMAGE=' "${DEPLOY_ROOT}/Makefile"
@@ -141,6 +144,14 @@ assert match.group(5) == str(cert_dir / "runtime-client-ca.key")
 handler = (root / "gateway/quant-handler/config.local.yaml").read_text()
 assert '    - "http://localhost:5173"' in handler
 assert '    - "http://127.0.0.1:5173"' in handler
+expected_docs_root = str((root / ".generated/docs/current").resolve())
+docs = re.search(
+    r'(?ms)^docs:\n'
+    r'  root: "([^"]+)"\n'
+    r'  privileged_user_ids: \[\]$',
+    handler,
+)
+assert docs and docs.group(1) == expected_docs_root
 
 log = json.loads((root / "scraper/log-config.local.json").read_text())
 assert log["kafka"] == {

@@ -25,13 +25,19 @@ LOCAL_NO_PROXY := NO_PROXY=$(LOCAL_NO_PROXY_HOSTS),$${NO_PROXY} no_proxy=$(LOCAL
 LOCAL_RUNTIME_COVERAGE_DIR ?= $(SOURCE_ROOT)/.coverage/runtime-agent
 LOCAL_RUNTIME_COVERAGE_IMAGE ?= hushine/strategy-runtime:executor-coverage-dev
 LOCAL_RUNTIME_COVERAGE_ENV := env RUNTIME_COVERAGE_ENABLED=true RUNTIME_COVERAGE_OUTPUT_DIR="$(LOCAL_RUNTIME_COVERAGE_DIR)" RUNTIME_COVERAGE_IMAGE="$(LOCAL_RUNTIME_COVERAGE_IMAGE)"
+HUSHINE_DOCS_ROOT ?= $(SOURCE_ROOT)/hushine-docs
+DOCS_BUILD_ROOT ?= $(SOURCE_ROOT)/.generated/docs-build
+DOCS_PUBLISH_ROOT ?= $(SOURCE_ROOT)/.generated/docs
 
-.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle local-configs local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted runtime-dependency-envs runtime-dependency-contract runtime-images-verify runtime-dependency-acceptance runtime-channel-restart-acceptance test-runtime-indicator-v2 funding-income-service-chain funding-income-demo-smoke no-first-party-compatibility code-census-static code-census-snapshot code-census-unit-coverage code-census-session-start code-census-session-stop code-census-full
+.PHONY: build dev start stop clean test help ensure-dbs db-schema-bundle docs-build docs-publish local-docs local-configs local-infra-up local-infra-down local-infra-reset local-infra-ps local-bootstrap local-ensure-dbs local-dev local-start local-stop runtime-image smoke-hosted-runtime smoke-self-hosted-runtime runtime-smoke-hosted runtime-smoke-self-hosted runtime-dependency-envs runtime-dependency-contract runtime-images-verify runtime-dependency-acceptance runtime-channel-restart-acceptance test-runtime-indicator-v2 funding-income-service-chain funding-income-demo-smoke no-first-party-compatibility code-census-static code-census-snapshot code-census-unit-coverage code-census-session-start code-census-session-stop code-census-full
 
 help:
 	@echo "Targets:"
 	@echo "  ensure-dbs — create all databases + apply migrations (fresh deploy first step)"
 	@echo "  db-schema-bundle — render versioned fresh-bootstrap SQL bundles"
+	@echo "  docs-build — build a verified immutable document release"
+	@echo "  docs-publish — publish the current document release atomically"
+	@echo "  local-docs — build and publish docs under the local generated root"
 	@echo "  build      — compile all Go services"
 	@echo "  dev        — run all services in foreground (Ctrl+C to stop)"
 	@echo "  start      — build and start all services in background"
@@ -68,6 +74,19 @@ ensure-dbs:
 
 db-schema-bundle:
 	@HUSHINE_SOURCE_ROOT="$(SOURCE_ROOT)" bash $(DEPLOY_ROOT)/scripts/db/render-schema-bundle.sh
+
+docs-build:
+	@HUSHINE_SOURCE_ROOT="$(SOURCE_ROOT)" \
+		HUSHINE_DOCS_ROOT="$(HUSHINE_DOCS_ROOT)" \
+		DOCS_BUILD_ROOT="$(DOCS_BUILD_ROOT)" \
+		bash $(DEPLOY_ROOT)/scripts/docs/build-release.sh
+
+docs-publish: docs-build
+	@DOCS_RELEASE_DIR="$(DOCS_BUILD_ROOT)/$$(git -C "$(HUSHINE_DOCS_ROOT)" rev-parse HEAD)" \
+		DOCS_PUBLISH_ROOT="$(DOCS_PUBLISH_ROOT)" \
+		bash $(DEPLOY_ROOT)/scripts/docs/publish-release.sh
+
+local-docs: docs-publish
 
 build:
 	@for svc in $(SERVICES); do \
@@ -136,7 +155,7 @@ local-configs:
 	@HUSHINE_SOURCE_ROOT="$(SOURCE_ROOT)" HUSHINE_LOCAL_CERT_DIR="$(DEPLOY_ROOT)/certs" python3 $(DEPLOY_ROOT)/scripts/prepare-local-configs.py
 	@mkdir -p "$(LOCAL_RUNTIME_COVERAGE_DIR)"
 
-local-bootstrap: local-configs local-infra-up
+local-bootstrap: local-configs local-docs local-infra-up
 	@bash $(DEPLOY_ROOT)/scripts/local-bootstrap.sh
 
 local-ensure-dbs:
