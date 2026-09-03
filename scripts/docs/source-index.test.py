@@ -191,6 +191,77 @@ class SourceIndexTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("symlink leaves repository", result.stderr)
 
+    def test_accepts_the_declared_strategy_library_repository_link_without_following_it(self) -> None:
+        repositories = {}
+        for name in ("strategy-service", "strategy-library"):
+            repository = self.source_root / name
+            repository.mkdir(parents=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "init", "-b", "main"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.name", "Source Index Test"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "user.email", "source-index@invalid"],
+                check=True,
+            )
+            repositories[name] = repository
+
+        (repositories["strategy-library"] / "wallet.py").write_text(
+            "def available_balance():\n    return 1\n",
+            encoding="utf-8",
+        )
+        (repositories["strategy-service"] / "worker.py").write_text(
+            "def run_worker():\n    return True\n",
+            encoding="utf-8",
+        )
+        (repositories["strategy-service"] / "strategy-library").symlink_to(
+            "../strategy-library"
+        )
+
+        commits = {}
+        for name, repository in repositories.items():
+            subprocess.run(["git", "-C", str(repository), "add", "-A"], check=True)
+            subprocess.run(
+                ["git", "-C", str(repository), "commit", "-m", "fixture"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            commits[name] = subprocess.check_output(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+            ).strip()
+
+        deployment = self.root / "strategy-deployment.json"
+        deployment.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "repositories": [
+                        {"name": name, "commit": commits[name]}
+                        for name in sorted(commits)
+                    ],
+                    "images": [],
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        output = self.root / "strategy-index.json"
+
+        result = self.run_index(deployment, output)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        chunks = json.loads(output.read_text(encoding="utf-8"))["chunks"]
+        self.assertEqual(
+            {(chunk["repository"], chunk["path"]) for chunk in chunks},
+            {("strategy-library", "wallet.py"), ("strategy-service", "worker.py")},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

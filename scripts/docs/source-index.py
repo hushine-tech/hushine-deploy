@@ -36,6 +36,9 @@ REPOSITORY_PATHS = {
     "strategy-library": ("strategy-library",),
     "golang-lib": ("golang-lib",),
 }
+ALLOWED_REPOSITORY_SYMLINKS = {
+    ("strategy-service", "strategy-library"): ("../strategy-library", "strategy-library"),
+}
 COMMIT_RE = re.compile(r"^[a-f0-9]{40}$")
 EXCLUDED_DIRECTORIES = {
     ".git",
@@ -162,7 +165,13 @@ def tracked_entries(repository: Path, commit: str) -> Iterable[tuple[str, str, s
         yield mode, object_type, path
 
 
-def validate_symlink(repository: Path, commit: str, path: str) -> None:
+def validate_symlink(
+    repository: Path,
+    repository_name: str,
+    deployed_repositories: set[str],
+    commit: str,
+    path: str,
+) -> None:
     raw_target = bytes(git(repository, "show", f"{commit}:{path}", binary=True))
     try:
         target = raw_target.decode("utf-8")
@@ -172,6 +181,9 @@ def validate_symlink(repository: Path, commit: str, path: str) -> None:
         raise IndexError(f"symlink leaves repository: {path}")
     normalized = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
     if normalized == ".." or normalized.startswith("../"):
+        allowed = ALLOWED_REPOSITORY_SYMLINKS.get((repository_name, path))
+        if allowed is not None and target == allowed[0] and allowed[1] in deployed_repositories:
+            return
         raise IndexError(f"symlink leaves repository: {path}")
 
 
@@ -271,13 +283,14 @@ def chunks_for_file(repository_name: str, commit: str, path: str, content: bytes
 def build_index(source_root: Path, deployment_file: Path) -> dict[str, object]:
     deployment_raw = deployment_file.read_bytes()
     repositories = parse_deployment(deployment_raw)
+    deployed_repositories = {fact["name"] for fact in repositories}
     chunks: list[dict[str, object]] = []
     for fact in repositories:
         name, commit = fact["name"], fact["commit"]
         repository = repository_path(source_root, name)
         for mode, object_type, path in tracked_entries(repository, commit):
             if mode == "120000":
-                validate_symlink(repository, commit, path)
+                validate_symlink(repository, name, deployed_repositories, commit, path)
                 continue
             if object_type != "blob" or not is_allowed_path(path):
                 continue
