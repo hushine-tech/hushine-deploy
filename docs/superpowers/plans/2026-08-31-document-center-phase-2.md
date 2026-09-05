@@ -1,5 +1,9 @@
 # Document Center Phase 2 Implementation Plan
 
+> Superseded provider/persistence design: follow
+> [2026-09-05 Codex CLI correction](../specs/2026-09-05-document-assistant-cli-correction.md).
+> The API-key HTTP provider described below is historical and has been removed.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a single persistent per-user browser Conversation that answers from the authorized document package and exact deployed source code, restores history after reopening, and returns verifiable citations.

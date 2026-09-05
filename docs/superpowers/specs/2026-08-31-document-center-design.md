@@ -1,5 +1,9 @@
 # Hushine 文档中心与本机持久源码问答设计
 
+> 2026-09-05 修正：本文模型接入与会话持久化部分由
+> [Codex CLI 接入修正](2026-09-05-document-assistant-cli-correction.md) 覆盖。
+> 不再使用 Responses/Conversations API 或 API key；以当前运维文档为准。
+
 日期：2026-08-31
 
 状态：设计已批准；进入实施计划
