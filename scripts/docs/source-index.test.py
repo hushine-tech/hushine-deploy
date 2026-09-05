@@ -13,6 +13,17 @@ SCRIPT = Path(__file__).with_name("source-index.py")
 
 
 class SourceIndexTest(unittest.TestCase):
+    def test_omits_empty_and_whitespace_only_source_chunks(self) -> None:
+        self.write("package/__init__.py", "\n")
+        self.write("empty.py", "")
+        self.write("whitespace.py", " \n\t\n")
+        self.write("real.py", "value = 1\n")
+        output = self.root / "index.json"
+        result = self.run_index(self.deployment(self.commit()), output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        chunks = json.loads(output.read_text())["chunks"]
+        self.assertEqual([chunk["path"] for chunk in chunks], ["real.py"])
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

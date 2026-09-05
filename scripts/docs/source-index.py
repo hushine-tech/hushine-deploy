@@ -262,6 +262,8 @@ def chunks_for_file(repository_name: str, commit: str, path: str, content: bytes
     chunks: list[dict[str, object]] = []
     for start, end in chunk_ranges(lines):
         text = "\n".join(lines[start:end])
+        if not text.strip():
+            continue
         identity = f"{repository_name}\0{path}\0{start + 1}\0{end}".encode()
         chunks.append(
             {
