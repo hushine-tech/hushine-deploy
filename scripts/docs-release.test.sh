@@ -155,6 +155,22 @@ DOCS_RELEASE_DIR="${release}" DOCS_PUBLISH_ROOT="${publish_root}" \
 [[ "$(readlink "${publish_root}/current")" == "releases/${docs_commit}" ]]
 first_target="$(readlink "${publish_root}/current")"
 
+# Re-publishing must replace the current symlink itself, including on macOS
+# where mv without -h follows a destination symlink to a directory.
+git -C "${source_root}/hushine-docs" -c user.name='Hushine Docs Test' \
+  -c user.email='docs-test@invalid' commit --allow-empty -m 'second release' >/dev/null
+second_commit="$(git -C "${source_root}/hushine-docs" rev-parse HEAD)"
+HUSHINE_SOURCE_ROOT="${source_root}" HUSHINE_DOCS_ROOT="${source_root}/hushine-docs" \
+  DOCS_BUILD_ROOT="${build_root}" DOCS_IMAGE_DIGESTS_JSON="${images}" \
+  bash "${BUILDER}" >"${fixture}/second-build.path"
+DOCS_RELEASE_DIR="${build_root}/${second_commit}" DOCS_PUBLISH_ROOT="${publish_root}" \
+  bash "${PUBLISHER}"
+if [[ "$(readlink "${publish_root}/current")" != "releases/${second_commit}" ]]; then
+  echo "publisher did not replace current symlink on second release" >&2
+  exit 1
+fi
+first_target="$(readlink "${publish_root}/current")"
+
 cp "${release}/source-index.json" "${fixture}/source-index.json"
 printf '%s\n' tampered >> "${release}/source-index.json"
 if DOCS_RELEASE_DIR="${release}" DOCS_PUBLISH_ROOT="${publish_root}" \

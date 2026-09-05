@@ -112,5 +112,11 @@ else
 fi
 
 ln -s "releases/${docs_commit}" "${next_link}"
-mv -f -- "${next_link}" "${publish_root}/current"
+python3 - "${next_link}" "${publish_root}/current" <<'PY'
+import os
+import sys
+
+# Replace the symlink, never follow an existing symlink to its release directory.
+os.replace(sys.argv[1], sys.argv[2])
+PY
 printf '%s\n' "${publish_root}/current"
