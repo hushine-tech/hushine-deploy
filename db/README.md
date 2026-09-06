@@ -1,10 +1,14 @@
 # 数据库初始化与所有权
 
-最后核验：2026-08-28。
+最后核验：2026-09-06（新增成交标记价字段的部署说明）。
 
-当前系统只支持从空数据库一次性创建当前 schema。每个 owner 仓库只保留
+当前系统支持从空数据库一次性创建当前 schema。每个 owner 仓库包含
 `0000_create_schema_migrations.sql`（需要 ledger 的服务）和
-`0001_current_schema_baseline.sql`；scraper 只需要 `0001`。这些文件不是旧库升级脚本。
+`0001_current_schema_baseline.sql`；scraper 只需要 `0001`。这些 baseline 文件不是旧库升级脚本。
+order 模块还包含 `0002_add_order_fill_execution_mark.sql`：为当前 baseline 的
+`order_fills` 增加可空 `execution_mark JSONB`，保留已有订单、成交和对账数据。
+空库按顺序执行 baseline 和该迁移；已使用当前 baseline 的本地库只追加执行该迁移，
+不需要删库、重建 volume 或重新初始化钱包。
 
 ## 一次性部署
 
@@ -98,11 +102,13 @@ go test ./internal/storage -count=1
 - 当前 ledger 只记录 `filename` 与 `applied_at`，不声明不存在的 checksum 校验能力
 - `portfolio` 同时具有 Indicator V2 和逐 target leverage 对象
 - `order` 同时具有 Spot exact route、close 和 recovery 对象
+- `order` ledger 另外记录 `0002_add_order_fill_execution_mark.sql`，且 `order_fills.execution_mark`
+  保存每笔成交使用的标记价、交易所采样时间、本地接收时间和来源。历史缺失值保持 NULL，不能用当前价回填。
 - `control_panel` 具有 runtime Session cleanup outbox
 - scraper 动态表按 `{market}_klines_{symbol}_{interval}` 或当前数据类型命名
 - 第二次运行不重建表、不重置 sequence、不修改业务数据
 
-任何“已有旧列则转换”“找不到新表则读取旧表”或旧 migration 文件都不属于当前部署
+除上述针对当前 baseline 的明确增量迁移外，任何“已有旧列则转换”“找不到新表则读取旧表”或旧 migration 文件都不属于当前部署
 流程；需要保留的业务数据必须走单独、显式的数据迁移项目，不能塞回启动路径。
 
 ## 只重建本机 control_panel

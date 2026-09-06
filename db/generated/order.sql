@@ -714,4 +714,9 @@ SELECT create_hypertable(
     if_not_exists => TRUE
 );
 INSERT INTO schema_migrations (filename) VALUES ('0001_current_schema_baseline.sql') ON CONFLICT (filename) DO NOTHING;
+
+-- Source: core-service/internal/order/storage/migrations/0002_add_order_fill_execution_mark.sql
+ALTER TABLE order_fills
+    ADD COLUMN IF NOT EXISTS execution_mark jsonb;
+INSERT INTO schema_migrations (filename) VALUES ('0002_add_order_fill_execution_mark.sql') ON CONFLICT (filename) DO NOTHING;
 COMMIT;

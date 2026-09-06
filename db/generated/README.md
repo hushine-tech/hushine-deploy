@@ -17,6 +17,7 @@ Run `00_create_databases.psql` against the admin database, then run each SQL bun
 
 - `core-service/internal/order/storage/migrations/0000_create_schema_migrations.sql`
 - `core-service/internal/order/storage/migrations/0001_current_schema_baseline.sql`
+- `core-service/internal/order/storage/migrations/0002_add_order_fill_execution_mark.sql`
 
 ### `control_panel.sql`
 

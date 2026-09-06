@@ -1351,6 +1351,10 @@ CREATE TABLE IF NOT EXISTS strategy_session_target_facts (
     leverage_source text NOT NULL,
     previous_leverage integer,
     confirmed_leverage integer NOT NULL,
+    required_margin_mode text NOT NULL,
+    confirmed_margin_mode text NOT NULL,
+    required_position_mode text NOT NULL,
+    confirmed_position_mode text NOT NULL,
     confirmed_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     PRIMARY KEY (session_id, venue_id, market, symbol),
@@ -1368,6 +1372,10 @@ CREATE TABLE IF NOT EXISTS strategy_session_target_facts (
         AND confirmed_leverage > 0
         AND (previous_leverage IS NULL OR previous_leverage > 0)
     ),
+    CONSTRAINT chk_strategy_session_target_facts_required_margin_mode CHECK (required_margin_mode IN ('cross', 'isolated')),
+    CONSTRAINT chk_strategy_session_target_facts_confirmed_margin_mode CHECK (confirmed_margin_mode IN ('cross', 'isolated')),
+    CONSTRAINT chk_strategy_session_target_facts_required_position_mode CHECK (required_position_mode IN ('one_way', 'hedge')),
+    CONSTRAINT chk_strategy_session_target_facts_confirmed_position_mode CHECK (confirmed_position_mode IN ('one_way', 'hedge')),
     CONSTRAINT chk_strategy_session_target_facts_source CHECK (leverage_source IN (
         'order_target', 'strategy_default', 'platform_default'
     ))
